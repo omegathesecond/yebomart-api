@@ -24,7 +24,9 @@ steps:
       - '--port'
       - '8080'
       - '--set-env-vars'
-      - 'NODE_ENV=production'
+      - 'NODE_ENV=production,R2_ACCOUNT_ID=9f15f12d867a59b212ed2ae3cf4615ca,R2_BUCKET_NAME=yebomart-images,R2_PUBLIC_URL=https://pub-9f15f12d867a59b212ed2ae3cf4615ca.r2.dev'
+      - '--set-secrets'
+      - 'DATABASE_URL=yebomart-database-url:latest,JWT_SECRET=yebomart-jwt-secret:latest,GEMINI_API_KEY=gemini-api-key:latest,R2_ACCESS_KEY_ID=yebomart-r2-access-key-id:latest,R2_SECRET_ACCESS_KEY=yebomart-r2-secret-access-key:latest'
 
 images:
   - 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA'
