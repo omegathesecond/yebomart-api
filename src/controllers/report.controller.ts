@@ -100,4 +100,52 @@ export class ReportController {
       ApiResponse.serverError(res, error.message, error);
     }
   }
+
+  /**
+   * Get summary report (today + week + month)
+   */
+  static async getSummary(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const today = await ReportService.getDailyReport(req.user.shopId);
+      const thisWeek = await ReportService.getWeeklyReport(req.user.shopId);
+      
+      // Get this month
+      const monthStart = new Date();
+      monthStart.setDate(1);
+      monthStart.setHours(0, 0, 0, 0);
+      const monthEnd = new Date();
+      
+      const thisMonth = await ReportService.getProductReport(req.user.shopId, {
+        startDate: monthStart,
+        endDate: monthEnd,
+      });
+
+      ApiResponse.success(res, {
+        today: {
+          date: new Date().toISOString().split('T')[0],
+          totalSales: today.totalSales || 0,
+          totalTransactions: today.totalTransactions || 0,
+          averageTransaction: today.averageTransaction || 0,
+          topProducts: today.topProducts || [],
+        },
+        thisWeek: {
+          sales: thisWeek.totalSales || 0,
+          transactions: thisWeek.totalTransactions || 0,
+          growth: thisWeek.growth || 0,
+        },
+        thisMonth: {
+          sales: thisMonth.totalRevenue || 0,
+          transactions: thisMonth.totalQuantity || 0,
+          growth: 0,
+        },
+      });
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
 }

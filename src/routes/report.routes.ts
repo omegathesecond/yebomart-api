@@ -8,6 +8,7 @@ const router = Router();
 router.use(authMiddleware);
 router.use(managerAuth);
 
+router.get('/summary', ReportController.getSummary);
 router.get('/daily', ReportController.getDailyReport);
 router.get('/weekly', ReportController.getWeeklyReport);
 router.get('/products', ReportController.getProductReport);

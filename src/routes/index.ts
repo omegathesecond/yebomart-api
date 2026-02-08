@@ -12,6 +12,7 @@ import expenseRoutes from '@routes/expense.routes';
 import customerRoutes from '@routes/customer.routes';
 import auditRoutes from '@routes/audit.routes';
 import adminRoutes from '@routes/admin.routes';
+import uploadRoutes from '@routes/upload.routes';
 
 const router = Router();
 
@@ -32,6 +33,7 @@ router.use('/stock', stockRoutes);
 
 // Users/Staff
 router.use('/users', userRoutes);
+router.use('/staff', userRoutes); // Alias for frontend
 
 // Reports
 router.use('/reports', reportRoutes);
@@ -53,5 +55,8 @@ router.use('/audit', auditRoutes);
 
 // Admin dashboard
 router.use('/admin', adminRoutes);
+
+// File upload (R2)
+router.use('/upload', uploadRoutes);
 
 export default router;
