@@ -25,7 +25,13 @@ export const updateUserSchema = Joi.object({
   phone: Joi.string().optional().min(7).max(20),
   email: Joi.string().email().optional().lowercase().trim().allow(''),
   password: Joi.string().optional().min(6),
-  pin: Joi.string().optional().length(4).pattern(/^\d+$/).allow(''),
+  pin: Joi.alternatives().try(
+    Joi.string().length(4).pattern(/^\d+$/).messages({
+      'string.length': 'PIN must be exactly 4 digits',
+      'string.pattern.base': 'PIN must be 4 digits only'
+    }),
+    Joi.string().allow('').max(0) // Allow empty string
+  ).optional(),
   role: Joi.string().optional().valid('MANAGER', 'CASHIER'),
   isActive: Joi.boolean().optional(),
   canDiscount: Joi.boolean().optional(),

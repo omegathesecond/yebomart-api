@@ -186,6 +186,11 @@ export class UserService {
     if (data.password) {
       updateData.password = await bcrypt.hash(data.password, SALT_ROUNDS);
     }
+    
+    // Remove empty pin (don't overwrite existing)
+    if (!data.pin) {
+      delete updateData.pin;
+    }
 
     const user = await prisma.user.update({
       where: { id: userId },
