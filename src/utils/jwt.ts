@@ -17,8 +17,8 @@ export interface IDecodedToken extends ITokenPayload {
 
 const JWT_SECRET = process.env.JWT_SECRET || 'yebomart-secret-key';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'yebomart-refresh-secret';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '30d';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '30d';  // Extended for POS use
+const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '90d';
 
 export class JWTUtil {
   static generateAccessToken(payload: ITokenPayload): string {
