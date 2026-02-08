@@ -77,7 +77,7 @@ export const checkProductLimit = async (req: AuthRequest, res: Response, next: N
       return;
     }
 
-    const limits = LicenseService.getTierLimits(shop.tier)!;
+    const limits = LicenseService.getTierLimits(shop.tier) ?? { maxProducts: Infinity, maxUsers: Infinity };
     if (shop._count.products >= limits.maxProducts) {
       ApiResponse.forbidden(res, `Product limit reached (${limits.maxProducts}). Upgrade to add more products.`);
       return;
@@ -112,7 +112,7 @@ export const checkUserLimit = async (req: AuthRequest, res: Response, next: Next
       return;
     }
 
-    const limits = LicenseService.getTierLimits(shop.tier)!;
+    const limits = LicenseService.getTierLimits(shop.tier) ?? { maxProducts: Infinity, maxUsers: Infinity };
     if (shop._count.users >= limits.maxUsers) {
       ApiResponse.forbidden(res, `User limit reached (${limits.maxUsers}). Upgrade to add more staff.`);
       return;
