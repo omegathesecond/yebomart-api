@@ -2,10 +2,10 @@ import rateLimit from 'express-rate-limit';
 import { AuthRequest } from './auth.middleware';
 import { prisma } from '@config/prisma';
 
-// Standard rate limiter
+// Standard rate limiter - very high for supermarket operations
 export const standardLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per window
+  max: 10000, // 10000 requests per window
   message: {
     success: false,
     message: 'Too many requests, please try again later',
@@ -14,10 +14,10 @@ export const standardLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Auth endpoints - stricter
+// Auth endpoints - reasonable limit
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10, // 10 attempts per 15 minutes
+  max: 100, // 100 attempts per 15 minutes
   message: {
     success: false,
     message: 'Too many login attempts, please try again later',
@@ -29,7 +29,7 @@ export const aiLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: async (req) => {
     const authReq = req as AuthRequest;
-    if (!authReq.user) return 10; // Unauthenticated
+    if (!authReq.user) return 50; // Unauthenticated
 
     try {
       const shop = await prisma.shop.findUnique({
@@ -38,15 +38,17 @@ export const aiLimiter = rateLimit({
       });
 
       switch (shop?.tier) {
+        case 'ENTERPRISE':
+          return 10000; // Unlimited for enterprise
         case 'BUSINESS':
-          return 500; // 500 per hour
+          return 5000; // 5000 per hour
         case 'PRO':
-          return 100; // 100 per hour
+          return 1000; // 1000 per hour
         default:
-          return 20; // Free tier: 20 per hour
+          return 100; // Free tier: 100 per hour
       }
     } catch {
-      return 20;
+      return 100;
     }
   },
   message: {
@@ -55,10 +57,10 @@ export const aiLimiter = rateLimit({
   },
 });
 
-// POS endpoints - lenient but still limited
+// POS endpoints - very high for busy supermarket
 export const posLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 60, // 60 requests per minute (1 per second average)
+  max: 1000, // 1000 requests per minute
   message: {
     success: false,
     message: 'Too many requests, please slow down',
