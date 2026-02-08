@@ -25,8 +25,8 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package*.json ./
 
 ENV NODE_ENV=production
-ENV PORT=3000
 
-EXPOSE 3000
+# Cloud Run will set PORT dynamically (default 8080)
+EXPOSE 8080
 
 CMD ["npm", "start"]
