@@ -74,7 +74,7 @@ export class LicenseController {
 
       // Check if already has a license
       const status = await LicenseService.getStatus(req.user.shopId);
-      if (status.tier !== 'FREE') {
+      if (status.tier !== 'LITE') {
         ApiResponse.badRequest(res, 'Shop already has an active license');
         return;
       }

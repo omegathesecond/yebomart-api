@@ -61,7 +61,7 @@ export class AdminController {
     try {
       const [totalShops, activeShops, newShopsToday] = await Promise.all([
         prisma.shop.count(),
-        prisma.shop.count({ where: { tier: { not: 'FREE' } } }), // Paid shops
+        prisma.shop.count({ where: { tier: { not: 'LITE' } } }), // Paid shops
         prisma.shop.count({
           where: {
             createdAt: {

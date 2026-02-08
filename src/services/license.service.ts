@@ -173,26 +173,53 @@ export class LicenseService {
    */
   static getTierLimits(tier: ShopTier) {
     switch (tier) {
-      case 'FREE':
+      case 'LITE':
         return {
-          maxProducts: 50,
+          maxProducts: 100,
           maxUsers: 1,
-          aiQueriesPerMonth: 20,
+          maxTransactions: 500,
+          maxStockMoves: 100,
+          aiQueriesPerMonth: 0,
           whatsappReports: false,
           advancedAnalytics: false,
         };
-      case 'PRO':
+      case 'STARTER':
         return {
-          maxProducts: Infinity,
+          maxProducts: 500,
           maxUsers: 3,
-          aiQueriesPerMonth: 500,
-          whatsappReports: true,
+          maxTransactions: 2000,
+          maxStockMoves: 500,
+          aiQueriesPerMonth: 50,
+          whatsappReports: false,
           advancedAnalytics: false,
         };
       case 'BUSINESS':
         return {
+          maxProducts: 2500,
+          maxUsers: 10,
+          maxTransactions: 10000,
+          maxStockMoves: 2500,
+          aiQueriesPerMonth: 200,
+          whatsappReports: true,
+          advancedAnalytics: true,
+        };
+      case 'PRO':
+        return {
+          maxProducts: 10000,
+          maxUsers: 25,
+          maxTransactions: 50000,
+          maxStockMoves: 15000,
+          aiQueriesPerMonth: 1000,
+          whatsappReports: true,
+          advancedAnalytics: true,
+        };
+      case 'ENTERPRISE':
+      default:
+        return {
           maxProducts: Infinity,
           maxUsers: Infinity,
+          maxTransactions: Infinity,
+          maxStockMoves: Infinity,
           aiQueriesPerMonth: Infinity,
           whatsappReports: true,
           advancedAnalytics: true,
@@ -206,12 +233,24 @@ export class LicenseService {
   static getTierFeatures(tier: ShopTier) {
     const features = ['basic_pos', 'stock_tracking', 'basic_reports'];
 
-    if (tier === 'PRO' || tier === 'BUSINESS') {
-      features.push('unlimited_products', 'ai_assistant', 'whatsapp_reports');
+    // STARTER and above
+    if (['STARTER', 'BUSINESS', 'PRO', 'ENTERPRISE'].includes(tier)) {
+      features.push('barcode_scanning', 'low_stock_alerts', 'staff_accounts');
     }
 
-    if (tier === 'BUSINESS') {
-      features.push('multi_user', 'advanced_analytics', 'priority_support', 'custom_branding');
+    // BUSINESS and above
+    if (['BUSINESS', 'PRO', 'ENTERPRISE'].includes(tier)) {
+      features.push('whatsapp_reports', 'advanced_analytics');
+    }
+
+    // PRO and above
+    if (['PRO', 'ENTERPRISE'].includes(tier)) {
+      features.push('ai_assistant', 'multi_location', 'accounting_module');
+    }
+
+    // ENTERPRISE only
+    if (tier === 'ENTERPRISE') {
+      features.push('api_access', 'dedicated_support', 'custom_branding');
     }
 
     return features;
