@@ -49,8 +49,10 @@ export class UserService {
       throw new Error('A user with this phone number already exists');
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
+    // Hash password if provided (staff can use PIN only)
+    const hashedPassword = input.password 
+      ? await bcrypt.hash(input.password, SALT_ROUNDS)
+      : undefined;
 
     const user = await prisma.user.create({
       data: {
