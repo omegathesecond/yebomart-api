@@ -14,6 +14,13 @@ const app: Application = express();
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || [
   'http://localhost:3000',
   'http://localhost:5173',
+  'https://yebomart.com',
+  'https://www.yebomart.com',
+  'https://app.yebomart.com',
+  'https://admin.yebomart.com',
+  'https://yebomart.pages.dev',
+  'https://yebomart-app.pages.dev',
+  'https://yebomart-admin.pages.dev',
 ];
 
 // Security middleware
