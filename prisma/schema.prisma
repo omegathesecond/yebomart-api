@@ -60,9 +60,10 @@ model Shop {
 }
 
 enum ShopTier {
-  FREE      // Up to 50 products, basic POS
-  PRO       // E99/mo - Unlimited products, AI insights, WhatsApp
-  BUSINESS  // E249/mo - Multi-user, advanced analytics
+  FREE       // Up to 50 products, basic POS
+  PRO        // E99/mo - Unlimited products, AI insights, WhatsApp
+  BUSINESS   // E249/mo - Multi-user, advanced analytics
+  ENTERPRISE // E499/mo - Unlimited everything, priority support, custom features
 }
 
 enum ShopStatus {
