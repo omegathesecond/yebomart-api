@@ -1,0 +1,513 @@
+// YeboMart Database Schema
+// Smart Shop Management for Eswatini
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== SHOP & AUTH ====================
+
+model Shop {
+  id            String    @id @default(cuid())
+  name          String
+  ownerName     String
+  ownerPhone    String    @unique // WhatsApp number (E.164 format)
+  ownerEmail    String?
+  password      String    // Hashed password
+  
+  // Business Type (generic for any shop)
+  businessType  String    @default("general") // general, tuckshop, tyre, hardware, grocery, pharmacy, salon, etc.
+  
+  // AI Assistant
+  assistantName String    @default("Yebo")
+  
+  // Business Settings
+  currency      String    @default("SZL")
+  timezone      String    @default("Africa/Mbabane")
+  address       String?
+  logoUrl       String?
+  
+  // License & Subscription
+  tier          ShopTier  @default(FREE)
+  licenseKey    String?   @unique
+  licenseExpiry DateTime?
+  
+  // Usage Tracking (for billing)
+  monthlyTransactions Int  @default(0)
+  monthlyStockMoves   Int  @default(0)
+  lastBillingReset    DateTime @default(now())
+  
+  // Relationships
+  users         User[]
+  products      Product[]
+  sales         Sale[]
+  expenses      Expense[]
+  stockLogs     StockLog[]
+  dailyReports  DailyReport[]
+  syncQueue     SyncQueue[]
+  aiConversations AIConversation[]
+  auditLogs     AuditLog[]
+  customers     Customer[]
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+enum ShopTier {
+  FREE      // Up to 50 products, basic POS
+  PRO       // E99/mo - Unlimited products, AI insights, WhatsApp
+  BUSINESS  // E249/mo - Multi-user, advanced analytics
+}
+
+// ==================== USERS & STAFF ====================
+
+model User {
+  id            String    @id @default(cuid())
+  shopId        String
+  name          String
+  phone         String
+  email         String?
+  password      String    // Hashed
+  pin           String?   // 4-digit PIN for quick auth
+  role          UserRole  @default(CASHIER)
+  isActive      Boolean   @default(true)
+  
+  // Permissions
+  canDiscount   Boolean   @default(false)
+  canVoid       Boolean   @default(false)
+  canViewReports Boolean  @default(false)
+  canManageStock Boolean  @default(false)
+  
+  // Session
+  refreshToken  String?
+  lastLoginAt   DateTime?
+  
+  // Relationships
+  shop          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sales         Sale[]
+  stockLogs     StockLog[]
+  auditLogs     AuditLog[]
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@unique([shopId, phone])
+}
+
+enum UserRole {
+  OWNER
+  MANAGER
+  CASHIER
+}
+
+// ==================== PRODUCTS & INVENTORY ====================
+
+model Product {
+  id          String   @id @default(cuid())
+  shopId      String
+  barcode     String?
+  sku         String?  // Internal SKU
+  name        String
+  description String?
+  category    String?
+  
+  // Pricing
+  costPrice   Float
+  sellPrice   Float
+  
+  // Stock
+  quantity    Int      @default(0)
+  reorderAt   Int      @default(10)  // Low stock threshold
+  unit        String   @default("each") // each, kg, litre, pack
+  
+  // Flags
+  isActive    Boolean  @default(true)
+  trackStock  Boolean  @default(true)
+  
+  // Image
+  imageUrl    String?
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  saleItems   SaleItem[]
+  stockLogs   StockLog[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Offline sync
+  localId     String?  // Client-side ID for sync
+  syncedAt    DateTime?
+  
+  @@unique([shopId, barcode])
+  @@index([shopId, name])
+  @@index([shopId, category])
+}
+
+// ==================== SALES & TRANSACTIONS ====================
+
+model Sale {
+  id            String   @id @default(cuid())
+  shopId        String
+  userId        String?  // Cashier who made the sale
+  customerId    String?  // Customer if credit sale
+  
+  // Totals
+  subtotal      Float
+  discount      Float    @default(0)
+  tax           Float    @default(0)
+  totalAmount   Float
+  
+  // Payment
+  paymentMethod PaymentMethod
+  amountPaid    Float
+  change        Float    @default(0)
+  
+  // Status
+  status        SaleStatus @default(COMPLETED)
+  voidReason    String?
+  
+  // Receipt
+  receiptNumber String?
+  
+  // Relationships
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user          User?    @relation(fields: [userId], references: [id])
+  customer      Customer? @relation("CustomerSales", fields: [customerId], references: [id])
+  items         SaleItem[]
+  creditEntries CustomerCredit[]
+  
+  createdAt     DateTime @default(now())
+  
+  // Offline sync
+  localId       String?  // Client-side ID for sync
+  offlineAt     DateTime? // When created offline
+  syncedAt      DateTime?
+  
+  @@index([shopId, createdAt])
+  @@index([shopId, status])
+  @@index([customerId])
+}
+
+enum PaymentMethod {
+  CASH
+  MOMO       // MTN Mobile Money
+  EMALI      // Eswatini Mobile Money
+  CARD
+  MIXED
+  CREDIT     // Store credit / pay later
+}
+
+enum SaleStatus {
+  PENDING
+  COMPLETED
+  VOIDED
+  REFUNDED
+}
+
+model SaleItem {
+  id          String   @id @default(cuid())
+  saleId      String
+  productId   String
+  
+  // At time of sale (snapshot)
+  productName String
+  quantity    Int
+  unitPrice   Float
+  costPrice   Float    // For profit calculation
+  discount    Float    @default(0)
+  totalPrice  Float
+  
+  // Relationships
+  sale        Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id])
+  
+  @@index([saleId])
+}
+
+// ==================== STOCK MANAGEMENT ====================
+
+model StockLog {
+  id          String    @id @default(cuid())
+  shopId      String
+  productId   String
+  userId      String?   // Who made the change
+  
+  type        StockLogType
+  quantity    Int       // positive = add, negative = remove
+  
+  // Previous values (for audit)
+  previousQty Int
+  newQty      Int
+  
+  note        String?
+  reference   String?   // e.g., sale ID, PO number
+  
+  // Relationships
+  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user        User?     @relation(fields: [userId], references: [id])
+  
+  createdAt   DateTime  @default(now())
+  
+  // Offline sync
+  localId     String?
+  syncedAt    DateTime?
+  
+  @@index([shopId, createdAt])
+  @@index([productId, createdAt])
+}
+
+enum StockLogType {
+  SALE        // Sold
+  RESTOCK     // Received new stock
+  ADJUSTMENT  // Manual adjustment
+  DAMAGED     // Written off
+  EXPIRED     // Expired goods
+  TRANSFER    // Moved between locations
+  RETURN      // Customer return
+  INITIAL     // Initial stock count
+}
+
+// ==================== EXPENSES ====================
+
+model Expense {
+  id          String   @id @default(cuid())
+  shopId      String
+  userId      String?  // Who logged it
+  
+  category    ExpenseCategory
+  amount      Float
+  description String?
+  date        DateTime
+  
+  // Receipt
+  receiptUrl  String?
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([shopId, date])
+}
+
+enum ExpenseCategory {
+  RENT
+  UTILITIES
+  SUPPLIES
+  WAGES
+  TRANSPORT
+  MARKETING
+  REPAIRS
+  OTHER
+}
+
+// ==================== REPORTS ====================
+
+model DailyReport {
+  id              String   @id @default(cuid())
+  shopId          String
+  date            DateTime @db.Date
+  
+  // Sales Summary
+  totalSales      Float
+  totalTransactions Int
+  averageBasket   Float
+  
+  // Costs & Profit
+  totalCost       Float
+  grossProfit     Float
+  totalExpenses   Float
+  netProfit       Float
+  
+  // Payment Breakdown
+  cashSales       Float    @default(0)
+  momoSales       Float    @default(0)
+  emaliSales      Float    @default(0)
+  cardSales       Float    @default(0)
+  
+  // Top Products (JSON array)
+  topProducts     Json     // [{id, name, quantity, revenue}]
+  
+  // Stock Alerts (JSON array)
+  lowStock        Json     // [{id, name, quantity, reorderAt}]
+  
+  // AI Generated
+  aiInsight       String?
+  
+  // WhatsApp
+  sentViaWhatsApp Boolean  @default(false)
+  sentAt          DateTime?
+  
+  // Relationships
+  shop            Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  
+  @@unique([shopId, date])
+  @@index([shopId, date])
+}
+
+// ==================== AI ASSISTANT ====================
+
+model AIConversation {
+  id          String   @id @default(cuid())
+  shopId      String
+  
+  // Conversation
+  userMessage String
+  aiResponse  String
+  
+  // Type
+  type        AIQueryType @default(TEXT)
+  
+  // For voice
+  audioUrl    String?
+  
+  // Context used
+  context     Json?    // Products, sales data used
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([shopId, createdAt])
+}
+
+enum AIQueryType {
+  TEXT
+  VOICE
+  INSIGHT
+}
+
+// ==================== OFFLINE SYNC ====================
+
+model SyncQueue {
+  id          String   @id @default(cuid())
+  shopId      String
+  
+  // Operation
+  entityType  String   // product, sale, stockLog
+  entityId    String   // Local ID
+  operation   SyncOperation
+  data        Json     // Full entity data
+  
+  // Status
+  status      SyncStatus @default(PENDING)
+  attempts    Int      @default(0)
+  error       String?
+  
+  // Timestamps
+  queuedAt    DateTime @default(now())
+  processedAt DateTime?
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  
+  @@index([shopId, status])
+}
+
+enum SyncOperation {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum SyncStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CONFLICT
+}
+
+// ==================== AUDIT LOG ====================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  shopId      String
+  userId      String
+  
+  action      String   // LOGIN, PRODUCT_CREATE, SALE_VOID, etc.
+  entityType  String   // product, sale, user, etc.
+  entityId    String?
+  details     Json?    // Additional context
+  ipAddress   String?
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([shopId, createdAt])
+  @@index([userId, createdAt])
+  @@index([action])
+}
+
+// ==================== CUSTOMER CREDIT ====================
+
+model Customer {
+  id          String   @id @default(cuid())
+  shopId      String
+  
+  name        String
+  phone       String?
+  email       String?
+  address     String?
+  
+  // Credit
+  creditLimit Float    @default(0)
+  balance     Float    @default(0)  // Positive = they owe us
+  
+  isActive    Boolean  @default(true)
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  credits     CustomerCredit[]
+  sales       Sale[]   @relation("CustomerSales")
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@unique([shopId, phone])
+  @@index([shopId, name])
+}
+
+model CustomerCredit {
+  id          String   @id @default(cuid())
+  shopId      String
+  customerId  String
+  
+  type        CreditType
+  amount      Float
+  saleId      String?  // If credit was from a sale
+  note        String?
+  
+  // Who processed it
+  userId      String?
+  
+  // Relationships
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sale        Sale?    @relation(fields: [saleId], references: [id])
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([customerId, createdAt])
+  @@index([shopId, createdAt])
+}
+
+enum CreditType {
+  PURCHASE    // Customer bought on credit
+  PAYMENT     // Customer paid down balance
+  ADJUSTMENT  // Manual adjustment
+  REFUND      // Refund added to credit
+}
