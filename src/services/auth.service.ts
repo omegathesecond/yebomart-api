@@ -139,13 +139,26 @@ export class AuthService {
   }
 
   /**
-   * Login as staff user with PIN
+   * Login as staff user with phone + PIN
    */
-  static async loginUser(shopId: string, phone: string, pin: string): Promise<LoginResult> {
+  static async loginUser(phone: string, pin: string): Promise<LoginResult> {
+    // Normalize phone
+    let normalizedPhone = phone.replace(/\D/g, '');
+    if (normalizedPhone.startsWith('0')) {
+      normalizedPhone = '268' + normalizedPhone.slice(1);
+    }
+    if (!normalizedPhone.startsWith('268')) {
+      normalizedPhone = '268' + normalizedPhone;
+    }
+    normalizedPhone = '+' + normalizedPhone;
+
+    // Find user by phone
     const user = await prisma.user.findFirst({
       where: {
-        shopId,
-        phone,
+        OR: [
+          { phone: normalizedPhone },
+          { phone: phone }, // Try original format too
+        ],
         isActive: true,
       },
       include: {
@@ -154,11 +167,11 @@ export class AuthService {
     });
 
     if (!user || !user.pin) {
-      throw new Error('Invalid credentials');
+      throw new Error('Invalid phone or PIN');
     }
 
     if (user.pin !== pin) {
-      throw new Error('Invalid PIN');
+      throw new Error('Invalid phone or PIN');
     }
 
     // Update last login

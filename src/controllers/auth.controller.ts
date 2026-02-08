@@ -22,7 +22,6 @@ export const loginSchema = Joi.object({
 });
 
 export const userLoginSchema = Joi.object({
-  shopId: Joi.string().required(),
   phone: Joi.string().required(),
   pin: Joi.string().required().length(4),
 });
@@ -66,9 +65,9 @@ export class AuthController {
    */
   static async userLogin(req: Request, res: Response): Promise<void> {
     try {
-      const { shopId, phone, pin } = req.body;
-      const result = await AuthService.loginUser(shopId, phone, pin);
-      ApiResponse.success(res, result, 'Login successful');
+      const { phone, pin } = req.body;
+      const result = await AuthService.loginUser(phone, pin);
+      ApiResponse.success(res, result, 'Staff login successful');
     } catch (error: any) {
       ApiResponse.unauthorized(res, error.message);
     }
