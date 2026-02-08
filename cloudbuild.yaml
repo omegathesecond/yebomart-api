@@ -21,8 +21,10 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
+      - '--port'
+      - '8080'
       - '--set-env-vars'
-      - 'NODE_ENV=production'
+      - 'NODE_ENV=production,PORT=8080'
 
 images:
   - 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA'
