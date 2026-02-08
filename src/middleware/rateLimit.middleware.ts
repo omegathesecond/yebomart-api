@@ -40,12 +40,14 @@ export const aiLimiter = rateLimit({
       switch (shop?.tier) {
         case 'ENTERPRISE':
           return 10000; // Unlimited for enterprise
-        case 'BUSINESS':
-          return 5000; // 5000 per hour
         case 'PRO':
-          return 1000; // 1000 per hour
+          return 5000; // 5000 per hour
+        case 'BUSINESS':
+          return 2000; // 2000 per hour
+        case 'STARTER':
+          return 500; // 500 per hour
         default:
-          return 100; // Free tier: 100 per hour
+          return 100; // LITE tier: 100 per hour
       }
     } catch {
       return 100;

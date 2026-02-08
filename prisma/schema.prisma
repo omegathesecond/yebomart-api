@@ -33,7 +33,7 @@ model Shop {
   logoUrl       String?
   
   // License & Subscription
-  tier          ShopTier  @default(FREE)
+  tier          ShopTier  @default(LITE)
   status        ShopStatus @default(ACTIVE)
   licenseKey    String?   @unique
   licenseExpiry DateTime?
@@ -60,10 +60,11 @@ model Shop {
 }
 
 enum ShopTier {
-  FREE       // Up to 50 products, basic POS
-  PRO        // E99/mo - Unlimited products, AI insights, WhatsApp
-  BUSINESS   // E249/mo - Multi-user, advanced analytics
-  ENTERPRISE // E499/mo - Unlimited everything, priority support, custom features
+  LITE       // E499/mo - POS, Stock, Basic Reports
+  STARTER    // E1499/mo - + Barcode, Alerts, Staff
+  BUSINESS   // E3999/mo - + WhatsApp Reports, Advanced Reports
+  PRO        // E7999/mo - + AI Assistant, Multi-Location, Accounting
+  ENTERPRISE // E15999/mo - + API Access, Dedicated Support
 }
 
 enum ShopStatus {
