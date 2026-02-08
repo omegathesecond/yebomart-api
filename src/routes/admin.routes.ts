@@ -14,6 +14,8 @@ router.use(authenticateAdmin);
 router.get('/dashboard', AdminController.getDashboard);
 router.get('/shops', AdminController.getShops);
 router.get('/shops/:id', AdminController.getShop);
+router.patch('/shops/:id/status', AdminController.updateShopStatus);
+router.delete('/shops/:id', AdminController.deleteShop);
 router.put('/subscriptions/:id', AdminController.updateSubscription);
 router.get('/users', AdminController.getUsers);
 router.get('/subscriptions', AdminController.getSubscriptions);

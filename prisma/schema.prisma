@@ -34,6 +34,7 @@ model Shop {
   
   // License & Subscription
   tier          ShopTier  @default(FREE)
+  status        ShopStatus @default(ACTIVE)
   licenseKey    String?   @unique
   licenseExpiry DateTime?
   
@@ -62,6 +63,11 @@ enum ShopTier {
   FREE      // Up to 50 products, basic POS
   PRO       // E99/mo - Unlimited products, AI insights, WhatsApp
   BUSINESS  // E249/mo - Multi-user, advanced analytics
+}
+
+enum ShopStatus {
+  ACTIVE
+  SUSPENDED
 }
 
 // ==================== USERS & STAFF ====================

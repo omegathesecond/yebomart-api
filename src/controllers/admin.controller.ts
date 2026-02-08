@@ -170,6 +170,64 @@ export class AdminController {
     }
   }
 
+  // Suspend or reactivate shop
+  static async updateShopStatus(req: Request, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const statusUpper = status?.toUpperCase();
+      if (!['ACTIVE', 'SUSPENDED'].includes(statusUpper)) {
+        ApiResponse.badRequest(res, 'Invalid status. Must be "active" or "suspended"');
+        return;
+      }
+
+      const shop = await prisma.shop.update({
+        where: { id },
+        data: { status: statusUpper },
+      });
+
+      ApiResponse.success(res, shop, `Shop ${statusUpper === 'SUSPENDED' ? 'suspended' : 'reactivated'}`);
+    } catch (error) {
+      console.error('Update shop status error:', error);
+      ApiResponse.error(res, 'Failed to update shop status');
+    }
+  }
+
+  // Delete shop and all related data
+  static async deleteShop(req: Request, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+
+      // Delete in order due to foreign key constraints
+      await prisma.$transaction(async (tx) => {
+        // Delete sale items first
+        await tx.saleItem.deleteMany({
+          where: { sale: { shopId: id } },
+        });
+        // Delete sales
+        await tx.sale.deleteMany({ where: { shopId: id } });
+        // Delete stock logs
+        await tx.stockLog.deleteMany({ where: { shopId: id } });
+        // Delete products
+        await tx.product.deleteMany({ where: { shopId: id } });
+        // Delete users
+        await tx.user.deleteMany({ where: { shopId: id } });
+        // Delete expenses
+        await tx.expense.deleteMany({ where: { shopId: id } });
+        // Delete customers
+        await tx.customer.deleteMany({ where: { shopId: id } });
+        // Finally delete the shop
+        await tx.shop.delete({ where: { id } });
+      });
+
+      ApiResponse.success(res, null, 'Shop deleted successfully');
+    } catch (error) {
+      console.error('Delete shop error:', error);
+      ApiResponse.error(res, 'Failed to delete shop');
+    }
+  }
+
   // List all users across shops
   static async getUsers(req: Request, res: Response): Promise<void> {
     try {
