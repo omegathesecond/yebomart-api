@@ -128,19 +128,19 @@ export class ReportController {
       ApiResponse.success(res, {
         today: {
           date: new Date().toISOString().split('T')[0],
-          totalSales: today.totalSales || 0,
-          totalTransactions: today.totalTransactions || 0,
-          averageTransaction: today.averageTransaction || 0,
+          totalSales: today.summary?.totalSales || 0,
+          totalTransactions: today.summary?.totalTransactions || 0,
+          averageTransaction: today.summary?.averageBasket || 0,
           topProducts: today.topProducts || [],
         },
         thisWeek: {
-          sales: thisWeek.totalSales || 0,
-          transactions: thisWeek.totalTransactions || 0,
-          growth: thisWeek.growth || 0,
+          sales: thisWeek.summary?.totalSales || 0,
+          transactions: thisWeek.summary?.totalTransactions || 0,
+          growth: 0,
         },
         thisMonth: {
-          sales: thisMonth.totalRevenue || 0,
-          transactions: thisMonth.totalQuantity || 0,
+          sales: thisMonth.products?.reduce((sum: number, p: any) => sum + p.revenue, 0) || 0,
+          transactions: thisMonth.products?.reduce((sum: number, p: any) => sum + p.quantitySold, 0) || 0,
           growth: 0,
         },
       });
