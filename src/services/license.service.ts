@@ -107,7 +107,7 @@ export class LicenseService {
       : null;
 
     // Tier limits
-    const limits = this.getTierLimits(shop.tier);
+    const limits = this.getTierLimits(shop.tier)!;
     const isWithinLimits = shop._count.products <= limits.maxProducts;
 
     return {
