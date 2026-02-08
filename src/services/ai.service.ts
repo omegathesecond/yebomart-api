@@ -51,7 +51,7 @@ export class AIService {
     }
 
     const context = await this.getShopContext(input.shopId);
-    const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
     const systemPrompt = `You are ${context.shop?.assistantName || 'Yebo'}, a friendly AI assistant for ${context.shop?.name || 'the shop'}. 
 You help ${context.shop?.ownerName || 'the shop owner'} manage their business.
@@ -162,7 +162,7 @@ Instructions:
       _count: true,
     });
 
-    const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
     const prompt = `Generate 3-5 brief, actionable business insights for a shop based on this data:
 
