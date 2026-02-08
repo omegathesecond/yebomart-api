@@ -107,7 +107,15 @@ export class LicenseService {
       : null;
 
     // Tier limits
-    const limits = this.getTierLimits(shop.tier)!;
+    const limits = this.getTierLimits(shop.tier) ?? {
+      maxProducts: Infinity,
+      maxUsers: Infinity,
+      maxTransactions: Infinity,
+      maxStockMoves: Infinity,
+      aiQueriesPerMonth: Infinity,
+      whatsappReports: true,
+      advancedAnalytics: true,
+    };
     const isWithinLimits = shop._count.products <= limits.maxProducts;
 
     return {
