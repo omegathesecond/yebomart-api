@@ -90,8 +90,18 @@ export class AuthService {
    * Login with phone + password (shop owner)
    */
   static async loginShop(phone: string, password: string): Promise<LoginResult> {
+    // Normalize phone to E.164 format
+    let normalizedPhone = phone.replace(/\D/g, '');
+    if (normalizedPhone.startsWith('0')) {
+      normalizedPhone = '268' + normalizedPhone.slice(1);
+    }
+    if (!normalizedPhone.startsWith('268')) {
+      normalizedPhone = '268' + normalizedPhone;
+    }
+    normalizedPhone = '+' + normalizedPhone;
+
     const shop = await prisma.shop.findUnique({
-      where: { ownerPhone: phone },
+      where: { ownerPhone: normalizedPhone },
     });
 
     if (!shop) {
