@@ -6,7 +6,7 @@ import { AuthRequest } from '@middleware/auth.middleware';
 
 export const createUserSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
-  phone: Joi.string().required().pattern(/^\+[1-9]\d{1,14}$/),
+  phone: Joi.string().required().min(7).max(20), // Allow any phone format
   email: Joi.string().email().optional().lowercase().trim(),
   password: Joi.string().required().min(6),
   pin: Joi.string().optional().length(4).pattern(/^\d+$/),
@@ -19,7 +19,7 @@ export const createUserSchema = Joi.object({
 
 export const updateUserSchema = Joi.object({
   name: Joi.string().optional().trim().min(2).max(100),
-  phone: Joi.string().optional().pattern(/^\+[1-9]\d{1,14}$/),
+  phone: Joi.string().optional().min(7).max(20),
   email: Joi.string().email().optional().lowercase().trim().allow(''),
   password: Joi.string().optional().min(6),
   pin: Joi.string().optional().length(4).pattern(/^\d+$/).allow(''),
