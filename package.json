@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "nodemon --exec ts-node -r tsconfig-paths/register src/server.ts",
-    "build": "npx prisma generate && tsc && tsc-alias",
+    "build": "tsc && tsc-alias",
     "start": "node dist/server.js",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write \"src/**/*.ts\"",
