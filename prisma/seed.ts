@@ -6,12 +6,13 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱 Seeding database...');
 
-  // Create default admin user
-  const adminPassword = await bcrypt.hash('admin123', 12);
+  // Default admin password
+  const adminPassword = await bcrypt.hash('Toredo3108084$', 12);
   
+  // Create default admin user
   const admin = await prisma.admin.upsert({
     where: { email: 'admin@yebomart.com' },
-    update: {},
+    update: { password: adminPassword },
     create: {
       email: 'admin@yebomart.com',
       password: adminPassword,
@@ -20,23 +21,21 @@ async function main() {
       isActive: true,
     },
   });
-  console.log('✅ Created admin:', admin.email);
+  console.log('✅ Admin:', admin.email);
 
   // Create Laslie's admin account
-  const lasliePassword = await bcrypt.hash('omevision2024', 12);
-  
   const laslie = await prisma.admin.upsert({
     where: { email: 'laslie@omevision.com' },
-    update: {},
+    update: { password: adminPassword },
     create: {
       email: 'laslie@omevision.com',
-      password: lasliePassword,
+      password: adminPassword,
       name: 'Laslie Georges Jr.',
       role: 'SUPER_ADMIN',
       isActive: true,
     },
   });
-  console.log('✅ Created admin:', laslie.email);
+  console.log('✅ Admin:', laslie.email);
 
   console.log('🌱 Seeding complete!');
 }
