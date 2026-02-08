@@ -80,7 +80,7 @@ model User {
   name          String
   phone         String
   email         String?
-  password      String    // Hashed
+  password      String?   // Hashed (optional - staff can use PIN only)
   pin           String?   // 4-digit PIN for quick auth
   role          UserRole  @default(CASHIER)
   isActive      Boolean   @default(true)
