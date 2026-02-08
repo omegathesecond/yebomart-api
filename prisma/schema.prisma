@@ -126,9 +126,11 @@ model Product {
   
   // Pricing
   costPrice   Float
-  sellPrice   Float
+  sellPrice   Float    // Unit price (single item)
+  packPrice   Float?   // Pack price (discount when buying whole pack)
+  packSize    Int?     // Number of units per pack (e.g., 6 for 6-pack)
   
-  // Stock
+  // Stock (always in single units)
   quantity    Int      @default(0)
   reorderAt   Int      @default(10)  // Low stock threshold
   unit        String   @default("each") // each, kg, litre, pack
