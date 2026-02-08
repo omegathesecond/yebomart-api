@@ -8,8 +8,11 @@ export const createUserSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
   phone: Joi.string().required().min(7).max(20), // Allow any phone format
   email: Joi.string().email().optional().lowercase().trim(),
-  password: Joi.string().required().min(6),
-  pin: Joi.string().optional().length(4).pattern(/^\d+$/),
+  password: Joi.string().optional().min(4), // Optional - staff can use PIN instead
+  pin: Joi.string().required().length(4).pattern(/^\d+$/).messages({
+    'string.length': 'PIN must be exactly 4 digits',
+    'string.pattern.base': 'PIN must be 4 digits only'
+  }),
   role: Joi.string().required().valid('MANAGER', 'CASHIER'),
   canDiscount: Joi.boolean().optional().default(false),
   canVoid: Joi.boolean().optional().default(false),
