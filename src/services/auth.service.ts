@@ -223,7 +223,11 @@ export class AuthService {
   /**
    * Get current user/shop info
    */
-  static async getMe(userId: string, type: 'shop' | 'user') {
+  static async getMe(userId: string, type: 'shop' | 'user' | 'admin') {
+    if (type === 'admin') {
+      // Admin users are handled separately
+      return { admin: true };
+    }
     if (type === 'shop') {
       const shop = await prisma.shop.findUnique({
         where: { id: userId },

@@ -7,7 +7,7 @@ export interface ITokenPayload {
   phone?: string;
   email?: string;
   role: UserRole;
-  type: 'shop' | 'user';
+  type: 'shop' | 'user' | 'admin';
 }
 
 export interface IDecodedToken extends ITokenPayload {

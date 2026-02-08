@@ -91,3 +91,36 @@ export const optionalAuth = (req: AuthRequest, res: Response, next: NextFunction
     next();
   }
 };
+
+/**
+ * Admin authentication middleware
+ */
+export const authenticateAdmin = (req: AuthRequest, res: Response, next: NextFunction): void => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      ApiResponse.unauthorized(res, 'No token provided');
+      return;
+    }
+
+    const token = authHeader.substring(7);
+    const decoded = JWTUtil.verifyAccessToken(token);
+
+    if (!decoded) {
+      ApiResponse.unauthorized(res, 'Invalid or expired token');
+      return;
+    }
+
+    // Check if it's an admin token
+    if (decoded.type !== 'admin') {
+      ApiResponse.forbidden(res, 'Admin access required');
+      return;
+    }
+
+    req.user = decoded;
+    next();
+  } catch (error) {
+    ApiResponse.unauthorized(res, 'Authentication failed');
+  }
+};

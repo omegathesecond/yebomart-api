@@ -511,3 +511,21 @@ enum CreditType {
   ADJUSTMENT  // Manual adjustment
   REFUND      // Refund added to credit
 }
+
+// Admin users for the admin dashboard
+model Admin {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String   // Hashed
+  name      String
+  role      AdminRole @default(ADMIN)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  SUPPORT
+}

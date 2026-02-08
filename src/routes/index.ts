@@ -11,6 +11,7 @@ import licenseRoutes from '@routes/license.routes';
 import expenseRoutes from '@routes/expense.routes';
 import customerRoutes from '@routes/customer.routes';
 import auditRoutes from '@routes/audit.routes';
+import adminRoutes from '@routes/admin.routes';
 
 const router = Router();
 
@@ -49,5 +50,8 @@ router.use('/customers', customerRoutes);
 
 // Audit logs
 router.use('/audit', auditRoutes);
+
+// Admin dashboard
+router.use('/admin', adminRoutes);
 
 export default router;
