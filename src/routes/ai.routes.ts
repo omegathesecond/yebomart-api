@@ -19,5 +19,7 @@ router.use(authMiddleware);
 router.post('/chat', requireFeature('ai_assistant'), aiLimiter, validateRequest(chatSchema), AIController.chat);
 router.post('/voice', requireFeature('ai_assistant'), aiLimiter, validateRequest(voiceSchema), AIController.voice);
 router.get('/insights', aiLimiter, AIController.getInsights);
+router.get('/slow-movers', aiLimiter, AIController.getSlowMovers);
+router.get('/summary', aiLimiter, AIController.getSummary);
 
 export default router;

@@ -77,4 +77,38 @@ export class AIController {
       ApiResponse.serverError(res, error.message, error);
     }
   }
+
+  /**
+   * Get slow-moving products analysis
+   */
+  static async getSlowMovers(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const analysis = await AIService.getSlowMovers(req.user.shopId);
+      ApiResponse.success(res, analysis);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * Get business summary with actions
+   */
+  static async getSummary(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const summary = await AIService.getBusinessSummary(req.user.shopId);
+      ApiResponse.success(res, summary);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
 }
