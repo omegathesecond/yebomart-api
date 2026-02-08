@@ -18,10 +18,10 @@ export class AIService {
   private static genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
   /**
-   * Get shop context for AI
+   * Get comprehensive shop context for AI
    */
   private static async getShopContext(shopId: string) {
-    const [shop, dailySummary, lowStock] = await Promise.all([
+    const [shop, dailySummary, lowStock, recentSales, allProducts] = await Promise.all([
       prisma.shop.findUnique({
         where: { id: shopId },
         select: {
@@ -33,12 +33,27 @@ export class AIService {
       }),
       SaleService.getDailySummary(shopId),
       StockService.getLowStockAlerts(shopId),
+      prisma.sale.findMany({
+        where: { shopId, status: 'COMPLETED' },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        include: {
+          items: { select: { productName: true, quantity: true, totalPrice: true } }
+        }
+      }),
+      prisma.product.findMany({
+        where: { shopId, isActive: true },
+        select: { name: true, quantity: true, sellPrice: true, category: true },
+        take: 50
+      })
     ]);
 
     return {
       shop,
       todaySales: dailySummary,
       lowStockAlerts: lowStock,
+      recentSales,
+      allProducts,
     };
   }
 
@@ -53,28 +68,68 @@ export class AIService {
     const context = await this.getShopContext(input.shopId);
     const model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    const systemPrompt = `You are ${context.shop?.assistantName || 'Yebo'}, a friendly AI assistant for ${context.shop?.name || 'the shop'}. 
-You help ${context.shop?.ownerName || 'the shop owner'} manage their business.
+    // Build detailed low stock list
+    const allLowStock = [
+      ...context.lowStockAlerts.items.critical,
+      ...context.lowStockAlerts.items.low,
+      ...context.lowStockAlerts.items.warning,
+    ];
 
-Current shop data:
-- Currency: ${context.shop?.currency || 'SZL'}
-- Today's sales: ${context.todaySales.totalSales} (${context.todaySales.totalTransactions} transactions)
-- Average basket: ${context.todaySales.averageBasket}
-- Low stock items: ${context.lowStockAlerts.total} products need attention
+    const lowStockList = allLowStock.length > 0
+      ? allLowStock.map(p => {
+          const status = p.quantity === 0 ? '🔴 OUT OF STOCK' : p.quantity <= 2 ? '🟠 CRITICAL' : '🟡 LOW';
+          return `- ${p.name}: ${p.quantity} ${p.unit || 'units'} left (reorder at ${p.reorderAt}) ${status}`;
+        }).join('\n')
+      : 'All products are well stocked! ✅';
 
-Top products today:
-${context.todaySales.topProducts.slice(0, 5).map((p, i) => `${i + 1}. ${p.name}: ${p.quantity} sold`).join('\n')}
+    // Build recent sales summary
+    const recentSalesList = context.recentSales.length > 0
+      ? context.recentSales.slice(0, 5).map((s, i) => {
+          const items = s.items.map(item => `${item.productName} x${item.quantity}`).join(', ');
+          return `${i + 1}. E${s.totalAmount.toFixed(2)} - ${items}`;
+        }).join('\n')
+      : 'No recent sales yet';
 
-Critical stock (out of stock):
-${context.lowStockAlerts.items.critical.slice(0, 5).map(p => `- ${p.name}: ${p.quantity} left`).join('\n') || 'None'}
+    // Build product inventory snapshot
+    const inventorySnapshot = context.allProducts.slice(0, 20).map(p => 
+      `- ${p.name}: ${p.quantity} in stock @ E${p.sellPrice}`
+    ).join('\n');
 
-Instructions:
-- Be helpful, concise, and friendly
-- Use the shop's currency (${context.shop?.currency || 'SZL'}) for money amounts
-- If asked about specific products or sales, provide the data you have
-- If you don't have specific data, say so honestly
-- Keep responses under 200 words unless more detail is needed
-- Use emojis sparingly for a friendly tone`;
+    const systemPrompt = `You are ${context.shop?.assistantName || 'Yebo'}, a smart and friendly AI shop assistant for "${context.shop?.name || 'the shop'}".
+
+👤 OWNER: ${context.shop?.ownerName || 'Boss'}
+💰 CURRENCY: ${context.shop?.currency || 'SZL'} (Eswatini Lilangeni, symbol: E)
+
+📊 TODAY'S PERFORMANCE:
+- Total Sales: E${context.todaySales.totalSales.toFixed(2)}
+- Transactions: ${context.todaySales.totalTransactions}
+- Average Basket: E${context.todaySales.averageBasket.toFixed(2)}
+
+🏆 TOP SELLERS TODAY:
+${context.todaySales.topProducts.length > 0 
+  ? context.todaySales.topProducts.slice(0, 5).map((p, i) => `${i + 1}. ${p.name}: ${p.quantity} sold (E${p.revenue.toFixed(2)})`).join('\n')
+  : 'No sales yet today'}
+
+⚠️ LOW STOCK ALERT (${context.lowStockAlerts.total} items need attention):
+${lowStockList}
+
+🛒 RECENT SALES:
+${recentSalesList}
+
+📦 INVENTORY SNAPSHOT:
+${inventorySnapshot}
+
+YOUR PERSONALITY:
+- Be warm, helpful, and proactive like a real shop assistant
+- Use specific product names and numbers from the data above
+- When asked about stock, list the ACTUAL product names and quantities
+- Give actionable advice (e.g., "You should reorder Milk 1L today - you're completely out!")
+- Use emojis naturally to be friendly 😊
+- Be conversational, not robotic
+- If sales are slow, encourage them! If sales are good, celebrate!
+- Always reference real data, never make up numbers
+
+IMPORTANT: When listing products or stock, use the ACTUAL names from the data above. Never say "I don't have the names" - you DO have them!`;
 
     const chat = model.startChat({
       history: [
@@ -84,7 +139,7 @@ Instructions:
         },
         {
           role: 'model',
-          parts: [{ text: `I understand! I'm ${context.shop?.assistantName || 'Yebo'}, ready to help with the shop. How can I assist you today?` }],
+          parts: [{ text: `Hey ${context.shop?.ownerName || 'boss'}! 👋 I'm ${context.shop?.assistantName || 'Yebo'}, your shop assistant. I've got all the latest info on your sales and stock. What would you like to know?` }],
         },
       ],
     });
@@ -114,16 +169,14 @@ Instructions:
   }
 
   /**
-   * Process voice query (transcription would come from frontend)
+   * Process voice query
    */
   static async voice(shopId: string, transcription: string) {
-    // For now, just use the chat function with the transcription
     const result = await this.chat({
       shopId,
       message: transcription,
     });
 
-    // Update the conversation type
     await prisma.aIConversation.updateMany({
       where: {
         shopId,
@@ -147,7 +200,6 @@ Instructions:
 
     const context = await this.getShopContext(input.shopId);
     
-    // Get weekly data for better insights
     const now = new Date();
     const weekAgo = new Date(now);
     weekAgo.setDate(weekAgo.getDate() - 7);
@@ -162,36 +214,41 @@ Instructions:
       _count: true,
     });
 
+    const allLowStock = [
+      ...context.lowStockAlerts.items.critical,
+      ...context.lowStockAlerts.items.low,
+    ];
+
     const model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    const prompt = `Generate 3-5 brief, actionable business insights for a shop based on this data:
+    const prompt = `Generate 3-5 specific, actionable business insights for this shop:
 
-Today's sales: ${context.todaySales.totalSales} ${context.shop?.currency || 'SZL'} (${context.todaySales.totalTransactions} transactions)
-This week's sales: ${weekSales._sum.totalAmount || 0} ${context.shop?.currency || 'SZL'} (${weekSales._count} transactions)
-Low stock items: ${context.lowStockAlerts.total} products
-Out of stock: ${context.lowStockAlerts.items.critical.length} products
+TODAY'S SALES: E${context.todaySales.totalSales.toFixed(2)} (${context.todaySales.totalTransactions} transactions)
+THIS WEEK: E${weekSales._sum.totalAmount || 0} (${weekSales._count} transactions)
+AVERAGE BASKET: E${context.todaySales.averageBasket.toFixed(2)}
 
-Top sellers today:
-${context.todaySales.topProducts.map((p, i) => `${i + 1}. ${p.name}: ${p.quantity} units, ${p.revenue} revenue`).join('\n')}
+LOW STOCK PRODUCTS (${allLowStock.length} items):
+${allLowStock.map(p => `- ${p.name}: ${p.quantity} left`).join('\n') || 'None'}
 
-Format each insight as a JSON object with:
-- title: Short title (3-5 words)
-- insight: The insight (1-2 sentences)
-- action: Recommended action (1 sentence)
+TOP SELLERS TODAY:
+${context.todaySales.topProducts.map((p, i) => `${i + 1}. ${p.name}: ${p.quantity} units, E${p.revenue}`).join('\n') || 'No sales yet'}
+
+Generate insights as JSON array with:
+- title: Short catchy title (3-5 words)
+- insight: Specific insight mentioning actual product names and numbers
+- action: Clear action step
 - priority: "high", "medium", or "low"
 
-Return as a JSON array. No markdown, just valid JSON.`;
+Return ONLY valid JSON array, no markdown.`;
 
     try {
       const result = await model.generateContent(prompt);
       const responseText = result.response.text();
       
-      // Parse JSON from response
       const jsonMatch = responseText.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         const insights = JSON.parse(jsonMatch[0]);
         
-        // Store insights
         await prisma.aIConversation.create({
           data: {
             shopId: input.shopId,
@@ -207,34 +264,55 @@ Return as a JSON array. No markdown, just valid JSON.`;
       console.error('AI insights error:', error);
     }
 
-    // Fallback to offline insights
     return this.getOfflineInsights(input.shopId);
   }
 
   /**
-   * Offline/fallback insights
+   * Offline/fallback insights with real data
    */
   private static async getOfflineInsights(shopId: string) {
     const context = await this.getShopContext(shopId);
     const insights = [];
 
-    // Low stock insight
-    if (context.lowStockAlerts.total > 0) {
+    const allLowStock = [
+      ...context.lowStockAlerts.items.critical,
+      ...context.lowStockAlerts.items.low,
+    ];
+
+    // Low stock insight with actual names
+    if (allLowStock.length > 0) {
+      const outOfStock = context.lowStockAlerts.items.critical;
+      const productNames = allLowStock.slice(0, 3).map(p => p.name).join(', ');
+      
       insights.push({
-        title: 'Stock Alert',
-        insight: `${context.lowStockAlerts.total} products need restocking. ${context.lowStockAlerts.items.critical.length} are completely out of stock.`,
-        action: 'Review and reorder low stock items today.',
-        priority: context.lowStockAlerts.items.critical.length > 0 ? 'high' : 'medium',
+        title: outOfStock.length > 0 ? '🚨 Stock Emergency!' : '⚠️ Stock Running Low',
+        insight: outOfStock.length > 0 
+          ? `${outOfStock.map(p => p.name).join(', ')} ${outOfStock.length === 1 ? 'is' : 'are'} completely OUT OF STOCK! Plus ${allLowStock.length - outOfStock.length} more items running low.`
+          : `${productNames} and ${allLowStock.length - 3} more products need restocking soon.`,
+        action: outOfStock.length > 0 
+          ? `Reorder ${outOfStock[0].name} immediately - customers will be disappointed!`
+          : 'Place orders today to avoid stockouts.',
+        priority: outOfStock.length > 0 ? 'high' : 'medium',
       });
     }
 
     // Sales insight
     if (context.todaySales.totalTransactions > 0) {
+      const topProduct = context.todaySales.topProducts[0];
       insights.push({
-        title: 'Today\'s Performance',
-        insight: `You've made ${context.todaySales.totalTransactions} sales totaling ${context.todaySales.totalSales}. Average basket is ${context.todaySales.averageBasket.toFixed(2)}.`,
-        action: context.todaySales.averageBasket < 50 ? 'Consider upselling to increase basket size.' : 'Keep up the good work!',
+        title: '📈 Today\'s Performance',
+        insight: `You've made E${context.todaySales.totalSales.toFixed(2)} from ${context.todaySales.totalTransactions} sales. ${topProduct ? `${topProduct.name} is flying off the shelves!` : ''}`,
+        action: context.todaySales.averageBasket < 50 
+          ? 'Try suggesting add-ons to increase basket size.' 
+          : 'Great average basket! Keep it up!',
         priority: 'medium',
+      });
+    } else {
+      insights.push({
+        title: '🌅 New Day, Fresh Start',
+        insight: 'No sales yet today. Time to attract some customers!',
+        action: 'Consider a morning special or reach out to regular customers.',
+        priority: 'low',
       });
     }
 
@@ -242,9 +320,9 @@ Return as a JSON array. No markdown, just valid JSON.`;
     if (context.todaySales.topProducts.length > 0) {
       const top = context.todaySales.topProducts[0];
       insights.push({
-        title: 'Best Seller',
-        insight: `${top.name} is your top seller today with ${top.quantity} units sold.`,
-        action: 'Make sure this product is well-stocked and visible.',
+        title: `🏆 ${top.name} Winning!`,
+        insight: `${top.name} is your best seller with ${top.quantity} units sold (E${top.revenue.toFixed(2)} revenue).`,
+        action: 'Make sure you have enough stock of this popular item!',
         priority: 'low',
       });
     }
