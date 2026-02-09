@@ -18,6 +18,7 @@ router.patch('/shops/:id/status', AdminController.updateShopStatus);
 router.delete('/shops/:id', AdminController.deleteShop);
 router.put('/subscriptions/:id', AdminController.updateSubscription);
 router.get('/users', AdminController.getUsers);
+router.get('/users/:id', AdminController.getUserDetail);
 router.get('/subscriptions', AdminController.getSubscriptions);
 
 export default router;

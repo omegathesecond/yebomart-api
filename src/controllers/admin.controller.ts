@@ -265,4 +265,146 @@ export class AdminController {
       ApiResponse.error(res, 'Failed to fetch subscriptions');
     }
   }
+
+  // Get user detail with stats, sales history, and insights
+  static async getUserDetail(req: Request, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { days = 30 } = req.query;
+      
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - Number(days));
+
+      // Get user with shop info
+      const user = await prisma.user.findUnique({
+        where: { id },
+        include: { 
+          shop: { select: { id: true, name: true, ownerName: true, tier: true } }
+        },
+      });
+
+      if (!user) {
+        ApiResponse.notFound(res, 'User not found');
+        return;
+      }
+
+      // Get aggregated stats
+      const [salesStats, voidCount, recentSales, dailySales] = await Promise.all([
+        // Overall sales stats
+        prisma.sale.aggregate({
+          where: {
+            userId: id,
+            status: 'COMPLETED',
+            createdAt: { gte: startDate },
+          },
+          _sum: { totalAmount: true },
+          _count: true,
+          _avg: { totalAmount: true },
+          _max: { totalAmount: true },
+        }),
+        // Void count
+        prisma.sale.count({
+          where: {
+            userId: id,
+            status: 'VOIDED',
+            createdAt: { gte: startDate },
+          },
+        }),
+        // Recent transactions
+        prisma.sale.findMany({
+          where: { userId: id },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+          select: {
+            id: true,
+            totalAmount: true,
+            status: true,
+            paymentMethod: true,
+            itemCount: true,
+            createdAt: true,
+          },
+        }),
+        // Daily sales for chart
+        prisma.$queryRaw`
+          SELECT 
+            DATE(created_at) as date,
+            COUNT(*)::int as transactions,
+            COALESCE(SUM(total_amount), 0)::float as revenue
+          FROM "Sale"
+          WHERE user_id = ${id}
+            AND status = 'COMPLETED'
+            AND created_at >= ${startDate}
+          GROUP BY DATE(created_at)
+          ORDER BY date ASC
+        ` as Promise<Array<{ date: Date; transactions: number; revenue: number }>>,
+      ]);
+
+      // Generate AI insights
+      const insights = [];
+      const totalSales = salesStats._sum.totalAmount || 0;
+      const avgTransaction = salesStats._avg.totalAmount || 0;
+      const transactionCount = salesStats._count || 0;
+      const voidRate = transactionCount > 0 ? (voidCount / (transactionCount + voidCount)) * 100 : 0;
+
+      if (transactionCount > 0) {
+        if (avgTransaction > 500) {
+          insights.push({
+            type: 'positive',
+            text: `High average transaction value of E${avgTransaction.toFixed(0)} indicates strong upselling skills.`
+          });
+        }
+        if (voidRate > 5) {
+          insights.push({
+            type: 'warning',
+            text: `Void rate of ${voidRate.toFixed(1)}% is above average. Consider additional training.`
+          });
+        } else if (voidRate < 1) {
+          insights.push({
+            type: 'positive',
+            text: `Excellent accuracy with only ${voidRate.toFixed(1)}% void rate.`
+          });
+        }
+        if (transactionCount > 100) {
+          insights.push({
+            type: 'positive',
+            text: `Processed ${transactionCount} transactions - high activity level.`
+          });
+        }
+      } else {
+        insights.push({
+          type: 'info',
+          text: 'No completed sales in the selected period.'
+        });
+      }
+
+      ApiResponse.success(res, {
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          email: user.email,
+          role: user.role,
+          isActive: user.isActive,
+          createdAt: user.createdAt,
+          lastLoginAt: user.lastLoginAt,
+          shop: user.shop,
+        },
+        stats: {
+          period: { start: startDate, end: new Date() },
+          totalRevenue: totalSales,
+          transactionCount,
+          averageTransaction: avgTransaction,
+          largestTransaction: salesStats._max.totalAmount || 0,
+          voidCount,
+          voidRate,
+        },
+        dailySales,
+        recentSales,
+        insights,
+      });
+    } catch (error) {
+      console.error('Get user detail error:', error);
+      ApiResponse.error(res, 'Failed to fetch user details');
+    }
+  }
 }
