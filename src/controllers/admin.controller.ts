@@ -320,8 +320,8 @@ export class AdminController {
             totalAmount: true,
             status: true,
             paymentMethod: true,
-            itemCount: true,
             createdAt: true,
+            _count: { select: { items: true } },
           },
         }),
         // Daily sales for chart
