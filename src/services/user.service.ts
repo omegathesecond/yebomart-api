@@ -280,4 +280,135 @@ export class UserService {
       voidCount: voids,
     };
   }
+
+  /**
+   * Get detailed user stats with daily breakdown and recent sales
+   */
+  static async getDetailedStats(userId: string, shopId: string, days: number = 30) {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+
+    // Get user info
+    const user = await prisma.user.findFirst({
+      where: { id: userId, shopId },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        email: true,
+        role: true,
+        isActive: true,
+        createdAt: true,
+        lastLoginAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Get aggregated stats
+    const [salesStats, voidCount, recentSales, dailySales] = await Promise.all([
+      prisma.sale.aggregate({
+        where: {
+          shopId,
+          userId,
+          status: 'COMPLETED',
+          createdAt: { gte: startDate },
+        },
+        _sum: { totalAmount: true },
+        _count: true,
+        _avg: { totalAmount: true },
+        _max: { totalAmount: true },
+      }),
+      prisma.sale.count({
+        where: {
+          shopId,
+          userId,
+          status: 'VOIDED',
+          createdAt: { gte: startDate },
+        },
+      }),
+      prisma.sale.findMany({
+        where: { shopId, userId },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: {
+          id: true,
+          totalAmount: true,
+          status: true,
+          paymentMethod: true,
+          itemCount: true,
+          createdAt: true,
+        },
+      }),
+      prisma.$queryRaw`
+        SELECT 
+          DATE(created_at) as date,
+          COUNT(*)::int as transactions,
+          COALESCE(SUM(total_amount), 0)::float as revenue
+        FROM "Sale"
+        WHERE user_id = ${userId}
+          AND shop_id = ${shopId}
+          AND status = 'COMPLETED'
+          AND created_at >= ${startDate}
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+      ` as Promise<Array<{ date: Date; transactions: number; revenue: number }>>,
+    ]);
+
+    // Generate insights
+    const insights = [];
+    const totalSales = salesStats._sum.totalAmount || 0;
+    const avgTransaction = salesStats._avg.totalAmount || 0;
+    const transactionCount = salesStats._count || 0;
+    const voidRate = transactionCount > 0 ? (voidCount / (transactionCount + voidCount)) * 100 : 0;
+
+    if (transactionCount > 0) {
+      if (avgTransaction > 500) {
+        insights.push({
+          type: 'positive',
+          text: `High average transaction of E${avgTransaction.toFixed(0)} shows strong upselling.`
+        });
+      }
+      if (voidRate > 5) {
+        insights.push({
+          type: 'warning',
+          text: `Void rate of ${voidRate.toFixed(1)}% is above average. Review training needs.`
+        });
+      } else if (voidRate < 1) {
+        insights.push({
+          type: 'positive',
+          text: `Excellent accuracy with only ${voidRate.toFixed(1)}% void rate.`
+        });
+      }
+      if (transactionCount > 50) {
+        insights.push({
+          type: 'positive',
+          text: `Processed ${transactionCount} sales - very active team member.`
+        });
+      }
+    } else {
+      insights.push({
+        type: 'info',
+        text: 'No completed sales in this period.'
+      });
+    }
+
+    return {
+      user,
+      stats: {
+        period: { start: startDate, end: new Date() },
+        totalRevenue: totalSales,
+        transactionCount,
+        averageTransaction: avgTransaction,
+        largestTransaction: salesStats._max.totalAmount || 0,
+        voidCount,
+        voidRate,
+      },
+      dailySales,
+      recentSales,
+      insights,
+    };
+  }
 }

@@ -192,4 +192,24 @@ export class UserController {
       ApiResponse.serverError(res, error.message, error);
     }
   }
+
+  /**
+   * Get detailed user stats with daily breakdown and insights
+   */
+  static async getDetail(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { id } = req.params;
+      const days = req.query.days ? Number(req.query.days) : 30;
+
+      const detail = await UserService.getDetailedStats(id, req.user.shopId, days);
+      ApiResponse.success(res, detail);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
 }

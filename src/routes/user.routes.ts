@@ -23,6 +23,7 @@ router.post('/', ownerAuth, checkUserLimit, validateRequest(createUserSchema), U
 // Get, update, delete specific user
 router.get('/:id', UserController.getById);
 router.get('/:id/stats', UserController.getStats);
+router.get('/:id/detail', UserController.getDetail);
 router.patch('/:id', validateRequest(updateUserSchema), UserController.update);
 router.delete('/:id', ownerAuth, UserController.delete);
 
