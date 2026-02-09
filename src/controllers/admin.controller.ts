@@ -327,14 +327,14 @@ export class AdminController {
         // Daily sales for chart
         prisma.$queryRaw`
           SELECT 
-            DATE(created_at) as date,
+            DATE("createdAt") as date,
             COUNT(*)::int as transactions,
-            COALESCE(SUM(total_amount), 0)::float as revenue
+            COALESCE(SUM("totalAmount"), 0)::float as revenue
           FROM "Sale"
-          WHERE user_id = ${id}
+          WHERE "userId" = ${id}
             AND status = 'COMPLETED'
-            AND created_at >= ${startDate}
-          GROUP BY DATE(created_at)
+            AND "createdAt" >= ${startDate}
+          GROUP BY DATE("createdAt")
           ORDER BY date ASC
         ` as Promise<Array<{ date: Date; transactions: number; revenue: number }>>,
       ]);
