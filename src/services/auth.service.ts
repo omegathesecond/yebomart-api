@@ -20,6 +20,7 @@ interface LoginResult {
     id: string;
     name: string;
     ownerName: string;
+    businessType: string;
     assistantName: string;
     tier: string;
   };
@@ -80,6 +81,7 @@ export class AuthService {
         id: shop.id,
         name: shop.name,
         ownerName: shop.ownerName,
+        businessType: shop.businessType,
         assistantName: shop.assistantName,
         tier: shop.tier,
       },
@@ -132,6 +134,7 @@ export class AuthService {
         id: shop.id,
         name: shop.name,
         ownerName: shop.ownerName,
+        businessType: shop.businessType,
         assistantName: shop.assistantName,
         tier: shop.tier,
       },
@@ -204,6 +207,7 @@ export class AuthService {
         id: user.shop.id,
         name: user.shop.name,
         ownerName: user.shop.ownerName,
+        businessType: user.shop.businessType,
         assistantName: user.shop.assistantName,
         tier: user.shop.tier,
       },
@@ -262,6 +266,7 @@ export class AuthService {
           ownerName: true,
           ownerPhone: true,
           ownerEmail: true,
+          businessType: true,
           assistantName: true,
           currency: true,
           timezone: true,
@@ -288,6 +293,7 @@ export class AuthService {
             id: true,
             name: true,
             ownerName: true,
+            businessType: true,
             assistantName: true,
             currency: true,
             timezone: true,
