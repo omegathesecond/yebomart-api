@@ -14,6 +14,10 @@ export const registerSchema = Joi.object({
   ownerEmail: Joi.string().email().optional().lowercase().trim(),
   password: Joi.string().min(6).required(),
   assistantName: Joi.string().optional().trim().max(50),
+  businessType: Joi.string().optional().valid(
+    'general', 'tuckshop', 'spaza', 'tyre', 'hardware', 'grocery', 
+    'pharmacy', 'salon', 'restaurant', 'clothing', 'electronics', 'butchery'
+  ).default('general'),
 });
 
 export const loginSchema = Joi.object({

@@ -12,6 +12,7 @@ interface RegisterShopInput {
   ownerEmail?: string;
   password: string;
   assistantName?: string;
+  businessType?: string;
 }
 
 interface LoginResult {
@@ -57,6 +58,7 @@ export class AuthService {
         ownerEmail: input.ownerEmail,
         password: hashedPassword,
         assistantName: input.assistantName || 'Yebo',
+        businessType: input.businessType || 'general',
       },
     });
 
