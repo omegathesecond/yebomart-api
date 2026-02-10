@@ -123,6 +123,7 @@ model Product {
   name        String
   description String?
   category    String?
+  attributes  Json?    // Dynamic product attributes (size, brand, specs, etc.)
   
   // Pricing
   costPrice   Float
