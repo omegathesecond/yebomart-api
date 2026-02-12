@@ -204,4 +204,45 @@ export class SaleController {
       }
     }
   }
+
+  /**
+   * Email receipt to customer
+   */
+  static async emailReceipt(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { email, shopName, receiptNumber, items, subtotal, discount, total, date } = req.body;
+
+      if (!email || !receiptNumber) {
+        ApiResponse.badRequest(res, 'Email and receipt number are required');
+        return;
+      }
+
+      // Import email service
+      const { EmailService } = await import('@services/email.service');
+
+      const result = await EmailService.sendReceipt({
+        email,
+        shopName: shopName || 'YeboMart',
+        receiptNumber,
+        items: items || [],
+        subtotal: subtotal || total || 0,
+        discount: discount || 0,
+        total: total || 0,
+        date: date || new Date().toISOString(),
+      });
+
+      if (result.success) {
+        ApiResponse.success(res, { success: true, messageId: result.messageId }, 'Receipt emailed successfully');
+      } else {
+        ApiResponse.badRequest(res, result.error || 'Failed to send email');
+      }
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
 }
