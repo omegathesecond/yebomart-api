@@ -561,13 +561,21 @@ model Supplier {
   
   name        String
   contactName String?
-  phone       String?
+  phone       String?   // International format: +1234567890
   email       String?
+  website     String?   // Supplier website
+  
+  // Address (international)
   address     String?
+  city        String?
+  country     String?   // e.g., "South Africa", "China", "USA"
+  postalCode  String?
   
   // Business details
   taxId       String?
-  paymentTerms String?  // e.g., "Net 30", "COD"
+  currency    String?   // Supplier's currency (e.g., "USD", "ZAR", "CNY")
+  paymentTerms String?  // e.g., "Net 30", "COD", "LC"
+  leadTimeDays Int?     // Typical delivery time in days
   notes       String?
   
   isActive    Boolean  @default(true)

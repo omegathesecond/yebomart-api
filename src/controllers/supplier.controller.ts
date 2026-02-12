@@ -9,22 +9,34 @@ const prisma = new PrismaClient();
 export const createSupplierSchema = Joi.object({
   name: Joi.string().required().min(2).max(200),
   contactName: Joi.string().optional().max(100),
-  phone: Joi.string().optional().max(20),
+  phone: Joi.string().optional().max(30),  // International format
   email: Joi.string().optional().email(),
+  website: Joi.string().optional().uri().max(200),
   address: Joi.string().optional().max(500),
+  city: Joi.string().optional().max(100),
+  country: Joi.string().optional().max(100),
+  postalCode: Joi.string().optional().max(20),
   taxId: Joi.string().optional().max(50),
+  currency: Joi.string().optional().max(10),
   paymentTerms: Joi.string().optional().max(50),
+  leadTimeDays: Joi.number().optional().integer().min(0),
   notes: Joi.string().optional().max(1000),
 });
 
 export const updateSupplierSchema = Joi.object({
   name: Joi.string().optional().min(2).max(200),
   contactName: Joi.string().optional().max(100),
-  phone: Joi.string().optional().max(20),
+  phone: Joi.string().optional().max(30),
   email: Joi.string().optional().email(),
+  website: Joi.string().optional().uri().allow('').max(200),
   address: Joi.string().optional().max(500),
+  city: Joi.string().optional().max(100),
+  country: Joi.string().optional().max(100),
+  postalCode: Joi.string().optional().max(20),
   taxId: Joi.string().optional().max(50),
+  currency: Joi.string().optional().max(10),
   paymentTerms: Joi.string().optional().max(50),
+  leadTimeDays: Joi.number().optional().integer().min(0),
   notes: Joi.string().optional().max(1000),
   isActive: Joi.boolean().optional(),
 });
