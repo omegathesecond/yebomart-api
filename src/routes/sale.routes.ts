@@ -18,6 +18,7 @@ router.use(authMiddleware);
 // List and get
 router.get('/', validateQuery(listSalesSchema), SaleController.list);
 router.get('/daily-summary', SaleController.getDailySummary);
+router.get('/search/receipt', SaleController.searchByReceipt);
 router.get('/:id', SaleController.getById);
 
 // Create sale (with POS rate limiting and usage tracking)

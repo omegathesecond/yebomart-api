@@ -174,4 +174,34 @@ export class SaleController {
       ApiResponse.serverError(res, error.message, error);
     }
   }
+
+  /**
+   * Search sale by receipt number
+   */
+  static async searchByReceipt(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { receiptNumber } = req.query;
+      if (!receiptNumber) {
+        ApiResponse.badRequest(res, 'Receipt number is required');
+        return;
+      }
+
+      const sale = await SaleService.getByReceiptNumber(
+        receiptNumber as string,
+        req.user.shopId
+      );
+      ApiResponse.success(res, sale);
+    } catch (error: any) {
+      if (error.message.includes('not found')) {
+        ApiResponse.notFound(res, error.message);
+      } else {
+        ApiResponse.serverError(res, error.message, error);
+      }
+    }
+  }
 }

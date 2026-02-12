@@ -91,11 +91,34 @@ export class SaleService {
 
     // Create sale and update stock in a transaction
     const sale = await prisma.$transaction(async (tx) => {
+      // Generate receipt number (e.g., RCP-240212-0001)
+      const today = new Date();
+      const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
+      
+      // Get count of sales today for this shop
+      const startOfDay = new Date(today);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(today);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      const todaySalesCount = await tx.sale.count({
+        where: {
+          shopId: input.shopId,
+          createdAt: {
+            gte: startOfDay,
+            lte: endOfDay,
+          },
+        },
+      });
+      
+      const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
+
       // Create sale
       const sale = await tx.sale.create({
         data: {
           shopId: input.shopId,
           userId: input.userId,
+          receiptNumber,
           subtotal,
           discount,
           tax,
@@ -239,6 +262,40 @@ export class SaleService {
 
     if (!sale) {
       throw new Error('Sale not found');
+    }
+
+    return sale;
+  }
+
+  /**
+   * Get sale by receipt number
+   */
+  static async getByReceiptNumber(receiptNumber: string, shopId: string) {
+    // Support partial match (e.g., "0001" matches "RCP-260212-0001")
+    const sale = await prisma.sale.findFirst({
+      where: {
+        shopId,
+        receiptNumber: {
+          contains: receiptNumber.toUpperCase(),
+          mode: 'insensitive',
+        },
+      },
+      include: {
+        items: {
+          include: {
+            product: {
+              select: { id: true, name: true, barcode: true },
+            },
+          },
+        },
+        user: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    if (!sale) {
+      throw new Error('Sale not found with receipt number: ' + receiptNumber);
     }
 
     return sale;
