@@ -54,6 +54,9 @@ model Shop {
   aiConversations AIConversation[]
   auditLogs     AuditLog[]
   customers     Customer[]
+  returns       Return[]
+  suppliers     Supplier[]
+  purchaseOrders PurchaseOrder[]
   
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -126,10 +129,12 @@ model Product {
   attributes  Json?    // Dynamic product attributes (size, brand, specs, etc.)
   
   // Pricing
-  costPrice   Float
-  sellPrice   Float    // Unit price (single item)
-  packPrice   Float?   // Pack price (discount when buying whole pack)
-  packSize    Int?     // Number of units per pack (e.g., 6 for 6-pack)
+  costPrice       Float
+  sellPrice       Float    // Retail price (single item)
+  wholesalePrice  Float?   // Wholesale price (bulk buying)
+  wholesaleMinQty Int?     // Minimum qty for wholesale price
+  packPrice       Float?   // Pack price (discount when buying whole pack)
+  packSize        Int?     // Number of units per pack (e.g., 6 for 6-pack)
   
   // Stock (always in single units)
   quantity    Int      @default(0)
@@ -462,6 +467,201 @@ model AuditLog {
   @@index([shopId, createdAt])
   @@index([userId, createdAt])
   @@index([action])
+}
+
+// ==================== RETURNS ====================
+
+model Return {
+  id            String       @id @default(cuid())
+  shopId        String
+  saleId        String?      // Original sale (if known)
+  customerId    String?
+  userId        String?      // Staff processing return
+  
+  // Return details
+  returnNumber  String?
+  reason        String       // Defective, Wrong item, Change of mind, etc.
+  
+  // Resolution
+  type          ReturnType
+  refundAmount  Float        @default(0)  // For REFUND type
+  
+  // Status
+  status        ReturnStatus @default(PENDING)
+  notes         String?
+  
+  // Timestamps
+  createdAt     DateTime     @default(now())
+  processedAt   DateTime?
+  
+  // Relationships
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  items         ReturnItem[]
+  exchangeItems ReturnExchangeItem[]  // Items given in exchange
+  
+  @@index([shopId, createdAt])
+  @@index([saleId])
+}
+
+model ReturnItem {
+  id          String   @id @default(cuid())
+  returnId    String
+  productId   String
+  
+  // At time of return
+  productName String
+  quantity    Int
+  unitPrice   Float    // Price at which it was sold
+  
+  // Stock handling
+  restockable Boolean  @default(true)  // Can be put back in stock?
+  restocked   Boolean  @default(false)
+  
+  // Relationships
+  return      Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  
+  @@index([returnId])
+}
+
+model ReturnExchangeItem {
+  id          String   @id @default(cuid())
+  returnId    String
+  productId   String
+  
+  // Exchange item details
+  productName String
+  quantity    Int
+  unitPrice   Float
+  
+  // Relationships
+  return      Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  
+  @@index([returnId])
+}
+
+enum ReturnType {
+  REFUND        // Money back
+  EXCHANGE      // Swap for another product
+  STORE_CREDIT  // Credit to customer account
+}
+
+enum ReturnStatus {
+  PENDING
+  APPROVED
+  COMPLETED
+  REJECTED
+}
+
+// ==================== SUPPLIERS ====================
+
+model Supplier {
+  id          String   @id @default(cuid())
+  shopId      String
+  
+  name        String
+  contactName String?
+  phone       String?
+  email       String?
+  address     String?
+  
+  // Business details
+  taxId       String?
+  paymentTerms String?  // e.g., "Net 30", "COD"
+  notes       String?
+  
+  isActive    Boolean  @default(true)
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  products    SupplierProduct[]
+  orders      PurchaseOrder[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@unique([shopId, phone])
+  @@index([shopId, name])
+}
+
+model SupplierProduct {
+  id          String   @id @default(cuid())
+  supplierId  String
+  productId   String
+  
+  // Supplier's pricing
+  costPrice   Float
+  minOrder    Int      @default(1)
+  leadDays    Int?     // Delivery time in days
+  sku         String?  // Supplier's SKU
+  
+  isPreferred Boolean  @default(false)  // Preferred supplier for this product
+  
+  // Relationships
+  supplier    Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@unique([supplierId, productId])
+}
+
+model PurchaseOrder {
+  id          String   @id @default(cuid())
+  shopId      String
+  supplierId  String
+  
+  orderNumber String?
+  status      POStatus @default(DRAFT)
+  
+  // Totals
+  subtotal    Float
+  tax         Float    @default(0)
+  totalAmount Float
+  
+  // Dates
+  orderDate   DateTime @default(now())
+  expectedDate DateTime?
+  receivedDate DateTime?
+  
+  notes       String?
+  
+  // Relationships
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  supplier    Supplier @relation(fields: [supplierId], references: [id])
+  items       POItem[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([shopId, createdAt])
+  @@index([supplierId])
+}
+
+model POItem {
+  id          String   @id @default(cuid())
+  poId        String
+  productId   String
+  
+  productName String
+  quantity    Int
+  unitCost    Float
+  totalCost   Float
+  
+  // Receiving
+  receivedQty Int      @default(0)
+  
+  // Relationships
+  po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  
+  @@index([poId])
+}
+
+enum POStatus {
+  DRAFT
+  SENT
+  PARTIAL     // Partially received
+  RECEIVED
+  CANCELLED
 }
 
 // ==================== CUSTOMER CREDIT ====================

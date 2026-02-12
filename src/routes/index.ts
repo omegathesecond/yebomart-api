@@ -13,6 +13,8 @@ import customerRoutes from '@routes/customer.routes';
 import auditRoutes from '@routes/audit.routes';
 import adminRoutes from '@routes/admin.routes';
 import uploadRoutes from '@routes/upload.routes';
+import returnRoutes from '@routes/return.routes';
+import supplierRoutes from '@routes/supplier.routes';
 
 const router = Router();
 
@@ -58,5 +60,11 @@ router.use('/admin', adminRoutes);
 
 // File upload (R2)
 router.use('/upload', uploadRoutes);
+
+// Returns (refunds & exchanges)
+router.use('/returns', returnRoutes);
+
+// Suppliers
+router.use('/suppliers', supplierRoutes);
 
 export default router;
