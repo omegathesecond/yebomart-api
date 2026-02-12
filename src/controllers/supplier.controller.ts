@@ -139,7 +139,11 @@ export class SupplierController {
           shopId: req.user.shopId,
         },
         include: {
-          products: true,
+          products: {
+            include: {
+              product: { select: { id: true, name: true, barcode: true, costPrice: true, sellPrice: true } },
+            },
+          },
           orders: {
             take: 10,
             orderBy: { createdAt: 'desc' },
@@ -303,6 +307,169 @@ export class SupplierController {
       } else {
         ApiResponse.serverError(res, error.message, error);
       }
+    }
+  }
+
+  /**
+   * Set supplier products (bulk update - replaces all)
+   */
+  static async setProducts(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const supplierId = req.params.id;
+      const { productIds } = req.body; // Array of product IDs
+
+      // Verify supplier belongs to shop
+      const supplier = await prisma.supplier.findFirst({
+        where: { id: supplierId, shopId: req.user.shopId },
+      });
+
+      if (!supplier) {
+        ApiResponse.notFound(res, 'Supplier not found');
+        return;
+      }
+
+      // Verify all products belong to shop
+      const products = await prisma.product.findMany({
+        where: { id: { in: productIds }, shopId: req.user.shopId },
+      });
+
+      const validProductIds = products.map(p => p.id);
+
+      // Transaction: delete old links, create new ones
+      await prisma.$transaction(async (tx) => {
+        // Delete existing links
+        await tx.supplierProduct.deleteMany({
+          where: { supplierId },
+        });
+
+        // Create new links with default cost prices from products
+        if (validProductIds.length > 0) {
+          await tx.supplierProduct.createMany({
+            data: validProductIds.map(productId => {
+              const product = products.find(p => p.id === productId);
+              return {
+                supplierId,
+                productId,
+                costPrice: product?.costPrice || 0,
+              };
+            }),
+          });
+        }
+      });
+
+      // Return updated supplier with products
+      const updated = await prisma.supplier.findFirst({
+        where: { id: supplierId },
+        include: {
+          products: {
+            include: {
+              product: { select: { id: true, name: true, barcode: true, costPrice: true } },
+            },
+          },
+        },
+      });
+
+      ApiResponse.success(res, updated, 'Supplier products updated');
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * Get suppliers for a product
+   */
+  static async getProductSuppliers(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { productId } = req.params;
+
+      const supplierProducts = await prisma.supplierProduct.findMany({
+        where: {
+          productId,
+          supplier: { shopId: req.user.shopId },
+        },
+        include: {
+          supplier: {
+            select: { id: true, name: true, phone: true, isActive: true },
+          },
+        },
+      });
+
+      ApiResponse.success(res, supplierProducts);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * Set product suppliers (from product side)
+   */
+  static async setProductSuppliers(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { productId } = req.params;
+      const { supplierIds } = req.body;
+
+      // Verify product belongs to shop
+      const product = await prisma.product.findFirst({
+        where: { id: productId, shopId: req.user.shopId },
+      });
+
+      if (!product) {
+        ApiResponse.notFound(res, 'Product not found');
+        return;
+      }
+
+      // Verify all suppliers belong to shop
+      const suppliers = await prisma.supplier.findMany({
+        where: { id: { in: supplierIds }, shopId: req.user.shopId },
+      });
+
+      const validSupplierIds = suppliers.map(s => s.id);
+
+      // Transaction: delete old links, create new ones
+      await prisma.$transaction(async (tx) => {
+        // Delete existing links for this product
+        await tx.supplierProduct.deleteMany({
+          where: { productId },
+        });
+
+        // Create new links
+        if (validSupplierIds.length > 0) {
+          await tx.supplierProduct.createMany({
+            data: validSupplierIds.map(supplierId => ({
+              supplierId,
+              productId,
+              costPrice: product.costPrice,
+            })),
+          });
+        }
+      });
+
+      // Return updated product suppliers
+      const updatedSuppliers = await prisma.supplierProduct.findMany({
+        where: { productId },
+        include: {
+          supplier: { select: { id: true, name: true, phone: true } },
+        },
+      });
+
+      ApiResponse.success(res, updatedSuppliers, 'Product suppliers updated');
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
     }
   }
 }

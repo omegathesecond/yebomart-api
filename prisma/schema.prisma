@@ -152,6 +152,7 @@ model Product {
   shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   saleItems   SaleItem[]
   stockLogs   StockLog[]
+  suppliers   SupplierProduct[]
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -598,6 +599,7 @@ model SupplierProduct {
   
   // Relationships
   supplier    Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

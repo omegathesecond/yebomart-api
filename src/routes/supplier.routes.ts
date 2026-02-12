@@ -30,6 +30,11 @@ router.delete('/:id', managerAuth, SupplierController.delete);
 
 // Supplier products
 router.post('/:id/products', managerAuth, validateRequest(supplierProductSchema), SupplierController.addProduct);
+router.put('/:id/products', managerAuth, SupplierController.setProducts); // Bulk set products
 router.delete('/:id/products/:productId', managerAuth, SupplierController.removeProduct);
+
+// Product suppliers (from product side)
+router.get('/product/:productId', SupplierController.getProductSuppliers);
+router.put('/product/:productId', managerAuth, SupplierController.setProductSuppliers);
 
 export default router;
