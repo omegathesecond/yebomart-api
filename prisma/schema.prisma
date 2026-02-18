@@ -26,6 +26,11 @@ model Shop {
   // AI Assistant
   assistantName String    @default("Yebo")
   
+  // Country & Localization (multi-country support)
+  countryCode       String    @default("SZ")   // ISO country code (e.g., SZ, ZA, KE)
+  phoneCountryCode  String    @default("+268") // Phone prefix for the country
+  currencySymbol    String    @default("E")    // Currency symbol (e.g., E, R, KSh)
+  
   // Business Settings
   currency      String    @default("SZL")
   timezone      String    @default("Africa/Mbabane")

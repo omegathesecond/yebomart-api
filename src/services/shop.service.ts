@@ -10,6 +10,10 @@ interface UpdateShopInput {
   timezone?: string;
   address?: string;
   logoUrl?: string;
+  // Country & Localization
+  countryCode?: string;
+  phoneCountryCode?: string;
+  currencySymbol?: string;
 }
 
 export class ShopService {
@@ -38,6 +42,10 @@ export class ShopService {
         monthlyStockMoves: true,
         createdAt: true,
         updatedAt: true,
+        // Country & Localization
+        countryCode: true,
+        phoneCountryCode: true,
+        currencySymbol: true,
         _count: {
           select: {
             products: true,
@@ -74,6 +82,10 @@ export class ShopService {
         logoUrl: true,
         tier: true,
         updatedAt: true,
+        // Country & Localization
+        countryCode: true,
+        phoneCountryCode: true,
+        currencySymbol: true,
       },
     });
 

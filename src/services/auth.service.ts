@@ -13,6 +13,10 @@ interface RegisterShopInput {
   password: string;
   assistantName?: string;
   businessType?: string;
+  // Country & Localization
+  countryCode?: string;
+  phoneCountryCode?: string;
+  currencySymbol?: string;
 }
 
 interface LoginResult {
@@ -60,6 +64,10 @@ export class AuthService {
         password: hashedPassword,
         assistantName: input.assistantName || 'Yebo',
         businessType: input.businessType || 'general',
+        // Country & Localization
+        countryCode: input.countryCode || 'SZ',
+        phoneCountryCode: input.phoneCountryCode || '+268',
+        currencySymbol: input.currencySymbol || 'E',
       },
     });
 
@@ -275,6 +283,10 @@ export class AuthService {
           tier: true,
           licenseExpiry: true,
           createdAt: true,
+          // Country & Localization
+          countryCode: true,
+          phoneCountryCode: true,
+          currencySymbol: true,
         },
       });
 
