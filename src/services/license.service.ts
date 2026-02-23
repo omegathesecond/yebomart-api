@@ -187,7 +187,7 @@ export class LicenseService {
           maxUsers: 1,
           maxTransactions: 500,
           maxStockMoves: 100,
-          aiQueriesPerMonth: 30,
+          aiQueriesPerMonth: 100,
           aiModel: 'flash-lite',
           whatsappReports: false,
           advancedAnalytics: false,
