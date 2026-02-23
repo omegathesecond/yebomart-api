@@ -6,6 +6,37 @@ import { COUNTRY_PRICING } from '@config/pricing';
 
 const SALT_ROUNDS = 12;
 
+// Map phone prefixes to country codes (ordered longest first for accurate matching)
+const PHONE_TO_COUNTRY: [string, string][] = [
+  ['+268', 'SZ'],   // Eswatini
+  ['+27', 'ZA'],    // South Africa
+  ['+254', 'KE'],   // Kenya
+  ['+234', 'NG'],   // Nigeria
+  ['+233', 'GH'],   // Ghana
+  ['+255', 'TZ'],   // Tanzania
+  ['+256', 'UG'],   // Uganda
+  ['+250', 'RW'],   // Rwanda
+  ['+251', 'ET'],   // Ethiopia
+  ['+225', 'CI'],   // Ivory Coast
+  ['+221', 'SN'],   // Senegal
+  ['+260', 'ZM'],   // Zambia
+  ['+263', 'ZW'],   // Zimbabwe
+  ['+267', 'BW'],   // Botswana
+  ['+258', 'MZ'],   // Mozambique
+  ['+237', 'CM'],   // Cameroon
+  ['+243', 'CD'],   // DR Congo
+  ['+265', 'MW'],   // Malawi
+  ['+266', 'LS'],   // Lesotho
+  ['+264', 'NA'],   // Namibia
+];
+
+function getCountryFromPhone(phone: string): string | null {
+  for (const [prefix, code] of PHONE_TO_COUNTRY) {
+    if (phone.startsWith(prefix)) return code;
+  }
+  return null;
+}
+
 interface RegisterShopInput {
   name: string;
   ownerName: string;
@@ -55,8 +86,10 @@ export class AuthService {
     // Hash password
     const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
 
-    // Look up country data for proper currency/timezone
-    const countryData = COUNTRY_PRICING[input.countryCode || 'SZ'];
+    // Derive country from phone number (most reliable)
+    const phoneCountry = getCountryFromPhone(input.ownerPhone);
+    const resolvedCountry = phoneCountry || input.countryCode || 'SZ';
+    const countryData = COUNTRY_PRICING[resolvedCountry];
 
     // Create shop
     const shop = await prisma.shop.create({
@@ -69,7 +102,7 @@ export class AuthService {
         assistantName: input.assistantName || 'Yebo',
         businessType: input.businessType || 'general',
         // Country & Localization — derive all fields from countryCode
-        countryCode: input.countryCode || 'SZ',
+        countryCode: resolvedCountry,
         phoneCountryCode: input.phoneCountryCode || countryData?.phoneCode || '+268',
         currencySymbol: countryData?.currencySymbol || input.currencySymbol || 'E',
         currency: countryData?.currency || 'SZL',
