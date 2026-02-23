@@ -125,6 +125,60 @@ export const checkUserLimit = async (req: AuthRequest, res: Response, next: Next
 };
 
 /**
+ * Check and track AI usage limits per tier
+ */
+export const checkAiUsage = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.user) {
+      ApiResponse.unauthorized(res, 'Authentication required');
+      return;
+    }
+
+    const shop = await prisma.shop.findUnique({
+      where: { id: req.user.shopId },
+      select: { tier: true, monthlyAiQueries: true },
+    });
+
+    if (!shop) {
+      ApiResponse.notFound(res, 'Shop not found');
+      return;
+    }
+
+    const limits = LicenseService.getTierLimits(shop.tier);
+    if (!limits) {
+      next();
+      return;
+    }
+
+    if (limits.aiQueriesPerMonth !== Infinity && shop.monthlyAiQueries >= limits.aiQueriesPerMonth) {
+      const tierNames: Record<string, string> = { LITE: 'Starter', STARTER: 'Business', BUSINESS: 'Pro', PRO: 'Enterprise' };
+      const upgradeTo = tierNames[shop.tier] || 'a higher plan';
+      ApiResponse.forbidden(res, 
+        `AI limit reached (${limits.aiQueriesPerMonth} queries/month on ${shop.tier}). Upgrade to ${upgradeTo} for more.`,
+      );
+      return;
+    }
+
+    // Increment counter in background
+    prisma.shop.update({
+      where: { id: req.user.shopId },
+      data: { monthlyAiQueries: { increment: 1 } },
+    }).catch(console.error);
+
+    // Attach remaining count to response for frontend
+    (req as any).aiUsage = {
+      used: shop.monthlyAiQueries + 1,
+      limit: limits.aiQueriesPerMonth,
+      remaining: limits.aiQueriesPerMonth === Infinity ? Infinity : limits.aiQueriesPerMonth - shop.monthlyAiQueries - 1,
+    };
+
+    next();
+  } catch (error) {
+    ApiResponse.serverError(res, 'Failed to check AI usage');
+  }
+};
+
+/**
  * Track monthly usage
  */
 export const trackUsage = (type: 'transaction' | 'stockMove') => {

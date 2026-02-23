@@ -46,6 +46,7 @@ model Shop {
   // Usage Tracking (for billing)
   monthlyTransactions Int  @default(0)
   monthlyStockMoves   Int  @default(0)
+  monthlyAiQueries    Int  @default(0)
   lastBillingReset    DateTime @default(now())
   
   // Relationships

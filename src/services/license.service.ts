@@ -187,7 +187,8 @@ export class LicenseService {
           maxUsers: 1,
           maxTransactions: 500,
           maxStockMoves: 100,
-          aiQueriesPerMonth: 0,
+          aiQueriesPerMonth: 10,
+          aiModel: 'flash-lite',
           whatsappReports: false,
           advancedAnalytics: false,
         };
@@ -198,6 +199,7 @@ export class LicenseService {
           maxTransactions: 2000,
           maxStockMoves: 500,
           aiQueriesPerMonth: 50,
+          aiModel: 'flash-lite',
           whatsappReports: false,
           advancedAnalytics: false,
         };
@@ -208,6 +210,7 @@ export class LicenseService {
           maxTransactions: 10000,
           maxStockMoves: 2500,
           aiQueriesPerMonth: 200,
+          aiModel: 'flash',
           whatsappReports: true,
           advancedAnalytics: true,
         };
@@ -218,6 +221,7 @@ export class LicenseService {
           maxTransactions: 50000,
           maxStockMoves: 15000,
           aiQueriesPerMonth: 1000,
+          aiModel: 'pro',
           whatsappReports: true,
           advancedAnalytics: true,
         };
@@ -229,6 +233,7 @@ export class LicenseService {
           maxTransactions: Infinity,
           maxStockMoves: Infinity,
           aiQueriesPerMonth: Infinity,
+          aiModel: 'pro',
           whatsappReports: true,
           advancedAnalytics: true,
         };
@@ -239,7 +244,8 @@ export class LicenseService {
    * Get tier features
    */
   static getTierFeatures(tier: ShopTier) {
-    const features = ['basic_pos', 'stock_tracking', 'basic_reports'];
+    // AI assistant available on ALL tiers (usage-limited)
+    const features = ['basic_pos', 'stock_tracking', 'basic_reports', 'ai_assistant'];
 
     // STARTER and above
     if (['STARTER', 'BUSINESS', 'PRO', 'ENTERPRISE'].includes(tier)) {
@@ -253,7 +259,7 @@ export class LicenseService {
 
     // PRO and above
     if (['PRO', 'ENTERPRISE'].includes(tier)) {
-      features.push('ai_assistant', 'multi_location', 'accounting_module');
+      features.push('ai_voice', 'multi_location', 'accounting_module');
     }
 
     // ENTERPRISE only
