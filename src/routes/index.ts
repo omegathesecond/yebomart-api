@@ -15,6 +15,7 @@ import adminRoutes from '@routes/admin.routes';
 import uploadRoutes from '@routes/upload.routes';
 import returnRoutes from '@routes/return.routes';
 import supplierRoutes from '@routes/supplier.routes';
+import pricingRoutes from '@routes/pricing.routes';
 
 const router = Router();
 
@@ -66,5 +67,8 @@ router.use('/returns', returnRoutes);
 
 // Suppliers
 router.use('/suppliers', supplierRoutes);
+
+// Pricing (public - no auth required)
+router.use('/pricing', pricingRoutes);
 
 export default router;
