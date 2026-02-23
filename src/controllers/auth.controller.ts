@@ -18,6 +18,8 @@ export const registerSchema = Joi.object({
     'general', 'tuckshop', 'spaza', 'tyre', 'hardware', 'grocery', 
     'pharmacy', 'salon', 'restaurant', 'clothing', 'electronics', 'butchery'
   ).default('general'),
+  countryCode: Joi.string().optional().uppercase().max(3).default('SZ'),
+  phoneCountryCode: Joi.string().optional().pattern(/^\+[1-9]\d{0,3}$/),
 });
 
 export const loginSchema = Joi.object({

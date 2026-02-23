@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import { prisma } from '@config/prisma';
 import { JWTUtil, ITokenPayload } from '@utils/jwt';
 import { UserRole } from '@prisma/client';
+import { COUNTRY_PRICING } from '@config/pricing';
 
 const SALT_ROUNDS = 12;
 
@@ -54,6 +55,9 @@ export class AuthService {
     // Hash password
     const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
 
+    // Look up country data for proper currency/timezone
+    const countryData = COUNTRY_PRICING[input.countryCode || 'SZ'];
+
     // Create shop
     const shop = await prisma.shop.create({
       data: {
@@ -64,10 +68,12 @@ export class AuthService {
         password: hashedPassword,
         assistantName: input.assistantName || 'Yebo',
         businessType: input.businessType || 'general',
-        // Country & Localization
+        // Country & Localization — derive all fields from countryCode
         countryCode: input.countryCode || 'SZ',
-        phoneCountryCode: input.phoneCountryCode || '+268',
-        currencySymbol: input.currencySymbol || 'E',
+        phoneCountryCode: input.phoneCountryCode || countryData?.phoneCode || '+268',
+        currencySymbol: countryData?.currencySymbol || input.currencySymbol || 'E',
+        currency: countryData?.currency || 'SZL',
+        timezone: countryData?.timezone || 'Africa/Mbabane',
       },
     });
 
