@@ -16,7 +16,12 @@ export const registerSchema = Joi.object({
   assistantName: Joi.string().optional().trim().max(50),
   businessType: Joi.string().optional().valid(
     'general', 'tuckshop', 'spaza', 'tyre', 'hardware', 'grocery', 
-    'pharmacy', 'salon', 'restaurant', 'clothing', 'electronics', 'butchery'
+    'pharmacy', 'salon', 'restaurant', 'clothing', 'electronics', 'butchery',
+    'bakery', 'liquor', 'beauty', 'makeup', 'spa', 'autoparts', 'carwash',
+    'building', 'computer', 'repair', 'shoes', 'tailoring', 'thrift',
+    'traditional', 'furniture', 'homeware', 'stationery', 'printing',
+    'bookshop', 'agri', 'nursery', 'laundry', 'photography', 'gaming',
+    'sport', 'music', 'gift', 'jewellery', 'florist', 'pet', 'craft'
   ).default('general'),
   countryCode: Joi.string().optional().uppercase().max(3).default('SZ'),
   phoneCountryCode: Joi.string().optional().pattern(/^\+[1-9]\d{0,3}$/),
