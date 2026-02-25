@@ -16,6 +16,7 @@ import uploadRoutes from '@routes/upload.routes';
 import returnRoutes from '@routes/return.routes';
 import supplierRoutes from '@routes/supplier.routes';
 import pricingRoutes from '@routes/pricing.routes';
+import billingRoutes from '@routes/billing.routes';
 
 const router = Router();
 
@@ -70,5 +71,8 @@ router.use('/suppliers', supplierRoutes);
 
 // Pricing (public - no auth required)
 router.use('/pricing', pricingRoutes);
+
+// Billing (Stripe)
+router.use('/billing', billingRoutes);
 
 export default router;

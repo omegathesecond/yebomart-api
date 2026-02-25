@@ -50,8 +50,14 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('combined'));
 }
 
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
+// Body parsing (skip JSON for Stripe webhook — needs raw body)
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/billing/webhook') {
+    next();
+  } else {
+    express.json({ limit: '10mb' })(req, res, next);
+  }
+});
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Rate limiting (applied to all API routes)
