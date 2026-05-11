@@ -49,7 +49,13 @@ export class BillingService {
     tier: ShopTier;
     successUrl: string;
     cancelUrl: string;
+    provider?: 'stripe' | 'momo';
+    idempotencyKey?: string;
   }) {
+    const provider = opts.provider || 'stripe';
+    if (provider !== 'stripe') {
+      throw new Error(`Payment provider '${provider}' is not yet supported`);
+    }
     if (!stripe) throw new Error('Stripe not configured');
 
     const pricing = getPricingForCountry(opts.countryCode);
@@ -70,34 +76,37 @@ export class BillingService {
       amount = Math.round(usdAmount * 100);
     }
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      customer_email: opts.shopEmail || undefined,
-      line_items: [
-        {
-          price_data: {
-            currency: chargeCurrency.code.toLowerCase(),
-            product_data: {
-              name: `YeboMart ${TIER_NAMES[opts.tier]} Plan`,
-              description: `Monthly subscription — ${pricing.currencySymbol}${activePrice.toLocaleString()}`,
+    const session = await stripe.checkout.sessions.create(
+      {
+        payment_method_types: ['card'],
+        customer_email: opts.shopEmail || undefined,
+        line_items: [
+          {
+            price_data: {
+              currency: chargeCurrency.code.toLowerCase(),
+              product_data: {
+                name: `YeboMart ${TIER_NAMES[opts.tier]} Plan`,
+                description: `Monthly subscription — ${pricing.currencySymbol}${activePrice.toLocaleString()}`,
+              },
+              unit_amount: amount,
             },
-            unit_amount: amount,
+            quantity: 1,
           },
-          quantity: 1,
+        ],
+        mode: 'payment',
+        success_url: opts.successUrl,
+        cancel_url: opts.cancelUrl,
+        client_reference_id: opts.shopId,
+        metadata: {
+          shopId: opts.shopId,
+          tier: opts.tier,
+          countryCode: opts.countryCode,
         },
-      ],
-      mode: 'payment',
-      success_url: opts.successUrl,
-      cancel_url: opts.cancelUrl,
-      client_reference_id: opts.shopId,
-      metadata: {
-        shopId: opts.shopId,
-        tier: opts.tier,
-        countryCode: opts.countryCode,
       },
-    });
+      opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : undefined,
+    );
 
-    return { sessionId: session.id, url: session.url! };
+    return { sessionId: session.id, url: session.url!, provider };
   }
 
   static async handleWebhookEvent(payload: Buffer, signature: string) {

@@ -36,7 +36,8 @@ router.get('/plans', optionalAuth, async (req: AuthRequest, res: Response) => {
 // POST /checkout — authenticated
 router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { tier, successUrl, cancelUrl } = req.body;
+    const { tier, successUrl, cancelUrl, provider } = req.body;
+    const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
 
     if (!tier || !VALID_TIERS.includes(tier)) {
       return ApiResponse.badRequest(res, `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}`);
@@ -56,13 +57,18 @@ router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response)
       shopEmail: shop.ownerEmail || undefined,
       countryCode: shop.countryCode,
       tier: tier as ShopTier,
-      successUrl: successUrl || `https://app.yebomart.com/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancelUrl: cancelUrl || `https://app.yebomart.com/billing`,
+      successUrl: successUrl || `https://app.yebomart.com/billing/success?session_id={CHECKOUT_SESSION_ID}&tier=${tier}`,
+      cancelUrl: cancelUrl || `https://app.yebomart.com/billing/cancel`,
+      provider,
+      idempotencyKey,
     });
 
     return ApiResponse.success(res, result);
-  } catch (error) {
-    console.error('[Billing] Checkout error:', error);
+  } catch (error: any) {
+    console.error('[Billing] Checkout error:', error?.message || error);
+    if (error?.message?.includes('not yet supported')) {
+      return ApiResponse.badRequest(res, error.message);
+    }
     return ApiResponse.serverError(res, 'Failed to create checkout session');
   }
 });
