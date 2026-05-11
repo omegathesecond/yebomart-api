@@ -30,3 +30,10 @@ steps:
 
 images:
   - 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA'
+
+# Required because the trigger runs under a custom service account
+# (yebomart-runtime@hiyebo). Without this, Cloud Build refuses to start
+# with "if 'build.service_account' is specified, the build must either
+# specify 'build.logs_bucket' or use CLOUD_LOGGING_ONLY logging".
+options:
+  logging: CLOUD_LOGGING_ONLY
