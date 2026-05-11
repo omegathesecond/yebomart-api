@@ -7,13 +7,19 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA']
 
-  # Deploy container image to Cloud Run
+  # Deploy container image to Cloud Run.
+  # Service name is parameterised so the same cloudbuild.yaml powers
+  # both the prod trigger (substitutes _SERVICE=yebomart-api-prod) and
+  # the dev trigger (_SERVICE=yebomart-api-dev). Without this, the deploy
+  # was creating a third zombie service called bare "yebomart-api" under
+  # the default compute SA — that's how a "successful" Cloud Build was
+  # producing a totally orphaned revision.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'yebomart-api'
+      - '${_SERVICE}'
       - '--image'
       - 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA'
       - '--region'
@@ -21,12 +27,14 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
+      - '--service-account=yebomart-runtime@hiyebo.iam.gserviceaccount.com'
       - '--port'
       - '8080'
       - '--update-env-vars'
       - 'NODE_ENV=production,R2_ACCOUNT_ID=9f15f12d867a59b212ed2ae3cf4615ca,R2_BUCKET_NAME=yebomart-images,R2_PUBLIC_URL=https://pub-9f15f12d867a59b212ed2ae3cf4615ca.r2.dev'
-      - '--update-secrets'
-      - 'STRIPE_SECRET_KEY=YEBOMART__STRIPE_SECRET_KEY:latest,STRIPE_WEBHOOK_SECRET=YEBOMART__STRIPE_WEBHOOK_SECRET:latest'
+
+substitutions:
+  _SERVICE: yebomart-api-prod
 
 images:
   - 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA'
