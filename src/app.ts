@@ -50,14 +50,9 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('combined'));
 }
 
-// Body parsing (skip JSON for Stripe webhook — needs raw body)
-app.use((req, res, next) => {
-  if (req.originalUrl === '/api/billing/webhook') {
-    next();
-  } else {
-    express.json({ limit: '10mb' })(req, res, next);
-  }
-});
+// Body parsing — yebomart no longer hosts a Stripe webhook (yebopay does),
+// so the raw-body carve-out for /api/billing/webhook is gone.
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Rate limiting (applied to all API routes)

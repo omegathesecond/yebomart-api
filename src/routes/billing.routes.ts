@@ -1,5 +1,4 @@
-import { Router, Request, Response } from 'express';
-import express from 'express';
+import { Router, Response } from 'express';
 import { BillingService } from '@services/billing.service';
 import { authMiddleware, optionalAuth, AuthRequest } from '@middleware/auth.middleware';
 import { ApiResponse } from '@utils/ApiResponse';
@@ -33,10 +32,13 @@ router.get('/plans', optionalAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /checkout — authenticated
+// POST /checkout — authenticated. Returns { checkoutId, url }; frontend stashes
+// checkoutId in sessionStorage before redirecting to url, then POSTs
+// /checkout/confirm after Stripe's success redirect (which can't carry
+// yebopay's id natively).
 router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { tier, successUrl, cancelUrl, provider } = req.body;
+    const { tier, successUrl, cancelUrl } = req.body;
     const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
 
     if (!tier || !VALID_TIERS.includes(tier)) {
@@ -57,35 +59,44 @@ router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response)
       shopEmail: shop.ownerEmail || undefined,
       countryCode: shop.countryCode,
       tier: tier as ShopTier,
-      successUrl: successUrl || `https://app.yebomart.com/billing/success?session_id={CHECKOUT_SESSION_ID}&tier=${tier}`,
+      successUrl: successUrl || `https://app.yebomart.com/billing/success?tier=${tier}`,
       cancelUrl: cancelUrl || `https://app.yebomart.com/billing/cancel`,
-      provider,
       idempotencyKey,
     });
 
     return ApiResponse.success(res, result);
   } catch (error: any) {
     console.error('[Billing] Checkout error:', error?.message || error);
-    if (error?.message?.includes('not yet supported')) {
-      return ApiResponse.badRequest(res, error.message);
-    }
     return ApiResponse.serverError(res, 'Failed to create checkout session');
   }
 });
 
-// POST /webhook — Stripe webhook (raw body)
-router.post('/webhook', express.raw({ type: 'application/json' }), async (req: Request, res: Response) => {
+// POST /checkout/confirm — authenticated. Frontend posts the checkoutId it
+// stashed before redirect, after Stripe's success redirect. Returns
+// { activated: true, tier, licenseExpiry } if YeboPay reports COMPLETED;
+// { activated: false, status } otherwise. Phase 3 yebopay→yebomart webhook
+// will replace this polling path with real-time activation.
+router.post('/checkout/confirm', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const signature = req.headers['stripe-signature'] as string;
-    if (!signature) {
-      return res.status(400).json({ error: 'Missing stripe-signature header' });
+    const { checkoutId, tier } = req.body;
+
+    if (typeof checkoutId !== 'string' || !checkoutId.trim()) {
+      return ApiResponse.badRequest(res, 'Missing checkoutId');
+    }
+    if (!tier || !VALID_TIERS.includes(tier)) {
+      return ApiResponse.badRequest(res, `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}`);
     }
 
-    const result = await BillingService.handleWebhookEvent(req.body, signature);
-    return res.json(result);
+    const result = await BillingService.confirmCheckout({
+      shopId: req.user!.shopId,
+      checkoutId,
+      tier: tier as ShopTier,
+    });
+
+    return ApiResponse.success(res, result);
   } catch (error: any) {
-    console.error('[Billing] Webhook error:', error.message);
-    return res.status(400).json({ error: 'Webhook verification failed' });
+    console.error('[Billing] Confirm error:', error?.message || error);
+    return ApiResponse.serverError(res, 'Failed to confirm checkout');
   }
 });
 
