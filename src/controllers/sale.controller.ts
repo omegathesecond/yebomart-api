@@ -257,8 +257,8 @@ export class SaleController {
       // Map sale items → invoice line items (currency comes from the shop's country).
       const { getCurrencyForCountry } = await import('@utils/currencies');
       const currency = getCurrencyForCountry(sale.shop.countryCode);
-      const invoiceCurrency = currency.stripeSupported ? currency.code : 'USD';
-      const fxRate = currency.stripeSupported ? 1 : currency.rate;
+      const invoiceCurrency = currency.directBillable ? currency.code : 'USD';
+      const fxRate = currency.directBillable ? 1 : currency.rate;
 
       const lineItems = sale.items.map((item: typeof sale.items[number]) => ({
         description: item.productName,
