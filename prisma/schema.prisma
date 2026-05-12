@@ -15,11 +15,14 @@ datasource db {
 model Shop {
   id            String    @id @default(cuid())
   name          String
+  // Owner identity = YeboID. Required. Populated at signup from the validated
+  // OAuth access_token's `sub`. Profile (ownerName/Phone/Email) is fetched
+  // once from /oauth/userinfo and cached here for display + comms.
+  ownerYeboidSub String   @unique @db.Uuid
   ownerName     String
-  ownerPhone    String    @unique // WhatsApp number (E.164 format)
+  ownerPhone    String    @unique // E.164; mirrored from YeboID profile
   ownerEmail    String?
-  password      String    // Hashed password
-  
+
   // Business Type (generic for any shop)
   businessType  String    @default("general") // general, tuckshop, tyre, hardware, grocery, pharmacy, salon, etc.
   
@@ -80,19 +83,20 @@ model User {
   name          String
   phone         String
   email         String?
-  password      String?   // Hashed (optional - staff can use PIN only)
+  // Staff (cashier/manager) auth = PIN-on-device, yebomart-internal. The
+  // shop OWNER's identity lives on Shop.ownerYeboidSub (YeboID). Staff users
+  // share devices in POS context; per-staff YeboID accounts are overkill.
   pin           String?   // 4-digit PIN for quick auth
   role          UserRole  @default(CASHIER)
   isActive      Boolean   @default(true)
-  
+
   // Permissions
   canDiscount   Boolean   @default(false)
   canVoid       Boolean   @default(false)
   canViewReports Boolean  @default(false)
   canManageStock Boolean  @default(false)
-  
-  // Session
-  refreshToken  String?
+
+  // Session — last PIN login (analytics only).
   lastLoginAt   DateTime?
   
   // Relationships

@@ -1,15 +1,20 @@
-import crypto from 'node:crypto';
 import { prisma } from '@config/prisma';
 import { YeboPayClient, YeboPayChargeError } from './yebopay.client';
 import { CREDIT_PACKS, findPack, type CreditPack } from '@config/creditPacks';
 
-// Synthetic YeboID UUID derived from shopId via SHA-256 → UUID format.
-// Yebomart shops aren't YeboID-linked yet; this gives each shop a stable
-// yebopay wallet that survives shop-owner changes. Replace with the real
-// owner's yeboid_sub once shop accounts are linked to YeboID.
-export function shopIdToYeboidSub(shopId: string): string {
-  const hash = crypto.createHash('sha256').update(`yebomart-shop:${shopId}`).digest('hex');
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+/**
+ * Get the shop owner's YeboID UUID. This is what yebopay keys wallets on,
+ * so cross-product credits unify under one real identity. Throws if the
+ * shop has no owner — should never happen given the schema's @unique
+ * constraint on ownerYeboidSub.
+ */
+export async function getShopOwnerYeboidSub(shopId: string): Promise<string> {
+  const shop = await prisma.shop.findUnique({
+    where: { id: shopId },
+    select: { ownerYeboidSub: true },
+  });
+  if (!shop) throw new Error(`Shop not found: ${shopId}`);
+  return shop.ownerYeboidSub;
 }
 
 export class BillingService {
@@ -26,7 +31,7 @@ export class BillingService {
    * Errors propagate (no silent fallback).
    */
   static async getShopBalance(shopId: string): Promise<{ available: number; currency: string }> {
-    const yeboidSub = shopIdToYeboidSub(shopId);
+    const yeboidSub = await getShopOwnerYeboidSub(shopId);
     const balance = await YeboPayClient.getBalance(yeboidSub);
     return { available: balance.available, currency: balance.currency };
   }
@@ -43,8 +48,9 @@ export class BillingService {
     idempotencyKey?: string;
     metadata?: Record<string, unknown>;
   }) {
+    const yeboidSub = await getShopOwnerYeboidSub(opts.shopId);
     return YeboPayClient.chargeWallet({
-      yeboidSub: shopIdToYeboidSub(opts.shopId),
+      yeboidSub,
       amount: opts.amount,
       description: opts.description,
       idempotencyKey: opts.idempotencyKey,
@@ -87,7 +93,7 @@ export class BillingService {
       throw new Error('Either packId or customAmountSzl (>=10) is required');
     }
 
-    const yeboidSub = shopIdToYeboidSub(opts.shopId);
+    const yeboidSub = await getShopOwnerYeboidSub(opts.shopId);
     const checkout = await YeboPayClient.createCheckout({
       amount: priceSzl,
       currency: 'SZL',

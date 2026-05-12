@@ -11,8 +11,11 @@ export interface ITokenPayload {
 }
 
 export interface IDecodedToken extends ITokenPayload {
-  iat: number;
-  exp: number;
+  // Optional — YeboID-authed requests synthesize the decoded shape in
+  // middleware after JWKS validation; no iat/exp because the source token
+  // is RS256 from YeboID and yebomart doesn't decode the timestamps itself.
+  iat?: number;
+  exp?: number;
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'yebomart-secret-key';

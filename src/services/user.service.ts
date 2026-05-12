@@ -1,15 +1,14 @@
-import bcrypt from 'bcrypt';
 import { prisma } from '@config/prisma';
 import { Prisma, UserRole } from '@prisma/client';
 
-const SALT_ROUNDS = 12;
+// Staff users authenticate with PIN-on-device (yebomart-internal). The shop
+// OWNER's identity is YeboID — separate concern; no password on staff.
 
 interface CreateUserInput {
   shopId: string;
   name: string;
   phone: string;
   email?: string;
-  password: string;
   pin?: string;
   role: UserRole;
   canDiscount?: boolean;
@@ -22,7 +21,6 @@ interface UpdateUserInput {
   name?: string;
   phone?: string;
   email?: string;
-  password?: string;
   pin?: string;
   role?: UserRole;
   isActive?: boolean;
@@ -49,18 +47,12 @@ export class UserService {
       throw new Error('A user with this phone number already exists');
     }
 
-    // Hash password if provided (staff can use PIN only)
-    const hashedPassword = input.password 
-      ? await bcrypt.hash(input.password, SALT_ROUNDS)
-      : undefined;
-
     const user = await prisma.user.create({
       data: {
         shopId: input.shopId,
         name: input.name,
         phone: input.phone,
         email: input.email,
-        password: hashedPassword,
         pin: input.pin,
         role: input.role,
         canDiscount: input.canDiscount ?? false,
@@ -181,13 +173,8 @@ export class UserService {
       }
     }
 
-    // Hash password if being updated
     const updateData: Prisma.UserUpdateInput = { ...data };
-    if (data.password) {
-      updateData.password = await bcrypt.hash(data.password, SALT_ROUNDS);
-    }
-    
-    // Remove empty pin (don't overwrite existing)
+    // Don't overwrite existing PIN with empty.
     if (!data.pin) {
       delete updateData.pin;
     }

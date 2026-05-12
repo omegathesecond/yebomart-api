@@ -237,7 +237,10 @@ export class SaleController {
         where: saleId
           ? { id: saleId, shopId: req.user.shopId }
           : { receiptNumber: receiptNumber as string, shopId: req.user.shopId },
-        include: { items: true, shop: { select: { name: true, countryCode: true } } },
+        include: {
+          items: true,
+          shop: { select: { name: true, countryCode: true, ownerYeboidSub: true } },
+        },
       });
 
       if (!sale) {
@@ -246,13 +249,10 @@ export class SaleController {
       }
 
       const { YeboPayClient } = await import('@services/yebopay.client');
-      const crypto = await import('node:crypto');
 
-      // Synthetic yeboid_sub per-shop so the invoice attributes consistently.
-      const yeboidSub = (() => {
-        const hash = crypto.createHash('sha256').update(`yebomart-shop:${sale.shopId}`).digest('hex');
-        return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
-      })();
+      // Owner's REAL YeboID sub — yebopay attributes the invoice to it so
+      // the shop's wallet + invoice ledger unifies under one identity.
+      const yeboidSub = sale.shop.ownerYeboidSub;
 
       // Map sale items → invoice line items (currency comes from the shop's country).
       const { getCurrencyForCountry } = await import('@utils/currencies');

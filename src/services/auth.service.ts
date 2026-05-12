@@ -1,10 +1,8 @@
-import bcrypt from 'bcrypt';
 import { prisma } from '@config/prisma';
 import { JWTUtil, ITokenPayload } from '@utils/jwt';
 import { UserRole } from '@prisma/client';
 import { getCountryMetadata } from '@config/countries';
-
-const SALT_ROUNDS = 12;
+import { YeboIDClient, type YeboIDUserInfo } from './yeboid.client';
 
 // Map phone prefixes to country codes (ordered longest first for accurate matching)
 const PHONE_TO_COUNTRY: [string, string][] = [
@@ -37,20 +35,6 @@ function getCountryFromPhone(phone: string): string | null {
   return null;
 }
 
-interface RegisterShopInput {
-  name: string;
-  ownerName: string;
-  ownerPhone: string;
-  ownerEmail?: string;
-  password: string;
-  assistantName?: string;
-  businessType?: string;
-  // Country & Localization
-  countryCode?: string;
-  phoneCountryCode?: string;
-  currencySymbol?: string;
-}
-
 interface LoginResult {
   shop: {
     id: string;
@@ -65,62 +49,86 @@ interface LoginResult {
     role: UserRole;
   };
   accessToken: string;
-  refreshToken: string;
+  refreshToken?: string;
+}
+
+interface YeboIDSignInResult {
+  shop: LoginResult['shop'];
+  isNewShop: boolean;
 }
 
 export class AuthService {
   /**
-   * Register a new shop (owner signup)
+   * Sign in / sign up a shop OWNER via YeboID. Called from
+   * POST /api/auth/yeboid/exchange after the frontend completes the OAuth
+   * flow. The yeboidUserId is the verified `sub` from the access token; the
+   * accessToken itself is passed through to /oauth/userinfo for profile
+   * sync on first signup.
+   *
+   * If a Shop already exists for this yeboid_sub → return it (sign-in).
+   * If not → create a new Shop using YeboID profile data (sign-up).
+   *
+   * Optional `signupOverrides` lets the frontend pass a custom shop name +
+   * business type that YeboID doesn't know about (shop branding). Owner
+   * identity fields (name/phone/email) ALWAYS come from YeboID.
    */
-  static async registerShop(input: RegisterShopInput): Promise<LoginResult> {
-    // Check if phone already exists
-    const existing = await prisma.shop.findUnique({
-      where: { ownerPhone: input.ownerPhone },
-    });
+  static async signInWithYeboID(
+    yeboidUserId: string,
+    accessToken: string,
+    signupOverrides?: { shopName?: string; businessType?: string; assistantName?: string },
+  ): Promise<YeboIDSignInResult> {
+    const existing = await prisma.shop.findUnique({ where: { ownerYeboidSub: yeboidUserId } });
 
     if (existing) {
-      throw new Error('Phone number already registered');
+      return {
+        shop: {
+          id: existing.id,
+          name: existing.name,
+          ownerName: existing.ownerName,
+          businessType: existing.businessType,
+          assistantName: existing.assistantName,
+        },
+        isNewShop: false,
+      };
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
+    // First-time signup: fetch profile from YeboID, create Shop.
+    let profile: YeboIDUserInfo;
+    try {
+      profile = await YeboIDClient.getUserInfo(accessToken);
+    } catch (err) {
+      throw new Error(
+        `Failed to fetch YeboID profile for signup: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
-    // Derive country from phone number (most reliable)
-    const phoneCountry = getCountryFromPhone(input.ownerPhone);
-    const resolvedCountry = phoneCountry || input.countryCode || 'SZ';
-    const countryData = getCountryMetadata(resolvedCountry);
+    if (profile.sub !== yeboidUserId) {
+      throw new Error('YeboID profile sub does not match the validated token sub');
+    }
+    if (!profile.phone_number) {
+      throw new Error('YeboID profile missing phone_number — cannot create shop without owner phone');
+    }
 
-    // Create shop
+    const ownerPhone = profile.phone_number;
+    const resolvedCountry = getCountryFromPhone(ownerPhone) ?? profile.country ?? 'SZ';
+    const country = getCountryMetadata(resolvedCountry);
+
     const shop = await prisma.shop.create({
       data: {
-        name: input.name,
-        ownerName: input.ownerName,
-        ownerPhone: input.ownerPhone,
-        ownerEmail: input.ownerEmail,
-        password: hashedPassword,
-        assistantName: input.assistantName || 'Yebo',
-        businessType: input.businessType || 'general',
-        // Country & Localization — derive all fields from countryCode
+        ownerYeboidSub: yeboidUserId,
+        name: signupOverrides?.shopName ?? `${profile.name ?? 'New'}'s Shop`,
+        ownerName: profile.name ?? 'Owner',
+        ownerPhone,
+        ownerEmail: profile.email ?? null,
+        businessType: signupOverrides?.businessType ?? 'general',
+        assistantName: signupOverrides?.assistantName ?? 'Yebo',
         countryCode: resolvedCountry,
-        phoneCountryCode: input.phoneCountryCode || countryData.phoneCode,
-        currencySymbol: input.currencySymbol || countryData.currencySymbol,
-        currency: countryData.currency,
-        timezone: countryData.timezone,
+        phoneCountryCode: country.phoneCode,
+        currencySymbol: country.currencySymbol,
+        currency: country.currency,
+        timezone: country.timezone,
       },
     });
-
-    // Generate tokens
-    const payload: ITokenPayload = {
-      id: shop.id,
-      shopId: shop.id,
-      phone: shop.ownerPhone,
-      email: shop.ownerEmail || undefined,
-      role: 'OWNER',
-      type: 'shop',
-    };
-
-    const accessToken = JWTUtil.generateAccessToken(payload);
-    const refreshToken = JWTUtil.generateRefreshToken(payload);
 
     return {
       shop: {
@@ -130,68 +138,17 @@ export class AuthService {
         businessType: shop.businessType,
         assistantName: shop.assistantName,
       },
-      accessToken,
-      refreshToken,
+      isNewShop: true,
     };
   }
 
   /**
-   * Login with phone + password (shop owner)
-   */
-  static async loginShop(phone: string, password: string): Promise<LoginResult> {
-    // Normalize phone to E.164 format
-    let normalizedPhone = phone.replace(/\D/g, '');
-    if (normalizedPhone.startsWith('0')) {
-      normalizedPhone = '268' + normalizedPhone.slice(1);
-    }
-    if (!normalizedPhone.startsWith('268')) {
-      normalizedPhone = '268' + normalizedPhone;
-    }
-    normalizedPhone = '+' + normalizedPhone;
-
-    const shop = await prisma.shop.findUnique({
-      where: { ownerPhone: normalizedPhone },
-    });
-
-    if (!shop) {
-      throw new Error('Invalid phone or password');
-    }
-
-    const isValidPassword = await bcrypt.compare(password, shop.password);
-    if (!isValidPassword) {
-      throw new Error('Invalid phone or password');
-    }
-
-    const payload: ITokenPayload = {
-      id: shop.id,
-      shopId: shop.id,
-      phone: shop.ownerPhone,
-      email: shop.ownerEmail || undefined,
-      role: 'OWNER',
-      type: 'shop',
-    };
-
-    const accessToken = JWTUtil.generateAccessToken(payload);
-    const refreshToken = JWTUtil.generateRefreshToken(payload);
-
-    return {
-      shop: {
-        id: shop.id,
-        name: shop.name,
-        ownerName: shop.ownerName,
-        businessType: shop.businessType,
-        assistantName: shop.assistantName,
-      },
-      accessToken,
-      refreshToken,
-    };
-  }
-
-  /**
-   * Login as staff user with phone + PIN
+   * Staff (cashier / manager) login with PIN. yebomart-internal — issues a
+   * yebomart-signed JWT scoped to the staff member's shop. The shop OWNER
+   * identity lives separately on YeboID.
    */
   static async loginUser(phone: string, pin: string): Promise<LoginResult> {
-    // Normalize phone
+    // Normalize phone (default to Eswatini if no country prefix).
     let normalizedPhone = phone.replace(/\D/g, '');
     if (normalizedPhone.startsWith('0')) {
       normalizedPhone = '268' + normalizedPhone.slice(1);
@@ -201,29 +158,18 @@ export class AuthService {
     }
     normalizedPhone = '+' + normalizedPhone;
 
-    // Find user by phone
     const user = await prisma.user.findFirst({
       where: {
-        OR: [
-          { phone: normalizedPhone },
-          { phone: phone }, // Try original format too
-        ],
+        OR: [{ phone: normalizedPhone }, { phone }],
         isActive: true,
       },
-      include: {
-        shop: true,
-      },
+      include: { shop: true },
     });
 
-    if (!user || !user.pin) {
+    if (!user || !user.pin || user.pin !== pin) {
       throw new Error('Invalid phone or PIN');
     }
 
-    if (user.pin !== pin) {
-      throw new Error('Invalid phone or PIN');
-    }
-
-    // Update last login
     await prisma.user.update({
       where: { id: user.id },
       data: { lastLoginAt: new Date() },
@@ -237,15 +183,6 @@ export class AuthService {
       type: 'user',
     };
 
-    const accessToken = JWTUtil.generateAccessToken(payload);
-    const refreshToken = JWTUtil.generateRefreshToken(payload);
-
-    // Store refresh token
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { refreshToken },
-    });
-
     return {
       shop: {
         id: user.shop.id,
@@ -254,82 +191,43 @@ export class AuthService {
         businessType: user.shop.businessType,
         assistantName: user.shop.assistantName,
       },
-      user: {
-        id: user.id,
-        name: user.name,
-        role: user.role,
+      user: { id: user.id, name: user.name, role: user.role },
+      accessToken: JWTUtil.generateAccessToken(payload),
+    };
+  }
+
+  /**
+   * Fetch the current authenticated entity's profile. Called by GET /api/auth/me.
+   * Two paths:
+   *   - YeboID-authed (shop owner): yeboidUserId is the lookup key.
+   *   - Staff PIN (yebomart JWT): userId/shopId came from req.user.
+   */
+  static async getMeByYeboID(yeboidUserId: string) {
+    const shop = await prisma.shop.findUnique({
+      where: { ownerYeboidSub: yeboidUserId },
+      select: {
+        id: true,
+        name: true,
+        ownerName: true,
+        ownerPhone: true,
+        ownerEmail: true,
+        businessType: true,
+        assistantName: true,
+        currency: true,
+        timezone: true,
+        address: true,
+        logoUrl: true,
+        countryCode: true,
+        phoneCountryCode: true,
+        currencySymbol: true,
+        createdAt: true,
       },
-      accessToken,
-      refreshToken,
-    };
+    });
+    if (!shop) throw new Error('Shop not found for this YeboID user');
+    return { shop, role: 'OWNER' as const };
   }
 
-  /**
-   * Refresh access token
-   */
-  static async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
-    const decoded = JWTUtil.verifyRefreshToken(refreshToken);
-
-    if (!decoded) {
-      throw new Error('Invalid refresh token');
-    }
-
-    const payload: ITokenPayload = {
-      id: decoded.id,
-      shopId: decoded.shopId,
-      phone: decoded.phone,
-      email: decoded.email,
-      role: decoded.role,
-      type: decoded.type,
-    };
-
-    const newAccessToken = JWTUtil.generateAccessToken(payload);
-    const newRefreshToken = JWTUtil.generateRefreshToken(payload);
-
-    return {
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken,
-    };
-  }
-
-  /**
-   * Get current user/shop info
-   */
-  static async getMe(userId: string, type: 'shop' | 'user' | 'admin') {
-    if (type === 'admin') {
-      // Admin users are handled separately
-      return { admin: true };
-    }
-    if (type === 'shop') {
-      const shop = await prisma.shop.findUnique({
-        where: { id: userId },
-        select: {
-          id: true,
-          name: true,
-          ownerName: true,
-          ownerPhone: true,
-          ownerEmail: true,
-          businessType: true,
-          assistantName: true,
-          currency: true,
-          timezone: true,
-          address: true,
-          logoUrl: true,
-          createdAt: true,
-          // Country & Localization
-          countryCode: true,
-          phoneCountryCode: true,
-          currencySymbol: true,
-        },
-      });
-
-      if (!shop) {
-        throw new Error('Shop not found');
-      }
-
-      return { shop, role: 'OWNER' };
-    }
-
+  static async getMeByStaffToken(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -346,23 +244,18 @@ export class AuthService {
         },
       },
     });
-
-    if (!user) {
-      throw new Error('User not found');
-    }
-
+    if (!user) throw new Error('Staff user not found');
     return {
+      shop: user.shop,
       user: {
         id: user.id,
         name: user.name,
-        phone: user.phone,
         role: user.role,
         canDiscount: user.canDiscount,
         canVoid: user.canVoid,
         canViewReports: user.canViewReports,
         canManageStock: user.canManageStock,
       },
-      shop: user.shop,
     };
   }
 }

@@ -3,114 +3,104 @@ import Joi from 'joi';
 import { AuthService } from '@services/auth.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { JwksValidator } from '@yebo/mcp-server';
 
-// Validation schemas
-export const registerSchema = Joi.object({
-  name: Joi.string().required().trim().min(2).max(100),
-  ownerName: Joi.string().required().trim().min(2).max(100),
-  ownerPhone: Joi.string().required().pattern(/^\+[1-9]\d{1,14}$/).messages({
-    'string.pattern.base': 'Phone must be in E.164 format (e.g., +26878422613)',
-  }),
-  ownerEmail: Joi.string().email().optional().lowercase().trim(),
-  password: Joi.string().min(6).required(),
-  assistantName: Joi.string().optional().trim().max(50),
-  businessType: Joi.string().optional().valid(
-    'general', 'tuckshop', 'spaza', 'tyre', 'hardware', 'grocery', 
-    'pharmacy', 'salon', 'restaurant', 'clothing', 'electronics', 'butchery',
-    'bakery', 'liquor', 'beauty', 'makeup', 'spa', 'autoparts', 'carwash',
-    'building', 'computer', 'repair', 'shoes', 'tailoring', 'thrift',
-    'traditional', 'furniture', 'homeware', 'stationery', 'printing',
-    'bookshop', 'agri', 'nursery', 'laundry', 'photography', 'gaming',
-    'sport', 'music', 'gift', 'jewellery', 'florist', 'pet', 'craft'
-  ).default('general'),
-  countryCode: Joi.string().optional().uppercase().max(3).default('SZ'),
-  phoneCountryCode: Joi.string().optional().pattern(/^\+[1-9]\d{0,3}$/),
+// Shop OWNER sign-in via YeboID. Frontend completes OAuth on YeboID's hosted
+// UI, then POSTs the access_token here. We validate the token via JWKS and
+// look up (or create) the Shop.
+export const yeboidExchangeSchema = Joi.object({
+  accessToken: Joi.string().required(),
+  shopName: Joi.string().optional(),       // optional override for first signup
+  businessType: Joi.string().optional(),
+  assistantName: Joi.string().optional(),
 });
 
-export const loginSchema = Joi.object({
-  phone: Joi.string().required(),
-  password: Joi.string().required(),
-});
-
+// Staff PIN login (cashier/manager logging into a shop's device).
 export const userLoginSchema = Joi.object({
   phone: Joi.string().required(),
-  pin: Joi.string().required().length(4),
+  pin: Joi.string().length(4).pattern(/^\d{4}$/).required(),
 });
 
-export const refreshTokenSchema = Joi.object({
-  refreshToken: Joi.string().required(),
-});
+const YEBOID_JWKS_URI = process.env.YEBOID_JWKS_URI ?? 'https://api.yeboid.com/.well-known/jwks.json';
+const YEBOID_ISSUER = process.env.YEBOID_ISSUER ?? 'https://api.yeboid.com';
+let cachedValidator: JwksValidator | null = null;
+function getValidator(): JwksValidator {
+  if (cachedValidator) return cachedValidator;
+  cachedValidator = new JwksValidator({ jwksUri: YEBOID_JWKS_URI, issuer: YEBOID_ISSUER });
+  return cachedValidator;
+}
 
 export class AuthController {
   /**
-   * Register a new shop
+   * POST /api/auth/yeboid/exchange — shop owner sign-in / sign-up.
+   *
+   * Body: { accessToken, shopName?, businessType?, assistantName? }
+   * Returns: { shop, isNewShop }
+   *
+   * No yebomart token is issued — future requests use the same YeboID
+   * access_token directly (yebomart validates each request via JWKS).
    */
-  static async register(req: Request, res: Response): Promise<void> {
+  static async yeboidExchange(req: Request, res: Response): Promise<void> {
     try {
-      const result = await AuthService.registerShop(req.body);
-      ApiResponse.created(res, result, 'Shop registered successfully');
-    } catch (error: any) {
-      if (error.message.includes('already registered')) {
-        ApiResponse.conflict(res, error.message);
-      } else {
-        ApiResponse.badRequest(res, error.message, error);
+      const { accessToken, shopName, businessType, assistantName } = req.body;
+
+      let yeboidUserId: string;
+      try {
+        const auth = await getValidator().verify(accessToken);
+        yeboidUserId = auth.userId;
+      } catch {
+        ApiResponse.unauthorized(res, 'Invalid or expired YeboID access token');
+        return;
       }
-    }
-  }
 
-  /**
-   * Login as shop owner
-   */
-  static async login(req: Request, res: Response): Promise<void> {
-    try {
-      const { phone, password } = req.body;
-      const result = await AuthService.loginShop(phone, password);
-      ApiResponse.success(res, result, 'Login successful');
+      const result = await AuthService.signInWithYeboID(yeboidUserId, accessToken, {
+        shopName,
+        businessType,
+        assistantName,
+      });
+
+      ApiResponse.success(
+        res,
+        result,
+        result.isNewShop ? 'Shop created' : 'Signed in',
+      );
     } catch (error: any) {
-      ApiResponse.unauthorized(res, error.message);
+      console.error('[AuthController] yeboid/exchange error:', error?.message ?? error);
+      ApiResponse.serverError(res, error?.message ?? 'Sign-in failed');
     }
   }
 
-  /**
-   * Login as staff user (with PIN)
-   */
+  /** POST /api/auth/login/user — staff PIN login (yebomart-internal). */
   static async userLogin(req: Request, res: Response): Promise<void> {
     try {
       const { phone, pin } = req.body;
       const result = await AuthService.loginUser(phone, pin);
       ApiResponse.success(res, result, 'Staff login successful');
     } catch (error: any) {
-      ApiResponse.unauthorized(res, error.message);
+      if (error.message?.includes('Invalid')) {
+        ApiResponse.unauthorized(res, error.message);
+      } else {
+        ApiResponse.serverError(res, error.message);
+      }
     }
   }
 
-  /**
-   * Refresh access token
-   */
-  static async refreshToken(req: Request, res: Response): Promise<void> {
-    try {
-      const { refreshToken } = req.body;
-      const result = await AuthService.refreshToken(refreshToken);
-      ApiResponse.success(res, result, 'Token refreshed');
-    } catch (error: any) {
-      ApiResponse.unauthorized(res, error.message);
-    }
-  }
-
-  /**
-   * Get current user/shop info
-   */
+  /** GET /api/auth/me — works for both YeboID-authed owners and PIN-authed staff. */
   static async getMe(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        ApiResponse.unauthorized(res, 'Unauthorized');
+        ApiResponse.unauthorized(res, 'Not authenticated');
         return;
       }
-
-      const result = await AuthService.getMe(req.user.id, req.user.type);
+      if (req.yeboidUserId) {
+        const result = await AuthService.getMeByYeboID(req.yeboidUserId);
+        ApiResponse.success(res, result);
+        return;
+      }
+      const result = await AuthService.getMeByStaffToken(req.user.id);
       ApiResponse.success(res, result);
     } catch (error: any) {
-      ApiResponse.serverError(res, error.message, error);
+      ApiResponse.notFound(res, error?.message ?? 'Profile not found');
     }
   }
 }

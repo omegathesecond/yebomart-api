@@ -1,32 +1,92 @@
+/**
+ * Unified yebomart auth middleware.
+ *
+ * Two valid tokens:
+ *   - YeboID Bearer (RS256, JWKS-validated)  → shop OWNER. We look up the
+ *     Shop by ownerYeboidSub and populate req.user with the owner shape.
+ *   - Staff HS256 Bearer (yebomart-signed)   → cashier/manager. PIN-issued.
+ *
+ * Routes don't need to know which; they read `req.user.shopId` + role.
+ * For admin-dashboard routes, `authenticateAdmin` is the separate path
+ * (yebomart-issued admin tokens — that's an internal-staff concern).
+ */
+
 import { Request, Response, NextFunction } from 'express';
 import { JWTUtil, IDecodedToken } from '@utils/jwt';
 import { ApiResponse } from '@utils/ApiResponse';
 import { UserRole } from '@prisma/client';
+import { JwksValidator, extractBearerToken } from '@yebo/mcp-server';
+import { prisma } from '@config/prisma';
 
 export interface AuthRequest extends Request {
   user?: IDecodedToken;
+  yeboidUserId?: string;
+}
+
+const YEBOID_JWKS_URI = process.env.YEBOID_JWKS_URI ?? 'https://api.yeboid.com/.well-known/jwks.json';
+const YEBOID_ISSUER = process.env.YEBOID_ISSUER ?? 'https://api.yeboid.com';
+
+let cachedJwksValidator: JwksValidator | null = null;
+function getJwksValidator(): JwksValidator {
+  if (cachedJwksValidator) return cachedJwksValidator;
+  cachedJwksValidator = new JwksValidator({ jwksUri: YEBOID_JWKS_URI, issuer: YEBOID_ISSUER });
+  return cachedJwksValidator;
 }
 
 /**
- * Require authentication
+ * Authenticate a request as a shop OWNER (YeboID JWT) or STAFF member
+ * (yebomart-signed HS256). Populates req.user uniformly. Most routes use this.
  */
-export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction): void => {
+export const authMiddleware = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token) {
       ApiResponse.unauthorized(res, 'No token provided');
       return;
     }
 
-    const token = authHeader.substring(7);
-    const decoded = JWTUtil.verifyAccessToken(token);
+    // Try YeboID first — RS256 + JWKS. If it parses + validates, this is an
+    // owner. If it errors (wrong issuer / wrong signing alg / bad signature),
+    // fall through to staff HS256 path.
+    try {
+      const auth = await getJwksValidator().verify(token);
+      req.yeboidUserId = auth.userId;
 
+      // Owner → resolve to the Shop they own. One indexed lookup; sub-ms in
+      // practice.
+      const shop = await prisma.shop.findUnique({
+        where: { ownerYeboidSub: auth.userId },
+        select: { id: true, ownerPhone: true, ownerEmail: true },
+      });
+
+      if (!shop) {
+        // Valid YeboID token but no Shop yet. Caller hasn't completed signup.
+        ApiResponse.unauthorized(
+          res,
+          'No shop found for this YeboID account. Complete signup via POST /api/auth/yeboid/exchange.',
+        );
+        return;
+      }
+
+      req.user = {
+        id: shop.id,
+        shopId: shop.id,
+        phone: shop.ownerPhone,
+        email: shop.ownerEmail ?? undefined,
+        role: 'OWNER' as UserRole,
+        type: 'shop',
+      };
+      next();
+      return;
+    } catch {
+      // Not a valid YeboID token — try staff HS256 below.
+    }
+
+    const decoded = JWTUtil.verifyAccessToken(token);
     if (!decoded) {
       ApiResponse.unauthorized(res, 'Invalid or expired token');
       return;
     }
-
     req.user = decoded;
     next();
   } catch (error) {
@@ -35,92 +95,88 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
 };
 
 /**
- * Require specific roles
+ * Require specific roles. Wraps authMiddleware then role-checks.
  */
 export const requireRole = (...roles: UserRole[]) => {
-  return (req: AuthRequest, res: Response, next: NextFunction): void => {
-    authMiddleware(req, res, () => {
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    await authMiddleware(req, res, () => {
       if (!req.user) {
         ApiResponse.unauthorized(res, 'Authentication required');
         return;
       }
-
       if (!roles.includes(req.user.role)) {
         ApiResponse.forbidden(res, `Required role: ${roles.join(' or ')}`);
         return;
       }
-
       next();
     });
   };
 };
 
-/**
- * Owner only
- */
 export const ownerAuth = requireRole('OWNER');
-
-/**
- * Owner or Manager
- */
 export const managerAuth = requireRole('OWNER', 'MANAGER');
-
-/**
- * Any authenticated user
- */
 export const staffAuth = requireRole('OWNER', 'MANAGER', 'CASHIER');
 
 /**
- * Optional auth - sets user if token is valid, but doesn't require it
+ * Optional auth — populates req.user if a valid token is provided, but
+ * doesn't reject if missing. Used by /api/billing/plans-style public-ish
+ * endpoints that personalize when authed.
  */
-export const optionalAuth = (req: AuthRequest, res: Response, next: NextFunction): void => {
+export const optionalAuth = async (req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authHeader = req.headers.authorization;
-
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.substring(7);
-      const decoded = JWTUtil.verifyAccessToken(token);
-      if (decoded) {
-        req.user = decoded;
-      }
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token) {
+      next();
+      return;
     }
-
-    next();
+    try {
+      const auth = await getJwksValidator().verify(token);
+      const shop = await prisma.shop.findUnique({
+        where: { ownerYeboidSub: auth.userId },
+        select: { id: true, ownerPhone: true, ownerEmail: true },
+      });
+      if (shop) {
+        req.yeboidUserId = auth.userId;
+        req.user = {
+          id: shop.id,
+          shopId: shop.id,
+          phone: shop.ownerPhone,
+          email: shop.ownerEmail ?? undefined,
+          role: 'OWNER' as UserRole,
+          type: 'shop',
+        };
+      }
+    } catch {
+      const decoded = JWTUtil.verifyAccessToken(token);
+      if (decoded) req.user = decoded;
+    }
   } catch {
-    // Token invalid, but that's okay for optional auth
-    next();
+    // Optional — never throw to next().
   }
+  next();
 };
 
 /**
- * Admin authentication middleware
+ * Admin dashboard authentication — separate from shop auth. Yebomart-signed
+ * HS256, admin scope. For internal Omevision staff using the admin dashboard
+ * (NOT shop owners or shop staff).
  */
 export const authenticateAdmin = (req: AuthRequest, res: Response, next: NextFunction): void => {
   try {
     const authHeader = req.headers.authorization;
-
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       ApiResponse.unauthorized(res, 'No token provided');
       return;
     }
-
     const token = authHeader.substring(7);
     const decoded = JWTUtil.verifyAccessToken(token);
-
-    if (!decoded) {
-      ApiResponse.unauthorized(res, 'Invalid or expired token');
+    if (!decoded || decoded.type !== 'admin') {
+      ApiResponse.unauthorized(res, 'Admin access required');
       return;
     }
-
-    // Check if it's an admin token
-    if (decoded.type !== 'admin') {
-      ApiResponse.forbidden(res, 'Admin access required');
-      return;
-    }
-
     req.user = decoded;
     next();
-  } catch (error) {
+  } catch {
     ApiResponse.unauthorized(res, 'Authentication failed');
   }
 };
