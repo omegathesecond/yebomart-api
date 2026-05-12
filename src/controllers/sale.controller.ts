@@ -206,7 +206,12 @@ export class SaleController {
   }
 
   /**
-   * Email receipt to customer
+   * Email receipt to customer — routes through YeboPay, which creates a
+   * PAID-on-creation invoice (the sale already happened), renders a PDF, and
+   * delivers via YeboLink. Same external contract as before:
+   *   body: { email, customerName?, saleId? }
+   * but the line items + totals are now loaded from the Sale row in DB
+   * (authoritative) instead of trusted from the request body.
    */
   static async emailReceipt(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -215,34 +220,86 @@ export class SaleController {
         return;
       }
 
-      const { email, shopName, receiptNumber, items, subtotal, discount, total, date } = req.body;
+      const { email, customerName, saleId, receiptNumber } = req.body;
 
-      if (!email || !receiptNumber) {
-        ApiResponse.badRequest(res, 'Email and receipt number are required');
+      if (!email) {
+        ApiResponse.badRequest(res, 'email is required');
+        return;
+      }
+      // Accept saleId OR receiptNumber to identify the sale. saleId is preferred.
+      if (!saleId && !receiptNumber) {
+        ApiResponse.badRequest(res, 'Either saleId or receiptNumber is required to identify the sale');
         return;
       }
 
-      // Import email service
-      const { EmailService } = await import('@services/email.service');
-
-      const result = await EmailService.sendReceipt({
-        email,
-        shopName: shopName || 'YeboMart',
-        receiptNumber,
-        items: items || [],
-        subtotal: subtotal || total || 0,
-        discount: discount || 0,
-        total: total || 0,
-        date: date || new Date().toISOString(),
+      const { prisma } = await import('@config/prisma');
+      const sale = await prisma.sale.findFirst({
+        where: saleId
+          ? { id: saleId, shopId: req.user.shopId }
+          : { receiptNumber: receiptNumber as string, shopId: req.user.shopId },
+        include: { items: true, shop: { select: { name: true, countryCode: true } } },
       });
 
-      if (result.success) {
-        ApiResponse.success(res, { success: true, messageId: result.messageId }, 'Receipt emailed successfully');
-      } else {
-        ApiResponse.badRequest(res, result.error || 'Failed to send email');
+      if (!sale) {
+        ApiResponse.notFound(res, 'Sale not found for this shop');
+        return;
       }
+
+      const { YeboPayClient } = await import('@services/yebopay.client');
+      const crypto = await import('node:crypto');
+
+      // Synthetic yeboid_sub per-shop so the invoice attributes consistently.
+      const yeboidSub = (() => {
+        const hash = crypto.createHash('sha256').update(`yebomart-shop:${sale.shopId}`).digest('hex');
+        return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+      })();
+
+      // Map sale items → invoice line items (currency comes from the shop's country).
+      const { getCurrencyForCountry } = await import('@utils/currencies');
+      const currency = getCurrencyForCountry(sale.shop.countryCode);
+      const invoiceCurrency = currency.stripeSupported ? currency.code : 'USD';
+      const fxRate = currency.stripeSupported ? 1 : currency.rate;
+
+      const lineItems = sale.items.map((item: typeof sale.items[number]) => ({
+        description: item.productName,
+        quantity: item.quantity,
+        unitPrice: Math.round((item.unitPrice / fxRate) * 100) / 100,
+      }));
+
+      // Create the invoice as PAID — the customer has already paid the shop.
+      const invoice = await YeboPayClient.createInvoice({
+        yeboidSub,
+        currency: invoiceCurrency,
+        dueDate: sale.createdAt.toISOString(),  // already paid; due date = sale date
+        lineItems,
+        toEmail: email,
+        toName: typeof customerName === 'string' ? customerName : undefined,
+        description: `Receipt from ${sale.shop.name} — sale ${sale.receiptNumber ?? sale.id}`,
+        status: 'PAID',
+        paidAt: sale.createdAt.toISOString(),
+        amountPaid: Math.round((sale.totalAmount / fxRate) * 100) / 100,
+        metadata: {
+          flow: 'yebomart-pos-receipt',
+          saleId: sale.id,
+          shopId: sale.shopId,
+          paymentMethod: sale.paymentMethod,
+        },
+      });
+
+      const sent = await YeboPayClient.sendInvoice(invoice.id);
+
+      ApiResponse.success(
+        res,
+        {
+          success: true,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.number,
+          pdfUrl: sent.pdf_url,
+        },
+        'Receipt emailed successfully'
+      );
     } catch (error: any) {
-      ApiResponse.serverError(res, error.message, error);
+      ApiResponse.serverError(res, error?.message ?? 'Failed to send receipt', error);
     }
   }
 }

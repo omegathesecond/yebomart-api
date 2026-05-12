@@ -28,6 +28,35 @@ export interface CreateCheckoutInput {
   email?: string;
   metadata?: Record<string, string>;
   idempotencyKey?: string;
+  invoiceId?: string;
+}
+
+export interface CreateInvoiceInput {
+  yeboidSub: string;
+  currency: string;
+  dueDate: string; // ISO-8601
+  lineItems: Array<{ description: string; quantity: number; unitPrice: number }>;
+  toEmail: string;
+  toName?: string;
+  description?: string;
+  status?: 'DRAFT' | 'PAID'; // PAID for POS receipts
+  paidAt?: string; // ISO-8601, only used when status=PAID
+  amountPaid?: number; // only used when status=PAID
+  metadata?: Record<string, string>;
+}
+
+export interface YeboPayInvoiceDto {
+  id: string;
+  number: string;
+  status: 'DRAFT' | 'SENT' | 'PAID' | 'VOID' | 'OVERDUE';
+  amount_due: string;
+  amount_paid: string;
+  currency: string;
+  pdf_url: string | null;
+  sent_at: string | null;
+  paid_at: string | null;
+  to_email: string | null;
+  charge_id: string | null;
 }
 
 export interface YeboPayCheckoutDto {
@@ -69,6 +98,7 @@ export class YeboPayClient {
         description: input.description,
         email: input.email,
         metadata: input.metadata,
+        invoice_id: input.invoiceId,
       }),
     });
 
@@ -86,6 +116,43 @@ export class YeboPayClient {
     const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayCheckoutDto>;
     if (!res.ok || !body.success || !body.data) {
       throw new Error(`YeboPay GET /v1/checkouts/${id} ${res.status}: ${body.error ?? 'unknown error'}`);
+    }
+    return body.data;
+  }
+
+  static async createInvoice(input: CreateInvoiceInput): Promise<YeboPayInvoiceDto> {
+    const res = await fetch(`${BASE_URL}/v1/invoices`, {
+      method: 'POST',
+      headers: { 'X-API-Key': getApiKey(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        yeboid_sub: input.yeboidSub,
+        currency: input.currency,
+        due_date: input.dueDate,
+        line_items: input.lineItems,
+        to_email: input.toEmail,
+        to_name: input.toName,
+        description: input.description,
+        status: input.status,
+        paid_at: input.paidAt,
+        amount_paid: input.amountPaid,
+        metadata: input.metadata,
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayInvoiceDto>;
+    if (!res.ok || !body.success || !body.data) {
+      throw new Error(`YeboPay POST /v1/invoices ${res.status}: ${body.error ?? 'unknown error'}`);
+    }
+    return body.data;
+  }
+
+  static async sendInvoice(id: string): Promise<YeboPayInvoiceDto> {
+    const res = await fetch(`${BASE_URL}/v1/invoices/${encodeURIComponent(id)}/send`, {
+      method: 'POST',
+      headers: { 'X-API-Key': getApiKey() },
+    });
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayInvoiceDto>;
+    if (!res.ok || !body.success || !body.data) {
+      throw new Error(`YeboPay POST /v1/invoices/${id}/send ${res.status}: ${body.error ?? 'unknown error'}`);
     }
     return body.data;
   }
