@@ -5,6 +5,10 @@ RUN apt-get update -y && apt-get install -y openssl
 WORKDIR /app
 
 COPY package*.json ./
+# Vendored YeboID JWKS validator (local to this directory). The package.json
+# references it as `file:yebo-mcp-server-0.1.0.tgz`, so it must exist in the
+# build context BEFORE `npm ci` runs.
+COPY yebo-mcp-server-0.1.0.tgz ./yebo-mcp-server-0.1.0.tgz
 
 RUN npm ci
 
