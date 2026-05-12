@@ -5,9 +5,50 @@ import { ApiResponse } from '@utils/ApiResponse';
 import { prisma } from '@config/prisma';
 
 /**
- * Require a specific feature (checks license tier)
+ * Pay-as-you-go: tier-based feature gating is DELETED.
+ * All features are available to every shop. Billable actions deduct credits
+ * from the shop's yebopay wallet via BillingService.chargeShopCredits().
+ *
+ * These middleware functions remain as no-ops to avoid breaking imports in
+ * routes that haven't been touched yet — they call next() unconditionally.
+ * Once all routes are audited, the require* exports can be deleted entirely.
  */
-export const requireFeature = (feature: string) => {
+
+export const requireFeature = (_feature: string) => {
+  return async (_req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
+    next();
+  };
+};
+
+export const requirePro = requireFeature('unlimited_products');
+export const requireBusiness = requireFeature('advanced_analytics');
+
+/**
+ * Pay-as-you-go: product + user limits are GONE. All shops can add unlimited
+ * products and staff. The cost-recovery path is per-action credit charging
+ * (AI queries, comms sends), not arbitrary count caps. These functions stay
+ * as no-ops to avoid breaking imports until callers migrate.
+ */
+export const checkProductLimit = async (_req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
+  next();
+};
+
+export const checkUserLimit = async (_req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
+  next();
+};
+
+/**
+ * Pay-as-you-go AI charging.
+ *
+ * Pre-charges the shop's yebopay wallet BEFORE the AI handler runs. If the
+ * balance is insufficient, returns 402 with a "Top up to continue" hint;
+ * frontend routes the user to /billing/topup.
+ *
+ * Usage: `router.post('/ai/query', authMiddleware, requireCredits(CREDIT_COSTS.AI_FLASH, 'AI assistant (Flash)'), handler)`
+ *
+ * Credit costs by model: import from `@config/creditPacks` CREDIT_COSTS.
+ */
+export const requireCredits = (amount: number, description: string) => {
   return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!req.user) {
@@ -15,167 +56,51 @@ export const requireFeature = (feature: string) => {
         return;
       }
 
-      const shop = await prisma.shop.findUnique({
-        where: { id: req.user.shopId },
-        select: { tier: true, licenseExpiry: true },
-      });
+      const { BillingService } = await import('@services/billing.service');
+      const { YeboPayChargeError } = await import('@services/yebopay.client');
 
-      if (!shop) {
-        ApiResponse.notFound(res, 'Shop not found');
-        return;
+      try {
+        const charge = await BillingService.chargeShopCredits({
+          shopId: req.user.shopId,
+          amount,
+          description,
+          // Idempotency on a per-request basis: hash of (shop, route, time-window)
+          // so accidental double-submits within ~10s don't double-charge.
+          idempotencyKey: `${req.user.shopId}:${req.originalUrl}:${Math.floor(Date.now() / 10000)}`,
+        });
+        (req as any).creditCharge = charge;
+
+        // Attach an updated balance hint for the frontend.
+        const balance = await BillingService.getShopBalance(req.user.shopId).catch(() => null);
+        if (balance) (req as any).creditBalance = balance;
+
+        next();
+      } catch (err) {
+        if (err instanceof YeboPayChargeError && err.code === 'INSUFFICIENT_BALANCE') {
+          res.status(402).json({
+            success: false,
+            error: `Insufficient credits. This action costs ${amount} credits.`,
+            code: 'INSUFFICIENT_CREDITS',
+            cost: amount,
+          });
+          return;
+        }
+        throw err;
       }
-
-      // Check if license is expired
-      if (shop.licenseExpiry && shop.licenseExpiry < new Date()) {
-        ApiResponse.forbidden(res, 'License expired. Please renew to access this feature.');
-        return;
-      }
-
-      // Check if feature is available
-      if (!LicenseService.hasFeature(shop.tier, feature)) {
-        ApiResponse.forbidden(res, `This feature requires an upgraded plan. Current: ${shop.tier}`);
-        return;
-      }
-
-      next();
-    } catch (error) {
-      ApiResponse.serverError(res, 'Failed to verify license');
+    } catch (err) {
+      console.error('[Billing] requireCredits failed:', err instanceof Error ? err.message : err);
+      ApiResponse.serverError(res, 'Failed to charge credits');
     }
   };
 };
 
 /**
- * Require PRO tier or higher
+ * Legacy: AI usage tracking via tier limits.
+ * Replaced by requireCredits. Kept as a no-op shim for route imports until
+ * all callers are migrated.
  */
-export const requirePro = requireFeature('unlimited_products');
-
-/**
- * Require BUSINESS tier
- */
-export const requireBusiness = requireFeature('advanced_analytics');
-
-/**
- * Check product limit
- */
-export const checkProductLimit = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-  try {
-    if (!req.user) {
-      ApiResponse.unauthorized(res, 'Authentication required');
-      return;
-    }
-
-    const shop = await prisma.shop.findUnique({
-      where: { id: req.user.shopId },
-      select: {
-        tier: true,
-        _count: { select: { products: true } },
-      },
-    });
-
-    if (!shop) {
-      ApiResponse.notFound(res, 'Shop not found');
-      return;
-    }
-
-    const limits = LicenseService.getTierLimits(shop.tier) ?? { maxProducts: Infinity, maxUsers: Infinity };
-    if (shop._count.products >= limits.maxProducts) {
-      ApiResponse.forbidden(res, `Product limit reached (${limits.maxProducts}). Upgrade to add more products.`);
-      return;
-    }
-
-    next();
-  } catch (error) {
-    ApiResponse.serverError(res, 'Failed to check product limit');
-  }
-};
-
-/**
- * Check user limit for adding staff
- */
-export const checkUserLimit = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-  try {
-    if (!req.user) {
-      ApiResponse.unauthorized(res, 'Authentication required');
-      return;
-    }
-
-    const shop = await prisma.shop.findUnique({
-      where: { id: req.user.shopId },
-      select: {
-        tier: true,
-        _count: { select: { users: true } },
-      },
-    });
-
-    if (!shop) {
-      ApiResponse.notFound(res, 'Shop not found');
-      return;
-    }
-
-    const limits = LicenseService.getTierLimits(shop.tier) ?? { maxProducts: Infinity, maxUsers: Infinity };
-    if (shop._count.users >= limits.maxUsers) {
-      ApiResponse.forbidden(res, `User limit reached (${limits.maxUsers}). Upgrade to add more staff.`);
-      return;
-    }
-
-    next();
-  } catch (error) {
-    ApiResponse.serverError(res, 'Failed to check user limit');
-  }
-};
-
-/**
- * Check and track AI usage limits per tier
- */
-export const checkAiUsage = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-  try {
-    if (!req.user) {
-      ApiResponse.unauthorized(res, 'Authentication required');
-      return;
-    }
-
-    const shop = await prisma.shop.findUnique({
-      where: { id: req.user.shopId },
-      select: { tier: true, monthlyAiQueries: true },
-    });
-
-    if (!shop) {
-      ApiResponse.notFound(res, 'Shop not found');
-      return;
-    }
-
-    const limits = LicenseService.getTierLimits(shop.tier);
-    if (!limits) {
-      next();
-      return;
-    }
-
-    if (limits.aiQueriesPerMonth !== Infinity && shop.monthlyAiQueries >= limits.aiQueriesPerMonth) {
-      const tierNames: Record<string, string> = { LITE: 'Starter', STARTER: 'Business', BUSINESS: 'Pro', PRO: 'Enterprise' };
-      const upgradeTo = tierNames[shop.tier] || 'a higher plan';
-      ApiResponse.forbidden(res, 
-        `AI limit reached (${limits.aiQueriesPerMonth} queries/month on ${shop.tier}). Upgrade to ${upgradeTo} for more.`,
-      );
-      return;
-    }
-
-    // Increment counter in background
-    prisma.shop.update({
-      where: { id: req.user.shopId },
-      data: { monthlyAiQueries: { increment: 1 } },
-    }).catch(console.error);
-
-    // Attach remaining count to response for frontend
-    (req as any).aiUsage = {
-      used: shop.monthlyAiQueries + 1,
-      limit: limits.aiQueriesPerMonth,
-      remaining: limits.aiQueriesPerMonth === Infinity ? Infinity : limits.aiQueriesPerMonth - shop.monthlyAiQueries - 1,
-    };
-
-    next();
-  } catch (error) {
-    ApiResponse.serverError(res, 'Failed to check AI usage');
-  }
+export const checkAiUsage = async (_req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
+  next();
 };
 
 /**

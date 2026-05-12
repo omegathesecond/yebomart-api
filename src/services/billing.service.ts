@@ -1,203 +1,141 @@
 import crypto from 'node:crypto';
 import { prisma } from '@config/prisma';
-import { ShopTier } from '@prisma/client';
-import { getPricingForCountry, getActiveTierPrice } from '@config/pricing';
-import { getCurrencyForCountry } from '@utils/currencies';
-import { YeboPayClient } from './yebopay.client';
+import { YeboPayClient, YeboPayChargeError } from './yebopay.client';
+import { CREDIT_PACKS, findPack, type CreditPack } from '@config/creditPacks';
 
-// Synthetic YeboID UUID derived from shopId via SHA-256 → UUIDv8-style hex.
-// Used so YeboPay charges/invoices for the same shop always resolve to the
-// same yeboidUserId, even before YeboMart shop owners are YeboID-linked.
-// When real YeboID linkage lands, this function is replaced by a lookup of
-// the shop owner's actual sub from the User table.
-function shopIdToYeboidSub(shopId: string): string {
+// Synthetic YeboID UUID derived from shopId via SHA-256 → UUID format.
+// Yebomart shops aren't YeboID-linked yet; this gives each shop a stable
+// yebopay wallet that survives shop-owner changes. Replace with the real
+// owner's yeboid_sub once shop accounts are linked to YeboID.
+export function shopIdToYeboidSub(shopId: string): string {
   const hash = crypto.createHash('sha256').update(`yebomart-shop:${shopId}`).digest('hex');
-  // Format as a UUID — 8-4-4-4-12.
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
 }
 
-const TIER_NAMES: Record<string, string> = {
-  LITE: 'Lite',
-  STARTER: 'Starter',
-  BUSINESS: 'Business',
-  PRO: 'Pro',
-  ENTERPRISE: 'Enterprise',
-};
-
-// Subscription period (30d) — extracted so confirm + initial activation agree.
-const SUBSCRIPTION_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
-
 export class BillingService {
-  // No longer a Stripe-mode flag — YeboPay controls its own mode. Frontend can
-  // still surface "test mode" badges by reading the mode field on the response
-  // (defaulted to whatever yebopay is in; can plumb through later if needed).
-  static getMode(): 'live' | 'test' {
-    return process.env.YEBOPAY_MODE_HINT === 'live' ? 'live' : 'test';
+  /**
+   * Lists available credit packs (the new "plans" — no subscription tiers).
+   * The frontend renders these on the top-up page.
+   */
+  static getCreditPacks() {
+    return CREDIT_PACKS;
   }
 
-  static getPlans(countryCode: string) {
-    const pricing = getPricingForCountry(countryCode);
-    const tiers = Object.keys(TIER_NAMES) as Array<keyof typeof TIER_NAMES>;
-
-    return {
-      country: pricing.country,
-      countryCode: pricing.countryCode,
-      currency: pricing.currency,
-      currencySymbol: pricing.currencySymbol,
-      discountLabel: pricing.discountLabel,
-      discountPercent: pricing.discountPercent,
-      plans: tiers.map((tier) => ({
-        tier,
-        name: TIER_NAMES[tier],
-        price: pricing.tiers[tier as keyof typeof pricing.tiers],
-        discountPrice: pricing.discountTiers?.[tier as keyof typeof pricing.discountTiers],
-        activePrice: getActiveTierPrice(countryCode, tier),
-      })),
-    };
+  /**
+   * Returns the shop's current credit balance from yebopay.
+   * Errors propagate (no silent fallback).
+   */
+  static async getShopBalance(shopId: string): Promise<{ available: number; currency: string }> {
+    const yeboidSub = shopIdToYeboidSub(shopId);
+    const balance = await YeboPayClient.getBalance(yeboidSub);
+    return { available: balance.available, currency: balance.currency };
   }
 
-  static async createCheckout(opts: {
+  /**
+   * Charge the shop's wallet for a billable action (AI query, message send).
+   * Throws YeboPayChargeError with code='INSUFFICIENT_BALANCE' on 402 — route
+   * handlers map this to a 402 user-facing response with a "Top up" prompt.
+   */
+  static async chargeShopCredits(opts: {
+    shopId: string;
+    amount: number;
+    description: string;
+    idempotencyKey?: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    return YeboPayClient.chargeWallet({
+      yeboidSub: shopIdToYeboidSub(opts.shopId),
+      amount: opts.amount,
+      description: opts.description,
+      idempotencyKey: opts.idempotencyKey,
+      metadata: { shopId: opts.shopId, ...(opts.metadata ?? {}) },
+    });
+  }
+
+  /**
+   * Create a top-up checkout for the given credit pack (or a custom amount).
+   * Returns the yebopay-hosted Stripe Checkout URL. On payment success,
+   * yebopay's webhook handler reads checkout.metadata.credit_amount and
+   * credits the wallet automatically.
+   */
+  static async createTopUpCheckout(opts: {
     shopId: string;
     shopEmail?: string;
-    countryCode: string;
-    tier: ShopTier;
+    packId?: string;
+    customAmountSzl?: number;
     successUrl: string;
     cancelUrl: string;
     idempotencyKey?: string;
   }) {
-    const pricing = getPricingForCountry(opts.countryCode);
-    const activePrice = getActiveTierPrice(opts.countryCode, opts.tier);
-    const currency = getCurrencyForCountry(opts.countryCode);
+    // Resolve pack OR custom amount → (priceSzl, creditAmount).
+    let priceSzl: number;
+    let credits: number;
+    let packLabel: string;
 
-    // Same currency-conversion logic as before: send local-currency amount if
-    // Stripe-supported, else convert to USD. The Invoice is recorded in the
-    // CHARGE currency (what Stripe will actually charge), not the local
-    // display currency — that's the source of truth for accounting.
-    let amount: number;
-    let chargeCurrency: string;
-    if (currency.stripeSupported) {
-      amount = activePrice;
-      chargeCurrency = currency.code;
+    if (opts.packId) {
+      const pack = findPack(opts.packId);
+      if (!pack) throw new Error(`Unknown credit pack: ${opts.packId}`);
+      priceSzl = pack.priceSzl;
+      credits = pack.credits;
+      packLabel = pack.id;
+    } else if (typeof opts.customAmountSzl === 'number' && opts.customAmountSzl >= 10) {
+      // Custom top-up: 1:1, no bonus.
+      priceSzl = Math.round(opts.customAmountSzl);
+      credits = priceSzl;
+      packLabel = 'CUSTOM';
     } else {
-      amount = Math.round((activePrice / currency.rate) * 100) / 100;
-      chargeCurrency = 'USD';
+      throw new Error('Either packId or customAmountSzl (>=10) is required');
     }
 
-    // Shop owners aren't YeboID-linked yet; we use a synthetic UUID derived
-    // from shopId so charges/invoices map consistently to the same shop over
-    // time. When YeboMart wires YeboID, this becomes the shop owner's real sub.
     const yeboidSub = shopIdToYeboidSub(opts.shopId);
-
-    const subscriptionDescription = `YeboMart ${TIER_NAMES[opts.tier]} Plan — monthly subscription`;
-    const lineItems = [{
-      description: subscriptionDescription,
-      quantity: 1,
-      unitPrice: amount,
-    }];
-
-    // 1. Create the invoice (DRAFT, due in 1 day — payment IS the activation).
-    const dueDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    let invoice;
-    try {
-      invoice = await YeboPayClient.createInvoice({
-        yeboidSub,
-        currency: chargeCurrency,
-        dueDate,
-        lineItems,
-        toEmail: opts.shopEmail ?? '',
-        toName: undefined,
-        description: subscriptionDescription,
-        metadata: {
-          shopId: opts.shopId,
-          tier: opts.tier,
-          countryCode: opts.countryCode,
-          flow: 'yebomart-subscription',
-        },
-      });
-    } catch (err) {
-      // If invoice creation fails (e.g. no shopEmail), fall back to checkout-only
-      // so the user can still pay. Invoice is an artifact, not a blocker.
-      console.warn('[Billing] invoice creation failed, falling back to checkout-only:', err instanceof Error ? err.message : err);
-      invoice = null;
-    }
-
-    // 2. Create the checkout — linked to invoice if we have one.
     const checkout = await YeboPayClient.createCheckout({
-      amount,
-      currency: chargeCurrency,
+      amount: priceSzl,
+      currency: 'SZL',
       yeboidSub,
       paymentMethod: 'CARD',
       successUrl: opts.successUrl,
       cancelUrl: opts.cancelUrl,
-      description: subscriptionDescription,
+      description: `Top up ${credits} credits for shop ${opts.shopId}`,
       email: opts.shopEmail,
+      // credit_amount is the key yebopay's webhook handler reads to credit
+      // the wallet. Without it, the checkout would record a payment but
+      // never deliver credits.
       metadata: {
+        credit_amount: String(credits),
+        credit_pack: packLabel,
         shopId: opts.shopId,
-        tier: opts.tier,
-        countryCode: opts.countryCode,
-        unitPriceLocal: String(activePrice),
-        localCurrency: currency.code,
-        localSymbol: pricing.currencySymbol,
-        invoiceId: invoice?.id ?? '',
+        flow: 'yebomart-credit-topup',
       },
       idempotencyKey: opts.idempotencyKey,
-      invoiceId: invoice?.id,
     });
-
-    // 3. Email the invoice (best-effort — if YeboLink is down, the checkout
-    // URL still works; the email is just a record). Skip silently if there's
-    // no email to send to.
-    let invoicePdfUrl: string | null = invoice?.pdf_url ?? null;
-    if (invoice && opts.shopEmail) {
-      try {
-        const sent = await YeboPayClient.sendInvoice(invoice.id);
-        invoicePdfUrl = sent.pdf_url ?? null;
-      } catch (err) {
-        // Don't block checkout on email failure — log + continue.
-        console.warn('[Billing] invoice email send failed:', err instanceof Error ? err.message : err);
-      }
-    }
 
     return {
       checkoutId: checkout.id,
       url: checkout.hosted_url,
       expiresAt: checkout.expires_at,
       status: checkout.status,
-      invoiceId: invoice?.id ?? null,
-      invoiceNumber: invoice?.number ?? null,
-      invoicePdfUrl,
+      pack: packLabel,
+      priceSzl,
+      credits,
     };
   }
 
-  // Status confirmation on the success-URL redirect. Frontend stashes
-  // checkoutId before redirect, reads it back from sessionStorage on the
-  // success page, and POSTs it here together with the tier.
-  // Webhook-driven confirmation (Phase 3 yebopay outbound webhooks) will
-  // arrive later and is the preferred path; this polling stays as a fallback.
-  static async confirmCheckout(opts: { shopId: string; checkoutId: string; tier: ShopTier }) {
+  /**
+   * Verify a top-up checkout completed. Called from the success-URL redirect
+   * flow. Yebopay's webhook will have already credited the wallet by the time
+   * this runs (or it will shortly); this endpoint returns the current balance
+   * so the frontend can show "+500 credits, new balance: 1245".
+   */
+  static async confirmTopUp(opts: { shopId: string; checkoutId: string }) {
     const checkout = await YeboPayClient.getCheckout(opts.checkoutId);
-
-    if (checkout.status !== 'COMPLETED') {
-      return { activated: false, status: checkout.status, chargeId: checkout.charge_id ?? null };
-    }
-
-    const now = new Date();
-    const expiry = new Date(now.getTime() + SUBSCRIPTION_PERIOD_MS);
-
-    await prisma.shop.update({
-      where: { id: opts.shopId },
-      data: {
-        tier: opts.tier,
-        licenseExpiry: expiry,
-      },
-    });
-
+    const balance = await BillingService.getShopBalance(opts.shopId);
     return {
-      activated: true,
-      status: 'COMPLETED' as const,
+      completed: checkout.status === 'COMPLETED',
+      status: checkout.status,
       chargeId: checkout.charge_id ?? null,
-      tier: opts.tier,
-      licenseExpiry: expiry.toISOString(),
+      balance,
     };
   }
 }
+
+export type { CreditPack };

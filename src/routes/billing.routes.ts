@@ -1,103 +1,94 @@
 import { Router, Response } from 'express';
 import { BillingService } from '@services/billing.service';
-import { authMiddleware, optionalAuth, AuthRequest } from '@middleware/auth.middleware';
+import { authMiddleware, AuthRequest } from '@middleware/auth.middleware';
 import { ApiResponse } from '@utils/ApiResponse';
-import { ShopTier } from '@prisma/client';
 import { prisma } from '@config/prisma';
 
 const router = Router();
 
-const VALID_TIERS: ShopTier[] = ['LITE', 'STARTER', 'BUSINESS', 'PRO', 'ENTERPRISE'];
+// GET /api/billing/credit-packs — public. Returns available credit packs for
+// the top-up UI. No subscription tiers anymore.
+router.get('/credit-packs', async (_req, res: Response) => {
+  return ApiResponse.success(res, { packs: BillingService.getCreditPacks() });
+});
 
-// GET /plans — public, returns localised plans
-router.get('/plans', optionalAuth, async (req: AuthRequest, res: Response) => {
+// GET /api/billing/balance — authenticated. Returns the shop's current
+// credit balance from yebopay.
+router.get('/balance', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    let countryCode = (req.query.country as string)?.toUpperCase();
-
-    if (!countryCode && req.user?.shopId) {
-      const shop = await prisma.shop.findUnique({
-        where: { id: req.user.shopId },
-        select: { countryCode: true },
-      });
-      countryCode = shop?.countryCode || 'SZ';
-    }
-
-    countryCode = countryCode || 'SZ';
-
-    const plans = BillingService.getPlans(countryCode);
-    return ApiResponse.success(res, { ...plans, mode: BillingService.getMode() });
-  } catch (error) {
-    console.error('[Billing] Plans error:', error);
-    return ApiResponse.serverError(res, 'Failed to fetch plans');
+    const shopId = req.user!.shopId;
+    const balance = await BillingService.getShopBalance(shopId);
+    return ApiResponse.success(res, balance);
+  } catch (error: any) {
+    console.error('[Billing] Balance lookup failed:', error?.message || error);
+    return ApiResponse.serverError(res, 'Failed to fetch balance');
   }
 });
 
-// POST /checkout — authenticated. Returns { checkoutId, url }; frontend stashes
-// checkoutId in sessionStorage before redirecting to url, then POSTs
-// /checkout/confirm after Stripe's success redirect (which can't carry
-// yebopay's id natively).
+// POST /api/billing/checkout — authenticated. Initiates a credit-pack top-up.
+// Body: { packId?: 'STARTER'|'STANDARD'|'BULK', amount?: number, successUrl?, cancelUrl? }
+// Either packId or amount (custom SZL, >=10) is required.
+// Returns the hosted Stripe Checkout URL.
 router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { tier, successUrl, cancelUrl } = req.body;
+    const { packId, amount, successUrl, cancelUrl } = req.body ?? {};
     const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
 
-    if (!tier || !VALID_TIERS.includes(tier)) {
-      return ApiResponse.badRequest(res, `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}`);
+    if (!packId && (typeof amount !== 'number' || amount < 10)) {
+      return ApiResponse.badRequest(res, 'Either packId or amount (>=10 SZL) is required');
     }
 
     const shop = await prisma.shop.findUnique({
       where: { id: req.user!.shopId },
-      select: { countryCode: true, ownerEmail: true },
+      select: { ownerEmail: true },
     });
 
-    if (!shop) {
-      return ApiResponse.notFound(res, 'Shop not found');
-    }
-
-    const result = await BillingService.createCheckout({
+    const result = await BillingService.createTopUpCheckout({
       shopId: req.user!.shopId,
-      shopEmail: shop.ownerEmail || undefined,
-      countryCode: shop.countryCode,
-      tier: tier as ShopTier,
-      successUrl: successUrl || `https://app.yebomart.com/billing/success?tier=${tier}`,
+      shopEmail: shop?.ownerEmail || undefined,
+      packId,
+      customAmountSzl: typeof amount === 'number' ? amount : undefined,
+      successUrl: successUrl || `https://app.yebomart.com/billing/success`,
       cancelUrl: cancelUrl || `https://app.yebomart.com/billing/cancel`,
       idempotencyKey,
     });
 
     return ApiResponse.success(res, result);
   } catch (error: any) {
-    console.error('[Billing] Checkout error:', error?.message || error);
-    return ApiResponse.serverError(res, 'Failed to create checkout session');
+    console.error('[Billing] Top-up checkout failed:', error?.message || error);
+    return ApiResponse.serverError(res, error?.message || 'Failed to create top-up checkout');
   }
 });
 
-// POST /checkout/confirm — authenticated. Frontend posts the checkoutId it
-// stashed before redirect, after Stripe's success redirect. Returns
-// { activated: true, tier, licenseExpiry } if YeboPay reports COMPLETED;
-// { activated: false, status } otherwise. Phase 3 yebopay→yebomart webhook
-// will replace this polling path with real-time activation.
+// POST /api/billing/checkout/confirm — authenticated. Frontend posts the
+// checkoutId from the success page; returns the latest balance so the UI
+// can render "+N credits, new balance X".
 router.post('/checkout/confirm', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { checkoutId, tier } = req.body;
-
+    const { checkoutId } = req.body ?? {};
     if (typeof checkoutId !== 'string' || !checkoutId.trim()) {
       return ApiResponse.badRequest(res, 'Missing checkoutId');
     }
-    if (!tier || !VALID_TIERS.includes(tier)) {
-      return ApiResponse.badRequest(res, `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}`);
-    }
-
-    const result = await BillingService.confirmCheckout({
+    const result = await BillingService.confirmTopUp({
       shopId: req.user!.shopId,
       checkoutId,
-      tier: tier as ShopTier,
     });
-
     return ApiResponse.success(res, result);
   } catch (error: any) {
-    console.error('[Billing] Confirm error:', error?.message || error);
-    return ApiResponse.serverError(res, 'Failed to confirm checkout');
+    console.error('[Billing] Top-up confirm failed:', error?.message || error);
+    return ApiResponse.serverError(res, 'Failed to confirm top-up');
   }
+});
+
+// Legacy /plans endpoint kept for backwards-compatibility — surface a "moved"
+// pointer so any cached frontend doesn't 404. New callers should hit
+// /credit-packs.
+router.get('/plans', async (_req, res: Response) => {
+  return ApiResponse.success(res, {
+    deprecated: true,
+    message: 'Subscription tiers are deprecated. YeboMart is now pay-as-you-go credits. See GET /api/billing/credit-packs.',
+    packs: BillingService.getCreditPacks(),
+  });
 });
 
 export default router;
