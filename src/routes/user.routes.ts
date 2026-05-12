@@ -6,7 +6,6 @@ import {
 } from '@controllers/user.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware, ownerAuth } from '@middleware/auth.middleware';
-import { checkUserLimit } from '@middleware/license.middleware';
 
 const router = Router();
 
@@ -16,9 +15,8 @@ router.use(authMiddleware);
 // List users
 router.get('/', UserController.list);
 
-// Create user (owner only, check user limit based on tier)
-// FREE: 1 user, PRO: 3 users, BUSINESS: unlimited
-router.post('/', ownerAuth, checkUserLimit, validateRequest(createUserSchema), UserController.create);
+// Create user (owner only) — no tier-based user-count cap; pay-as-you-go.
+router.post('/', ownerAuth, validateRequest(createUserSchema), UserController.create);
 
 // Get, update, delete specific user
 router.get('/:id', UserController.getById);

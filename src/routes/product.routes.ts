@@ -8,8 +8,7 @@ import {
   bulkUpdateSchema,
 } from '@controllers/product.controller';
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
-import { authMiddleware, managerAuth, ownerAuth } from '@middleware/auth.middleware';
-import { checkProductLimit } from '@middleware/license.middleware';
+import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
 
 const router = Router();
 
@@ -25,8 +24,8 @@ router.get('/export', managerAuth, ProductController.exportCSV);
 router.post('/bulk/import', managerAuth, validateRequest(bulkImportSchema), ProductController.bulkImport);
 router.post('/bulk/update', managerAuth, validateRequest(bulkUpdateSchema), ProductController.bulkUpdate);
 
-// CRUD operations - check product limit before creating
-router.post('/', managerAuth, checkProductLimit, validateRequest(createProductSchema), ProductController.create);
+// CRUD operations — no product-count cap (pay-as-you-go; unlimited products).
+router.post('/', managerAuth, validateRequest(createProductSchema), ProductController.create);
 router.get('/barcode/:barcode', ProductController.getByBarcode);
 router.get('/:id', ProductController.getById);
 router.patch('/:id', managerAuth, validateRequest(updateProductSchema), ProductController.update);

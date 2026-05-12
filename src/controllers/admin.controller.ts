@@ -61,7 +61,7 @@ export class AdminController {
     try {
       const [totalShops, activeShops, newShopsToday] = await Promise.all([
         prisma.shop.count(),
-        prisma.shop.count({ where: { tier: { not: 'LITE' } } }), // Paid shops
+        prisma.shop.count({ where: { status: 'ACTIVE' } }),
         prisma.shop.count({
           where: {
             createdAt: {
@@ -152,24 +152,6 @@ export class AdminController {
     }
   }
 
-  // Update shop subscription
-  static async updateSubscription(req: Request, res: Response): Promise<void> {
-    try {
-      const { id } = req.params;
-      const { tier } = req.body;
-
-      const shop = await prisma.shop.update({
-        where: { id },
-        data: { tier },
-      });
-
-      ApiResponse.success(res, shop, 'Subscription updated');
-    } catch (error) {
-      console.error('Update subscription error:', error);
-      ApiResponse.error(res, 'Failed to update subscription');
-    }
-  }
-
   // Suspend or reactivate shop
   static async updateShopStatus(req: Request, res: Response): Promise<void> {
     try {
@@ -251,18 +233,19 @@ export class AdminController {
     }
   }
 
-  // Get subscriptions overview
+  // Get shop status breakdown (replaces the old "subscriptions overview" — no
+  // tiers anymore; pay-as-you-go credits flow through yebopay).
   static async getSubscriptions(req: Request, res: Response): Promise<void> {
     try {
-      const subscriptions = await prisma.shop.groupBy({
-        by: ['tier'],
+      const breakdown = await prisma.shop.groupBy({
+        by: ['status'],
         _count: true,
       });
 
-      ApiResponse.success(res, subscriptions);
+      ApiResponse.success(res, breakdown);
     } catch (error) {
-      console.error('Get subscriptions error:', error);
-      ApiResponse.error(res, 'Failed to fetch subscriptions');
+      console.error('Get shop status breakdown error:', error);
+      ApiResponse.error(res, 'Failed to fetch shop status breakdown');
     }
   }
 
@@ -271,15 +254,15 @@ export class AdminController {
     try {
       const { id } = req.params;
       const { days = 30 } = req.query;
-      
+
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - Number(days));
 
       // Get user with shop info
       const user = await prisma.user.findUnique({
         where: { id },
-        include: { 
-          shop: { select: { id: true, name: true, ownerName: true, tier: true } }
+        include: {
+          shop: { select: { id: true, name: true, ownerName: true } }
         },
       });
 

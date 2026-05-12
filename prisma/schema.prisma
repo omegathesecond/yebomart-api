@@ -37,16 +37,15 @@ model Shop {
   address       String?
   logoUrl       String?
   
-  // License & Subscription
-  tier          ShopTier  @default(LITE)
+  // Status — ACTIVE | SUSPENDED. Tier + license columns are gone (yebomart
+  // is pay-as-you-go credits via yebopay; no per-shop billing state here).
   status        ShopStatus @default(ACTIVE)
-  licenseKey    String?   @unique
-  licenseExpiry DateTime?
-  
-  // Usage Tracking (for billing)
+
+  // Usage analytics — counts of activity per month, used for dashboards.
+  // monthlyAiQueries was dropped along with tier limits; AI usage now lives
+  // in yebopay's CreditTransaction ledger under refType=MERCHANT_CHARGE.
   monthlyTransactions Int  @default(0)
   monthlyStockMoves   Int  @default(0)
-  monthlyAiQueries    Int  @default(0)
   lastBillingReset    DateTime @default(now())
   
   // Relationships
@@ -66,14 +65,6 @@ model Shop {
   
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
-}
-
-enum ShopTier {
-  LITE       // E499/mo - POS, Stock, Basic Reports
-  STARTER    // E1499/mo - + Barcode, Alerts, Staff
-  BUSINESS   // E3999/mo - + WhatsApp Reports, Advanced Reports
-  PRO        // E7999/mo - + AI Assistant, Multi-Location, Accounting
-  ENTERPRISE // E15999/mo - + API Access, Dedicated Support
 }
 
 enum ShopStatus {

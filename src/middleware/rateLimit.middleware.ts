@@ -1,6 +1,5 @@
 import rateLimit from 'express-rate-limit';
 import { AuthRequest } from './auth.middleware';
-import { prisma } from '@config/prisma';
 
 // Standard rate limiter - very high for supermarket operations
 export const standardLimiter = rateLimit({
@@ -24,38 +23,19 @@ export const authLimiter = rateLimit({
   },
 });
 
-// AI endpoints - based on tier
+// AI endpoints — flat rate-limit per authenticated shop. Cost recovery is
+// per-query credit charging (see requireCredits middleware); this rate limit
+// only exists to protect against runaway loops / abuse, not to enforce
+// billing.
 export const aiLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: async (req) => {
+  max: (req) => {
     const authReq = req as AuthRequest;
-    if (!authReq.user) return 50; // Unauthenticated
-
-    try {
-      const shop = await prisma.shop.findUnique({
-        where: { id: authReq.user.shopId },
-        select: { tier: true },
-      });
-
-      switch (shop?.tier) {
-        case 'ENTERPRISE':
-          return 10000; // Unlimited for enterprise
-        case 'PRO':
-          return 5000; // 5000 per hour
-        case 'BUSINESS':
-          return 2000; // 2000 per hour
-        case 'STARTER':
-          return 500; // 500 per hour
-        default:
-          return 100; // LITE tier: 100 per hour
-      }
-    } catch {
-      return 100;
-    }
+    return authReq.user ? 1000 : 50; // 1000/hr per authed shop; 50/hr unauthed
   },
   message: {
     success: false,
-    message: 'AI request limit reached. Upgrade your plan for more.',
+    message: 'AI rate limit reached. Try again in a few minutes.',
   },
 });
 

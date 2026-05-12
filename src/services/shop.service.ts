@@ -35,9 +35,6 @@ export class ShopService {
         timezone: true,
         address: true,
         logoUrl: true,
-        tier: true,
-        licenseKey: true,
-        licenseExpiry: true,
         monthlyTransactions: true,
         monthlyStockMoves: true,
         createdAt: true,
@@ -80,7 +77,6 @@ export class ShopService {
         timezone: true,
         address: true,
         logoUrl: true,
-        tier: true,
         updatedAt: true,
         // Country & Localization
         countryCode: true,

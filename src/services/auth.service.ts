@@ -2,7 +2,7 @@ import bcrypt from 'bcrypt';
 import { prisma } from '@config/prisma';
 import { JWTUtil, ITokenPayload } from '@utils/jwt';
 import { UserRole } from '@prisma/client';
-import { COUNTRY_PRICING } from '@config/pricing';
+import { getCountryMetadata } from '@config/countries';
 
 const SALT_ROUNDS = 12;
 
@@ -58,7 +58,6 @@ interface LoginResult {
     ownerName: string;
     businessType: string;
     assistantName: string;
-    tier: string;
   };
   user?: {
     id: string;
@@ -89,7 +88,7 @@ export class AuthService {
     // Derive country from phone number (most reliable)
     const phoneCountry = getCountryFromPhone(input.ownerPhone);
     const resolvedCountry = phoneCountry || input.countryCode || 'SZ';
-    const countryData = COUNTRY_PRICING[resolvedCountry];
+    const countryData = getCountryMetadata(resolvedCountry);
 
     // Create shop
     const shop = await prisma.shop.create({
@@ -103,10 +102,10 @@ export class AuthService {
         businessType: input.businessType || 'general',
         // Country & Localization — derive all fields from countryCode
         countryCode: resolvedCountry,
-        phoneCountryCode: input.phoneCountryCode || countryData?.phoneCode || '+268',
-        currencySymbol: countryData?.currencySymbol || input.currencySymbol || 'E',
-        currency: countryData?.currency || 'SZL',
-        timezone: countryData?.timezone || 'Africa/Mbabane',
+        phoneCountryCode: input.phoneCountryCode || countryData.phoneCode,
+        currencySymbol: input.currencySymbol || countryData.currencySymbol,
+        currency: countryData.currency,
+        timezone: countryData.timezone,
       },
     });
 
@@ -130,7 +129,6 @@ export class AuthService {
         ownerName: shop.ownerName,
         businessType: shop.businessType,
         assistantName: shop.assistantName,
-        tier: shop.tier,
       },
       accessToken,
       refreshToken,
@@ -183,7 +181,6 @@ export class AuthService {
         ownerName: shop.ownerName,
         businessType: shop.businessType,
         assistantName: shop.assistantName,
-        tier: shop.tier,
       },
       accessToken,
       refreshToken,
@@ -256,7 +253,6 @@ export class AuthService {
         ownerName: user.shop.ownerName,
         businessType: user.shop.businessType,
         assistantName: user.shop.assistantName,
-        tier: user.shop.tier,
       },
       user: {
         id: user.id,
@@ -319,8 +315,6 @@ export class AuthService {
           timezone: true,
           address: true,
           logoUrl: true,
-          tier: true,
-          licenseExpiry: true,
           createdAt: true,
           // Country & Localization
           countryCode: true,
@@ -348,7 +342,6 @@ export class AuthService {
             assistantName: true,
             currency: true,
             timezone: true,
-            tier: true,
           },
         },
       },

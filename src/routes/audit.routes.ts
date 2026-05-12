@@ -2,13 +2,11 @@ import { Router } from 'express';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest, ownerAuth } from '@middleware/auth.middleware';
-import { requireFeature } from '@middleware/license.middleware';
 
 const router = Router();
 
-// Audit logs require BUSINESS tier
+// Audit logs are available to all shops (pay-as-you-go; owner-only access).
 router.use(ownerAuth);
-router.use(requireFeature('advanced_analytics'));
 
 router.get('/', async (req: AuthRequest, res) => {
   try {

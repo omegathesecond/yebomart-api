@@ -16,9 +16,11 @@ router.get('/shops', AdminController.getShops);
 router.get('/shops/:id', AdminController.getShop);
 router.patch('/shops/:id/status', AdminController.updateShopStatus);
 router.delete('/shops/:id', AdminController.deleteShop);
-router.put('/subscriptions/:id', AdminController.updateSubscription);
 router.get('/users', AdminController.getUsers);
 router.get('/users/:id', AdminController.getUserDetail);
+// Backwards-compat alias: this used to return tier breakdown; now returns
+// shop-status breakdown. Same shape (groupBy + _count) so dashboards keep
+// working.
 router.get('/subscriptions', AdminController.getSubscriptions);
 
 export default router;

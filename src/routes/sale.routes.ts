@@ -8,7 +8,7 @@ import {
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
 import { posLimiter } from '@middleware/rateLimit.middleware';
-import { trackUsage } from '@middleware/license.middleware';
+import { trackUsage } from '@middleware/billing.middleware';
 
 const router = Router();
 

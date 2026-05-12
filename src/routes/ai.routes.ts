@@ -7,7 +7,7 @@ import {
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware } from '@middleware/auth.middleware';
 import { aiLimiter } from '@middleware/rateLimit.middleware';
-import { requireCredits } from '@middleware/license.middleware';
+import { requireCredits } from '@middleware/billing.middleware';
 import { CREDIT_COSTS } from '@config/creditPacks';
 
 const router = Router();

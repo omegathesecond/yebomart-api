@@ -7,7 +7,6 @@ import stockRoutes from '@routes/stock.routes';
 import userRoutes from '@routes/user.routes';
 import reportRoutes from '@routes/report.routes';
 import aiRoutes from '@routes/ai.routes';
-import licenseRoutes from '@routes/license.routes';
 import expenseRoutes from '@routes/expense.routes';
 import customerRoutes from '@routes/customer.routes';
 import auditRoutes from '@routes/audit.routes';
@@ -15,7 +14,6 @@ import adminRoutes from '@routes/admin.routes';
 import uploadRoutes from '@routes/upload.routes';
 import returnRoutes from '@routes/return.routes';
 import supplierRoutes from '@routes/supplier.routes';
-import pricingRoutes from '@routes/pricing.routes';
 import billingRoutes from '@routes/billing.routes';
 
 const router = Router();
@@ -45,9 +43,6 @@ router.use('/reports', reportRoutes);
 // AI Assistant
 router.use('/ai', aiRoutes);
 
-// License/Subscription
-router.use('/license', licenseRoutes);
-
 // Expenses
 router.use('/expenses', expenseRoutes);
 
@@ -69,10 +64,7 @@ router.use('/returns', returnRoutes);
 // Suppliers
 router.use('/suppliers', supplierRoutes);
 
-// Pricing (public - no auth required)
-router.use('/pricing', pricingRoutes);
-
-// Billing (pay-as-you-go credits via YeboPay)
+// Billing (pay-as-you-go credits via YeboPay; replaces legacy /pricing + /license surfaces)
 router.use('/billing', billingRoutes);
 
 export default router;
