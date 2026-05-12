@@ -50,8 +50,8 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('combined'));
 }
 
-// Body parsing — yebomart no longer hosts a Stripe webhook (yebopay does),
-// so the raw-body carve-out for /api/billing/webhook is gone.
+// Body parsing — JSON for everything. No raw-body carve-outs (yebopay owns
+// payment-processor webhooks).
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

@@ -1,8 +1,8 @@
 /**
  * Thin client for the centralized YeboPay /v1/* gateway.
  *
- * YeboMart no longer talks to Stripe directly; it asks YeboPay to create a
- * checkout and routes the user to the resulting hosted URL. See
+ * YeboMart asks YeboPay to create a checkout, fetch wallet balance, charge
+ * credits, etc. — yebopay handles the payment processor internally. See
  * companies/yebopay/api/docs/superpowers/specs/2026-05-11-yebomart-yebolearn-cutover-plan.md.
  *
  * Failures throw (no silent fallback per CLAUDE.md); callers must surface the

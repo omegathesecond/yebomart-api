@@ -1,14 +1,10 @@
 /**
- * African currency map — display + processor-billability.
+ * African currency map — display + processor-billability flag.
  * Rates are approximate; update periodically or swap in a live FX API.
  *
- * `directBillable` = the underlying payment processor (currently Stripe, via
- * yebopay) accepts charges in this currency directly. When false, yebomart
- * converts the amount to USD before sending to yebopay. This is an
- * implementation detail of the centralized YeboPay gateway, not a Stripe-
- * specific concept — the day yebopay picks up a different card processor
- * with different currency support, the flag values update; the abstraction
- * stays.
+ * `directBillable` = yebopay's gateway can charge this currency directly.
+ * When false, yebomart converts the amount to USD before sending to yebopay.
+ * Implementation detail of the centralized YeboPay gateway.
  */
 export interface CurrencyInfo {
   code: string        // ISO 4217
@@ -54,56 +50,4 @@ export const DEFAULT_CURRENCY: CurrencyInfo = {
 export function getCurrencyForCountry(countryCode?: string | null): CurrencyInfo {
   if (!countryCode) return DEFAULT_CURRENCY
   return AFRICAN_CURRENCIES[countryCode.toUpperCase()] || DEFAULT_CURRENCY
-}
-
-/**
- * Convert a USD amount (in cents) to local currency.
- * Returns the Stripe-compatible smallest unit amount.
- */
-export function convertFromUSD(usdCents: number, currency: CurrencyInfo): number {
-  const usdAmount = usdCents / 100
-  const localAmount = usdAmount * currency.rate
-  return Math.round(localAmount * currency.decimals)
-}
-
-/**
- * Format a local currency amount (smallest unit) for display.
- */
-export function formatLocalAmount(smallestUnit: number, currency: CurrencyInfo): string {
-  const amount = smallestUnit / currency.decimals
-  // No decimal for currencies where it looks odd (UGX, RWF etc)
-  const formatted = currency.decimals === 1
-    ? Math.round(amount).toLocaleString()
-    : amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-  return `${currency.symbol}${formatted}`
-}
-
-/**
- * Localise a credit package for a given country.
- * Returns display price + Stripe charge currency + amount.
- */
-export function localisePackage(
-  pkg: { credits: number; price: number; name: string },
-  countryCode?: string | null
-) {
-  const currency = getCurrencyForCountry(countryCode)
-  const chargeCurrency = currency.directBillable ? currency : DEFAULT_CURRENCY
-  const chargeAmount = convertFromUSD(pkg.price, chargeCurrency)
-  const displayAmount = convertFromUSD(pkg.price, currency)
-
-  return {
-    ...pkg,
-    // Charge details (what Stripe sees)
-    stripeCurrency: chargeCurrency.code.toLowerCase(),
-    stripeAmount: chargeAmount,
-    // Display details (what the user sees)
-    displayCurrency: currency.code,
-    displaySymbol: currency.symbol,
-    displayAmount,
-    displayFormatted: formatLocalAmount(displayAmount, currency),
-    // Also include USD for reference
-    usdPrice: pkg.price,
-    usdFormatted: `$${(pkg.price / 100).toFixed(0)}`,
-    showUsdNote: currency.code !== 'USD',
-  }
 }

@@ -28,7 +28,7 @@ router.get('/balance', authMiddleware, async (req: AuthRequest, res: Response) =
 // POST /api/billing/checkout — authenticated. Initiates a credit-pack top-up.
 // Body: { packId?: 'STARTER'|'STANDARD'|'BULK', amount?: number, successUrl?, cancelUrl? }
 // Either packId or amount (custom SZL, >=10) is required.
-// Returns the hosted Stripe Checkout URL.
+// Returns the yebopay-hosted checkout URL.
 router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { packId, amount, successUrl, cancelUrl } = req.body ?? {};

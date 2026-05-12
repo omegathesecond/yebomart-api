@@ -54,9 +54,9 @@ export class BillingService {
 
   /**
    * Create a top-up checkout for the given credit pack (or a custom amount).
-   * Returns the yebopay-hosted Stripe Checkout URL. On payment success,
-   * yebopay's webhook handler reads checkout.metadata.credit_amount and
-   * credits the wallet automatically.
+   * Returns the yebopay-hosted checkout URL. On payment success, yebopay's
+   * webhook handler reads checkout.metadata.credit_amount and credits the
+   * wallet automatically.
    */
   static async createTopUpCheckout(opts: {
     shopId: string;

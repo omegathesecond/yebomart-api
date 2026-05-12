@@ -72,7 +72,7 @@ router.use('/suppliers', supplierRoutes);
 // Pricing (public - no auth required)
 router.use('/pricing', pricingRoutes);
 
-// Billing (Stripe)
+// Billing (pay-as-you-go credits via YeboPay)
 router.use('/billing', billingRoutes);
 
 export default router;
