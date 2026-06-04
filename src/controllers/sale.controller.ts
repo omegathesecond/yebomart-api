@@ -15,6 +15,9 @@ export const createSaleSchema = Joi.object({
   paymentMethod: Joi.string().required().valid('CASH', 'MOMO', 'EMALI', 'CARD', 'MIXED', 'CREDIT'),
   amountPaid: Joi.number().required().min(0),
   discount: Joi.number().optional().min(0).default(0),
+  // Optional link to a Customer (Sale.customerId). Enables POS to attach a buyer
+  // so the sale shows up in that customer's purchase history / lifetime value.
+  customerId: Joi.string().optional().allow(null),
   localId: Joi.string().optional(),
   offlineAt: Joi.date().optional(),
 });
