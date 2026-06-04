@@ -224,48 +224,86 @@ export class ReturnController {
         case 'reject':
           newStatus = 'REJECTED';
           break;
-        case 'complete':
+        case 'complete': {
           newStatus = 'COMPLETED';
           updateData.processedAt = new Date();
 
-          // Restock items if restockable
-          for (const item of returnRecord.items) {
-            if (item.restockable && !item.restocked) {
-              await prisma.product.update({
-                where: { id: item.productId },
-                data: { quantity: { increment: item.quantity } },
-              });
-              await prisma.returnItem.update({
-                where: { id: item.id },
-                data: { restocked: true },
-              });
-              // Log stock movement
-              await prisma.stockLog.create({
-                data: {
-                  shopId: req.user.shopId,
-                  productId: item.productId,
-                  userId: req.user.type === 'user' ? req.user.id : undefined,
-                  type: 'RETURN',
-                  quantity: item.quantity,
-                  previousQty: 0, // Will be calculated properly in real implementation
-                  newQty: 0,
-                  note: `Return #${returnRecord.id}`,
-                  reference: returnRecord.id,
-                },
-              });
-            }
-          }
+          const userId = req.user.type === 'user' ? req.user.id : undefined;
+          const shopId = req.user.shopId;
 
-          // Deduct exchange items from stock
-          if (returnRecord.exchangeItems) {
-            for (const item of returnRecord.exchangeItems) {
-              await prisma.product.update({
-                where: { id: item.productId },
-                data: { quantity: { decrement: item.quantity } },
-              });
+          // Restock returned items and deduct exchanged-out items atomically so
+          // the product quantity and the StockLog audit trail stay consistent.
+          await prisma.$transaction(async (tx) => {
+            // Restock items if restockable
+            for (const item of returnRecord.items) {
+              if (item.restockable && !item.restocked) {
+                const product = await tx.product.findUnique({
+                  where: { id: item.productId },
+                });
+                if (!product) continue;
+
+                const previousQty = product.quantity;
+                const newQty = previousQty + item.quantity;
+
+                await tx.product.update({
+                  where: { id: item.productId },
+                  data: { quantity: newQty },
+                });
+                await tx.returnItem.update({
+                  where: { id: item.id },
+                  data: { restocked: true },
+                });
+                // Log stock movement (positive quantity = stock added back)
+                await tx.stockLog.create({
+                  data: {
+                    shopId,
+                    productId: item.productId,
+                    userId,
+                    type: 'RETURN',
+                    quantity: item.quantity,
+                    previousQty,
+                    newQty,
+                    note: `Return #${returnRecord.id}`,
+                    reference: returnRecord.id,
+                  },
+                });
+              }
             }
-          }
+
+            // Deduct exchange items from stock (these leave the shop again)
+            if (returnRecord.exchangeItems) {
+              for (const item of returnRecord.exchangeItems) {
+                const product = await tx.product.findUnique({
+                  where: { id: item.productId },
+                });
+                if (!product) continue;
+
+                const previousQty = product.quantity;
+                const newQty = previousQty - item.quantity;
+
+                await tx.product.update({
+                  where: { id: item.productId },
+                  data: { quantity: newQty },
+                });
+                // Log stock movement (negative quantity = stock removed)
+                await tx.stockLog.create({
+                  data: {
+                    shopId,
+                    productId: item.productId,
+                    userId,
+                    type: 'SALE',
+                    quantity: -item.quantity,
+                    previousQty,
+                    newQty,
+                    note: `Exchange on return #${returnRecord.id}`,
+                    reference: returnRecord.id,
+                  },
+                });
+              }
+            }
+          });
           break;
+        }
         default:
           ApiResponse.badRequest(res, 'Invalid action');
           return;
