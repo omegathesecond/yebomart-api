@@ -12,6 +12,7 @@ interface SaleItemInput {
 interface CreateSaleInput {
   shopId: string;
   userId?: string;
+  customerId?: string | null;
   items: SaleItemInput[];
   paymentMethod: PaymentMethod;
   amountPaid: number;
@@ -118,6 +119,7 @@ export class SaleService {
         data: {
           shopId: input.shopId,
           userId: input.userId,
+          customerId: input.customerId || undefined,
           receiptNumber,
           subtotal,
           discount,
