@@ -37,6 +37,20 @@ export class SaleService {
    * Create a new sale
    */
   static async create(input: CreateSaleInput) {
+    // Idempotency: offline sales carry a client-generated `localId`. If the
+    // device replays a queued sale (or a request whose response was lost on a
+    // flaky link), return the already-committed sale instead of creating a
+    // duplicate / double-decrementing stock. This is the server-side half of
+    // the POS offline outbox; the @@unique([shopId, localId]) index is the
+    // race-proof backstop for the findFirst below.
+    if (input.localId) {
+      const existing = await prisma.sale.findFirst({
+        where: { shopId: input.shopId, localId: input.localId },
+        include: { items: true },
+      });
+      if (existing) return existing;
+    }
+
     // Get all products
     const productIds = input.items.map(item => item.productId);
     const products = await prisma.product.findMany({
@@ -91,7 +105,9 @@ export class SaleService {
     }
 
     // Create sale and update stock in a transaction
-    const sale = await prisma.$transaction(async (tx) => {
+    let sale;
+    try {
+      sale = await prisma.$transaction(async (tx) => {
       // Generate receipt number (e.g., RCP-240212-0001)
       const today = new Date();
       const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
@@ -169,7 +185,24 @@ export class SaleService {
       }
 
       return sale;
-    });
+      });
+    } catch (err) {
+      // Race-proof idempotency backstop: two in-flight replays of the same
+      // localId — the loser hits the @@unique([shopId, localId]) constraint.
+      // Return the winner's committed sale instead of surfacing a 500.
+      if (
+        input.localId &&
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        const existing = await prisma.sale.findFirst({
+          where: { shopId: input.shopId, localId: input.localId },
+          include: { items: true },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
 
     // Increment usage counter
     await ShopService.incrementUsage(input.shopId, 'transaction');
