@@ -14,6 +14,7 @@ import adminRoutes from '@routes/admin.routes';
 import uploadRoutes from '@routes/upload.routes';
 import returnRoutes from '@routes/return.routes';
 import supplierRoutes from '@routes/supplier.routes';
+import purchaseOrderRoutes from '@routes/purchaseOrder.routes';
 import billingRoutes from '@routes/billing.routes';
 
 const router = Router();
@@ -63,6 +64,9 @@ router.use('/returns', returnRoutes);
 
 // Suppliers
 router.use('/suppliers', supplierRoutes);
+
+// Purchase orders (raise PO + receive stock)
+router.use('/purchase-orders', purchaseOrderRoutes);
 
 // Billing (pay-as-you-go credits via YeboPay; replaces legacy /pricing + /license surfaces)
 router.use('/billing', billingRoutes);
