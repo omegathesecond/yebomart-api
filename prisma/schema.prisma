@@ -207,6 +207,7 @@ model Sale {
   offlineAt     DateTime? // When created offline
   syncedAt      DateTime?
   
+  @@unique([shopId, localId])
   @@index([shopId, createdAt])
   @@index([shopId, status])
   @@index([customerId])
