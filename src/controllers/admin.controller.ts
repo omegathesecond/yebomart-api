@@ -71,16 +71,76 @@ export class AdminController {
         }),
       ]);
 
-      // Get total revenue (sum of all sales)
+      // Get total revenue (sum of all completed sales)
       const revenueResult = await prisma.sale.aggregate({
+        where: { status: 'COMPLETED' },
         _sum: { totalAmount: true },
       });
+
+      // Monthly time-series for the last 6 months (new shops + revenue).
+      // Returns one row per month that actually has data; months with no
+      // activity are zero-filled below so the chart shows real zeros, not
+      // fabricated trend lines.
+      const sixMonthsAgo = new Date();
+      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+      sixMonthsAgo.setDate(1);
+      sixMonthsAgo.setHours(0, 0, 0, 0);
+
+      const [shopsByMonth, revenueByMonth] = await Promise.all([
+        prisma.$queryRaw`
+          SELECT date_trunc('month', "createdAt") AS month, COUNT(*)::int AS shops
+          FROM "Shop"
+          WHERE "createdAt" >= ${sixMonthsAgo}
+          GROUP BY month
+          ORDER BY month ASC
+        ` as Promise<Array<{ month: Date; shops: number }>>,
+        prisma.$queryRaw`
+          SELECT date_trunc('month', "createdAt") AS month, COALESCE(SUM("totalAmount"), 0)::float AS revenue
+          FROM "Sale"
+          WHERE status = 'COMPLETED' AND "createdAt" >= ${sixMonthsAgo}
+          GROUP BY month
+          ORDER BY month ASC
+        ` as Promise<Array<{ month: Date; revenue: number }>>,
+      ]);
+
+      const monthKey = (d: Date) => `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+      const shopsMap = new Map(shopsByMonth.map((r) => [monthKey(new Date(r.month)), r.shops]));
+      const revenueMap = new Map(revenueByMonth.map((r) => [monthKey(new Date(r.month)), r.revenue]));
+      const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+      const chartData = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date();
+        d.setMonth(d.getMonth() - i);
+        const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+        chartData.push({
+          name: MONTH_NAMES[d.getMonth()],
+          shops: shopsMap.get(key) ?? 0,
+          revenue: revenueMap.get(key) ?? 0,
+        });
+      }
+
+      // Recent activity = the latest shop signups (real rows, newest first).
+      const recentShops = await prisma.shop.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { id: true, name: true, createdAt: true },
+      });
+      const recentActivity = recentShops.map((shop) => ({
+        id: shop.id,
+        type: 'signup',
+        message: 'New shop registered',
+        shopName: shop.name,
+        timestamp: shop.createdAt,
+      }));
 
       ApiResponse.success(res, {
         totalShops,
         activeShops,
         newShopsToday,
         totalRevenue: revenueResult._sum?.totalAmount || 0,
+        chartData,
+        recentActivity,
       });
     } catch (error) {
       console.error('Dashboard error:', error);
