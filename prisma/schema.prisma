@@ -40,6 +40,15 @@ model Shop {
   address       String?
   logoUrl       String?
   
+  // Notifications — owner-controlled comms prefs. Delivered via YeboLink
+  // (WhatsApp, SMS fallback) by the daily notification run. Default OFF so we
+  // never burn comms credits / message owners who never opted in; the POS
+  // Settings → Notifications toggles flip these. notifyPhone overrides the
+  // recipient; when null we send to ownerPhone.
+  notifyWhatsAppReports Boolean @default(false)
+  notifyLowStock        Boolean @default(false)
+  notifyPhone           String?
+
   // Status — ACTIVE | SUSPENDED. Tier + license columns are gone (yebomart
   // is pay-as-you-go credits via yebopay; no per-shop billing state here).
   status        ShopStatus @default(ACTIVE)
