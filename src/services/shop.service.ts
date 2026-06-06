@@ -16,6 +16,12 @@ interface UpdateShopInput {
   currencySymbol?: string;
 }
 
+interface UpdateNotificationSettingsInput {
+  notifyWhatsAppReports?: boolean;
+  notifyLowStock?: boolean;
+  notifyPhone?: string | null;
+}
+
 export class ShopService {
   /**
    * Get shop by ID
@@ -86,6 +92,66 @@ export class ShopService {
     });
 
     return shop;
+  }
+
+  /**
+   * Get the shop's notification preferences plus the resolved recipient phone.
+   * `notifyPhone` is the owner's optional override; `recipientPhone` is what the
+   * daily run actually sends to (override ?? ownerPhone) so the UI can show it.
+   */
+  static async getNotificationSettings(shopId: string) {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      select: {
+        notifyWhatsAppReports: true,
+        notifyLowStock: true,
+        notifyPhone: true,
+        ownerPhone: true,
+      },
+    });
+
+    if (!shop) {
+      throw new Error('Shop not found');
+    }
+
+    return {
+      notifyWhatsAppReports: shop.notifyWhatsAppReports,
+      notifyLowStock: shop.notifyLowStock,
+      notifyPhone: shop.notifyPhone,
+      ownerPhone: shop.ownerPhone,
+      recipientPhone: shop.notifyPhone ?? shop.ownerPhone,
+    };
+  }
+
+  /**
+   * Update notification preferences. Returns the same shape as
+   * getNotificationSettings so the client can refresh its view in one round-trip.
+   */
+  static async updateNotificationSettings(shopId: string, data: UpdateNotificationSettingsInput) {
+    const updateData: UpdateNotificationSettingsInput = {};
+    if (data.notifyWhatsAppReports !== undefined) updateData.notifyWhatsAppReports = data.notifyWhatsAppReports;
+    if (data.notifyLowStock !== undefined) updateData.notifyLowStock = data.notifyLowStock;
+    // Empty string clears the override (fall back to ownerPhone); a value sets it.
+    if (data.notifyPhone !== undefined) updateData.notifyPhone = data.notifyPhone || null;
+
+    const shop = await prisma.shop.update({
+      where: { id: shopId },
+      data: updateData,
+      select: {
+        notifyWhatsAppReports: true,
+        notifyLowStock: true,
+        notifyPhone: true,
+        ownerPhone: true,
+      },
+    });
+
+    return {
+      notifyWhatsAppReports: shop.notifyWhatsAppReports,
+      notifyLowStock: shop.notifyLowStock,
+      notifyPhone: shop.notifyPhone,
+      ownerPhone: shop.ownerPhone,
+      recipientPhone: shop.notifyPhone ?? shop.ownerPhone,
+    };
   }
 
   /**

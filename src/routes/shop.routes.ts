@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   ShopController,
   updateShopSchema,
+  updateNotificationSettingsSchema,
 } from '@controllers/shop.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware, ownerAuth } from '@middleware/auth.middleware';
@@ -16,6 +17,17 @@ router.use(authMiddleware);
 
 // Get shop config (units, categories based on business type)
 router.get('/config', ShopController.getConfig);
+
+// Notification prefs for the authed shop. Declared BEFORE the `/:id` routes so
+// `notifications` isn't swallowed as a shop id. No id in the path — always
+// scoped to req.user.shopId. PATCH is owner-only.
+router.get('/notifications', ShopController.getNotificationSettings);
+router.patch(
+  '/notifications',
+  ownerAuth,
+  validateRequest(updateNotificationSettingsSchema),
+  ShopController.updateNotificationSettings,
+);
 
 router.get('/:id', ShopController.getById);
 router.patch('/:id', ownerAuth, validateRequest(updateShopSchema), ShopController.update);

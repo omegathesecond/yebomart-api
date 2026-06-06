@@ -33,14 +33,20 @@ steps:
       - '--update-env-vars'
       - 'NODE_ENV=production,R2_ACCOUNT_ID=9f15f12d867a59b212ed2ae3cf4615ca,R2_BUCKET_NAME=yebomart-images,R2_PUBLIC_URL=https://pub-9f15f12d867a59b212ed2ae3cf4615ca.r2.dev,YEBOPAY_BASE_URL=${_YEBOPAY_BASE_URL}'
       # YEBOPAY_API_KEY binds the merchant key provisioned in Phase 1.5.
-      # Dev trigger overrides _YEBOPAY_API_KEY_SECRET (→ _DEV variant) and
-      # _YEBOPAY_BASE_URL (→ dev yebopay service).
+      # YEBOLINK_API_KEY binds the comms key (customer statements / reminders +
+      # daily WhatsApp reports / low-stock alerts).
+      # INTERNAL_NOTIFICATIONS_SECRET gates POST /api/internal/notifications/run
+      # (called by Cloud Scheduler). Dev trigger overrides the *_SECRET subs
+      # (→ _DEV variants) and _YEBOPAY_BASE_URL (→ dev yebopay service).
+      # Comma-separated so all bind in one additive --update-secrets.
       - '--update-secrets'
-      - 'YEBOPAY_API_KEY=${_YEBOPAY_API_KEY_SECRET}:latest'
+      - 'YEBOPAY_API_KEY=${_YEBOPAY_API_KEY_SECRET}:latest,YEBOLINK_API_KEY=${_YEBOLINK_API_KEY_SECRET}:latest,INTERNAL_NOTIFICATIONS_SECRET=${_INTERNAL_NOTIFICATIONS_SECRET}:latest'
 
 substitutions:
   _SERVICE: yebomart-api-prod
   _YEBOPAY_API_KEY_SECRET: YEBOMART__YEBOPAY_API_KEY
+  _YEBOLINK_API_KEY_SECRET: YEBOMART__YEBOLINK_API_KEY
+  _INTERNAL_NOTIFICATIONS_SECRET: YEBOMART__INTERNAL_NOTIFICATIONS_SECRET
   _YEBOPAY_BASE_URL: https://yebopay-api-prod-dysic27f5a-ew.a.run.app
 
 images:

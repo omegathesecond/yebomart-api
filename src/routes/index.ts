@@ -16,6 +16,7 @@ import returnRoutes from '@routes/return.routes';
 import supplierRoutes from '@routes/supplier.routes';
 import purchaseOrderRoutes from '@routes/purchaseOrder.routes';
 import billingRoutes from '@routes/billing.routes';
+import internalRoutes from '@routes/internal.routes';
 
 const router = Router();
 
@@ -70,5 +71,9 @@ router.use('/purchase-orders', purchaseOrderRoutes);
 
 // Billing (pay-as-you-go credits via YeboPay; replaces legacy /pricing + /license surfaces)
 router.use('/billing', billingRoutes);
+
+// Internal machine-only routes (Cloud Scheduler → daily notification run).
+// Shared-secret gated, not user-auth.
+router.use('/internal', internalRoutes);
 
 export default router;

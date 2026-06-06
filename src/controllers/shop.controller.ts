@@ -16,7 +16,53 @@ export const updateShopSchema = Joi.object({
   logoUrl: Joi.string().optional().uri(),
 });
 
+export const updateNotificationSettingsSchema = Joi.object({
+  notifyWhatsAppReports: Joi.boolean().optional(),
+  notifyLowStock: Joi.boolean().optional(),
+  // E.164 override, or empty string to clear it (fall back to ownerPhone).
+  notifyPhone: Joi.string().allow('', null).pattern(/^\+[1-9]\d{6,14}$/).optional()
+    .messages({ 'string.pattern.base': 'notifyPhone must be E.164 (e.g. +26876123456)' }),
+}).min(1);
+
 export class ShopController {
+  /**
+   * GET /api/shops/notifications — current shop's notification prefs + recipient.
+   */
+  static async getNotificationSettings(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const settings = await ShopService.getNotificationSettings(req.user.shopId);
+      ApiResponse.success(res, settings);
+    } catch (error: any) {
+      if (error.message?.includes('not found')) {
+        ApiResponse.notFound(res, error.message);
+      } else {
+        ApiResponse.serverError(res, error.message, error);
+      }
+    }
+  }
+
+  /**
+   * PATCH /api/shops/notifications — update the current shop's notification prefs.
+   * Owner-only (route-gated). Scoped to req.user.shopId — no shop id in the path,
+   * so an owner can only ever touch their own shop.
+   */
+  static async updateNotificationSettings(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const settings = await ShopService.updateNotificationSettings(req.user.shopId, req.body);
+      ApiResponse.success(res, settings, 'Notification settings updated');
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
   /**
    * Get shop by ID
    */
