@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { YeboLinkClient } from '@services/yebolink.client';
 
 export const createCustomerSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
@@ -18,6 +19,94 @@ export const addCreditSchema = Joi.object({
   note: Joi.string().optional().max(500),
   saleId: Joi.string().optional(),
 });
+
+export const sendStatementSchema = Joi.object({
+  // reminder=true sends a short "please settle" nudge; default sends the full
+  // statement (balance + recent ledger entries).
+  reminder: Joi.boolean().optional().default(false),
+});
+
+const CREDIT_TYPE_LABEL: Record<string, string> = {
+  PURCHASE: 'Purchase',
+  PAYMENT: 'Payment',
+  ADJUSTMENT: 'Adjustment',
+  REFUND: 'Refund',
+};
+
+/** Format an amount with the shop's currency symbol, e.g. "E1,250.00". */
+function money(symbol: string, amount: number): string {
+  return `${symbol}${amount.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function shortDate(date: Date): string {
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
+}
+
+interface StatementCredit {
+  type: string;
+  amount: number;
+  createdAt: Date;
+}
+
+/**
+ * Build the customer-facing WhatsApp/SMS message. Balance is "positive = they
+ * owe us" (see Customer.balance). Kept concise — it may be delivered as an SMS.
+ */
+function buildStatementMessage(
+  reminder: boolean,
+  customerName: string,
+  shopName: string,
+  currencySymbol: string,
+  balance: number,
+  recent: StatementCredit[],
+): string {
+  const firstName = customerName.split(' ')[0] || customerName;
+  const lines: string[] = [];
+
+  if (reminder) {
+    if (balance > 0) {
+      lines.push(
+        `Hi ${firstName}, a friendly reminder from ${shopName}: your outstanding balance is ${money(currencySymbol, balance)}. Please settle when you can. Thank you!`,
+      );
+    } else if (balance < 0) {
+      lines.push(
+        `Hi ${firstName}, your account at ${shopName} is in credit by ${money(currencySymbol, -balance)}. Nothing owed — thank you!`,
+      );
+    } else {
+      lines.push(`Hi ${firstName}, your account at ${shopName} is fully settled. Thank you!`);
+    }
+    return lines.join('\n');
+  }
+
+  // Full statement.
+  lines.push(`Hi ${firstName}, here is your account statement with ${shopName}.`);
+  if (balance > 0) {
+    lines.push(`Balance owing: ${money(currencySymbol, balance)}`);
+  } else if (balance < 0) {
+    lines.push(`Balance: ${money(currencySymbol, -balance)} in credit`);
+  } else {
+    lines.push('Balance: fully settled');
+  }
+
+  if (recent.length > 0) {
+    lines.push('');
+    lines.push('Recent activity:');
+    recent.forEach((c) => {
+      const label = CREDIT_TYPE_LABEL[c.type] ?? c.type;
+      lines.push(`• ${shortDate(c.createdAt)} ${label} ${money(currencySymbol, c.amount)}`);
+    });
+  }
+
+  if (balance > 0) {
+    lines.push('');
+    lines.push('Please settle your outstanding balance. Thank you!');
+  }
+
+  return lines.join('\n');
+}
 
 export class CustomerController {
   /**
@@ -203,6 +292,71 @@ export class CustomerController {
       ApiResponse.success(res, null, 'Customer updated');
     } catch (error: any) {
       ApiResponse.badRequest(res, error.message);
+    }
+  }
+
+  /**
+   * Send the customer their account statement (or a short payment reminder) via
+   * WhatsApp, falling back to SMS, through YeboLink. On-demand collection tool
+   * for shops running book accounts. Manager-gated at the route level.
+   *
+   * No silent fallback (CLAUDE.md): if YeboLink can't deliver on EITHER channel
+   * the error propagates as a 5xx so the POS shows a real failure — we never
+   * report "sent" for a message that wasn't.
+   */
+  static async sendStatement(req: AuthRequest, res: Response): Promise<void> {
+    if (!req.user) {
+      ApiResponse.unauthorized(res, 'Unauthorized');
+      return;
+    }
+
+    const { id } = req.params;
+    const reminder: boolean = req.body?.reminder === true;
+
+    let customer;
+    try {
+      customer = await prisma.customer.findFirst({
+        where: { id, shopId: req.user.shopId },
+        include: {
+          shop: { select: { name: true, currencySymbol: true } },
+          credits: { orderBy: { createdAt: 'desc' }, take: 5 },
+        },
+      });
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message);
+      return;
+    }
+
+    if (!customer) {
+      ApiResponse.notFound(res, 'Customer not found');
+      return;
+    }
+
+    const phone = customer.phone?.trim();
+    if (!phone) {
+      ApiResponse.badRequest(res, 'Customer has no phone number on file');
+      return;
+    }
+
+    const message = buildStatementMessage(
+      reminder,
+      customer.name,
+      customer.shop.name,
+      customer.shop.currencySymbol,
+      customer.balance,
+      customer.credits,
+    );
+
+    try {
+      const result = await YeboLinkClient.sendTextWithFallback(phone, message);
+      ApiResponse.success(
+        res,
+        { channel: result.channel, messageId: result.messageId, balance: customer.balance },
+        `${reminder ? 'Reminder' : 'Statement'} sent via ${result.channel === 'whatsapp' ? 'WhatsApp' : 'SMS'}`,
+      );
+    } catch (error: any) {
+      // YeboLink failed on both WhatsApp and SMS — surface loudly (no fallback).
+      ApiResponse.serverError(res, `Failed to send ${reminder ? 'reminder' : 'statement'}: ${error?.message ?? 'YeboLink error'}`);
     }
   }
 }
