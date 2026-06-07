@@ -3,6 +3,7 @@ import {
   CustomerController,
   createCustomerSchema,
   addCreditSchema,
+  sendStatementSchema,
 } from '@controllers/customer.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
@@ -21,5 +22,13 @@ router.patch('/:id', managerAuth, CustomerController.update);
 
 // Credit management
 router.post('/:id/credit', validateRequest(addCreditSchema), CustomerController.addCredit);
+
+// Send the customer their statement / payment reminder via YeboLink (manager-gated)
+router.post(
+  '/:id/send-statement',
+  managerAuth,
+  validateRequest(sendStatementSchema),
+  CustomerController.sendStatement,
+);
 
 export default router;
