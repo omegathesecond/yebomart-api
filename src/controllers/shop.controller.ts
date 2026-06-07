@@ -16,6 +16,15 @@ export const updateShopSchema = Joi.object({
   logoUrl: Joi.string().optional().uri(),
 });
 
+export const updateVatSettingsSchema = Joi.object({
+  vatRegistered: Joi.boolean().optional(),
+  // Percentage, 0–100 (e.g. 15 for the Eswatini standard rate).
+  vatRate: Joi.number().min(0).max(100).optional(),
+  // VAT/TIN id printed on receipts; empty string clears it.
+  vatNumber: Joi.string().allow('', null).trim().max(50).optional(),
+  pricesIncludeVat: Joi.boolean().optional(),
+}).min(1);
+
 export const updateNotificationSettingsSchema = Joi.object({
   notifyWhatsAppReports: Joi.boolean().optional(),
   notifyLowStock: Joi.boolean().optional(),
@@ -58,6 +67,43 @@ export class ShopController {
       }
       const settings = await ShopService.updateNotificationSettings(req.user.shopId, req.body);
       ApiResponse.success(res, settings, 'Notification settings updated');
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * GET /api/shops/vat — current shop's VAT / tax settings.
+   */
+  static async getVatSettings(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const settings = await ShopService.getVatSettings(req.user.shopId);
+      ApiResponse.success(res, settings);
+    } catch (error: any) {
+      if (error.message?.includes('not found')) {
+        ApiResponse.notFound(res, error.message);
+      } else {
+        ApiResponse.serverError(res, error.message, error);
+      }
+    }
+  }
+
+  /**
+   * PATCH /api/shops/vat — update the current shop's VAT / tax settings.
+   * Owner-only (route-gated). Scoped to req.user.shopId.
+   */
+  static async updateVatSettings(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const settings = await ShopService.updateVatSettings(req.user.shopId, req.body);
+      ApiResponse.success(res, settings, 'VAT settings updated');
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }

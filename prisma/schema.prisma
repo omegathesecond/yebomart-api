@@ -39,6 +39,17 @@ model Shop {
   timezone      String    @default("Africa/Mbabane")
   address       String?
   logoUrl       String?
+
+  // VAT / Tax — off by default so non-registered shops are unaffected (tax
+  // stays 0, no VAT line on receipts). vatRate is a PERCENTAGE (e.g. 15 = 15%,
+  // the Eswatini standard rate). When pricesIncludeVat is true, product prices
+  // already contain VAT and the tax is extracted from the total; when false,
+  // VAT is added on top of the subtotal. vatNumber is the shop's tax/TIN id
+  // printed on VAT-compliant receipts.
+  vatRegistered    Boolean  @default(false)
+  vatRate          Float    @default(0)
+  vatNumber        String?
+  pricesIncludeVat Boolean  @default(false)
   
   // Notifications — owner-controlled comms prefs. Delivered via YeboLink
   // (WhatsApp, SMS fallback) by the daily notification run. Default OFF so we

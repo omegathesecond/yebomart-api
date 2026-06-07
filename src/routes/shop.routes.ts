@@ -3,6 +3,7 @@ import {
   ShopController,
   updateShopSchema,
   updateNotificationSettingsSchema,
+  updateVatSettingsSchema,
 } from '@controllers/shop.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware, ownerAuth } from '@middleware/auth.middleware';
@@ -27,6 +28,16 @@ router.patch(
   ownerAuth,
   validateRequest(updateNotificationSettingsSchema),
   ShopController.updateNotificationSettings,
+);
+
+// VAT / tax settings for the authed shop. Declared BEFORE `/:id` so `vat`
+// isn't swallowed as a shop id. Scoped to req.user.shopId; PATCH is owner-only.
+router.get('/vat', ShopController.getVatSettings);
+router.patch(
+  '/vat',
+  ownerAuth,
+  validateRequest(updateVatSettingsSchema),
+  ShopController.updateVatSettings,
 );
 
 router.get('/:id', ShopController.getById);

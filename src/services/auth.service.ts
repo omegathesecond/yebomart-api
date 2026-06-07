@@ -220,6 +220,11 @@ export class AuthService {
         countryCode: true,
         phoneCountryCode: true,
         currencySymbol: true,
+        // VAT / Tax — drives the receipt VAT line + number.
+        vatRegistered: true,
+        vatRate: true,
+        vatNumber: true,
+        pricesIncludeVat: true,
         createdAt: true,
       },
     });
@@ -240,6 +245,12 @@ export class AuthService {
             assistantName: true,
             currency: true,
             timezone: true,
+            address: true,
+            // VAT / Tax — drives the receipt VAT line + number.
+            vatRegistered: true,
+            vatRate: true,
+            vatNumber: true,
+            pricesIncludeVat: true,
           },
         },
       },

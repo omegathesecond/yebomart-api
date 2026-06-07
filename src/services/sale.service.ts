@@ -1,6 +1,7 @@
 import { prisma } from '@config/prisma';
 import { Prisma, PaymentMethod, SaleStatus } from '@prisma/client';
 import { paginate, paginationMeta } from '@utils/pagination';
+import { computeVat } from '@utils/vat';
 import { ShopService } from './shop.service';
 
 interface SaleItemInput {
@@ -96,9 +97,22 @@ export class SaleService {
     }
 
     const discount = input.discount || 0;
-    const tax = 0; // Could add VAT calculation here
-    const totalAmount = subtotal - discount + tax;
-    const change = input.amountPaid - totalAmount;
+
+    // VAT is computed authoritatively from the shop's config (never trust a
+    // client-supplied tax). Non-registered shops get tax = 0 and totalAmount =
+    // subtotal - discount, exactly as before. `totalAmount`/`change` are rounded
+    // to 2 decimals to match the client's tax-inclusive `amountPaid` and avoid
+    // a sub-cent float drift tripping the insufficient-payment guard.
+    const shop = await prisma.shop.findUnique({
+      where: { id: input.shopId },
+      select: { vatRegistered: true, vatRate: true, pricesIncludeVat: true },
+    });
+    if (!shop) {
+      throw new Error('Shop not found');
+    }
+
+    const { tax, totalAmount } = computeVat(subtotal, discount, shop);
+    const change = Math.round((input.amountPaid - totalAmount) * 100) / 100;
 
     if (change < 0) {
       throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);

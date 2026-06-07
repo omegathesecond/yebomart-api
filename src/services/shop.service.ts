@@ -22,6 +22,22 @@ interface UpdateNotificationSettingsInput {
   notifyPhone?: string | null;
 }
 
+interface UpdateVatSettingsInput {
+  vatRegistered?: boolean;
+  vatRate?: number;
+  vatNumber?: string | null;
+  pricesIncludeVat?: boolean;
+}
+
+// The VAT fields every shop read should carry so the POS / receipts can render
+// a VAT line and the registration number without an extra round-trip.
+const VAT_SELECT = {
+  vatRegistered: true,
+  vatRate: true,
+  vatNumber: true,
+  pricesIncludeVat: true,
+} as const;
+
 export class ShopService {
   /**
    * Get shop by ID
@@ -49,6 +65,8 @@ export class ShopService {
         countryCode: true,
         phoneCountryCode: true,
         currencySymbol: true,
+        // VAT / Tax
+        ...VAT_SELECT,
         _count: {
           select: {
             products: true,
@@ -88,7 +106,47 @@ export class ShopService {
         countryCode: true,
         phoneCountryCode: true,
         currencySymbol: true,
+        // VAT / Tax
+        ...VAT_SELECT,
       },
+    });
+
+    return shop;
+  }
+
+  /**
+   * Get the shop's VAT / tax settings. Owner/manager-facing config used by the
+   * POS Settings screen and to drive the receipt VAT line.
+   */
+  static async getVatSettings(shopId: string) {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      select: VAT_SELECT,
+    });
+
+    if (!shop) {
+      throw new Error('Shop not found');
+    }
+
+    return shop;
+  }
+
+  /**
+   * Update VAT / tax settings. Send only the fields you change. Returns the full
+   * VAT config so the client can refresh in one round-trip.
+   */
+  static async updateVatSettings(shopId: string, data: UpdateVatSettingsInput) {
+    const updateData: UpdateVatSettingsInput = {};
+    if (data.vatRegistered !== undefined) updateData.vatRegistered = data.vatRegistered;
+    if (data.vatRate !== undefined) updateData.vatRate = data.vatRate;
+    // Empty string clears the number; a value sets it.
+    if (data.vatNumber !== undefined) updateData.vatNumber = data.vatNumber || null;
+    if (data.pricesIncludeVat !== undefined) updateData.pricesIncludeVat = data.pricesIncludeVat;
+
+    const shop = await prisma.shop.update({
+      where: { id: shopId },
+      data: updateData,
+      select: VAT_SELECT,
     });
 
     return shop;
