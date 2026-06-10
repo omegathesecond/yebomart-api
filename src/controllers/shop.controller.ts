@@ -24,6 +24,13 @@ export const updateNotificationSettingsSchema = Joi.object({
     .messages({ 'string.pattern.base': 'notifyPhone must be E.164 (e.g. +26876123456)' }),
 }).min(1);
 
+export const updateTaxSettingsSchema = Joi.object({
+  taxRate: Joi.number().min(0).max(100).optional(),
+  taxInclusive: Joi.boolean().optional(),
+  // VAT registration number; empty string clears it (back to null).
+  taxNumber: Joi.string().allow('', null).trim().max(50).optional(),
+}).min(1);
+
 export class ShopController {
   /**
    * GET /api/shops/notifications — current shop's notification prefs + recipient.
@@ -58,6 +65,43 @@ export class ShopController {
       }
       const settings = await ShopService.updateNotificationSettings(req.user.shopId, req.body);
       ApiResponse.success(res, settings, 'Notification settings updated');
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * GET /api/shops/tax — current shop's VAT / tax configuration.
+   */
+  static async getTaxSettings(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const settings = await ShopService.getTaxSettings(req.user.shopId);
+      ApiResponse.success(res, settings);
+    } catch (error: any) {
+      if (error.message?.includes('not found')) {
+        ApiResponse.notFound(res, error.message);
+      } else {
+        ApiResponse.serverError(res, error.message, error);
+      }
+    }
+  }
+
+  /**
+   * PATCH /api/shops/tax — update the current shop's VAT / tax configuration.
+   * Owner-only (route-gated). Scoped to req.user.shopId.
+   */
+  static async updateTaxSettings(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const settings = await ShopService.updateTaxSettings(req.user.shopId, req.body);
+      ApiResponse.success(res, settings, 'Tax settings updated');
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }
