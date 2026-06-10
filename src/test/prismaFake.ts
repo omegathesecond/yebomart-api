@@ -33,7 +33,7 @@ type ModelName = 'shop' | 'product' | 'sale' | 'saleItem' | 'stockLog';
 const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   shop: [['ownerYeboidSub'], ['ownerPhone']],
   product: [['shopId', 'barcode']],
-  sale: [['shopId', 'localId']],
+  sale: [['shopId', 'localId'], ['shopId', 'receiptNumber']],
   saleItem: [],
   stockLog: [],
 };
@@ -83,10 +83,14 @@ class FakeDb {
     stockLog: [],
   };
   private idCounter = 0;
+  // Promise chain that serializes interactive $transaction callbacks (see
+  // transaction()). Reset between tests so a failed tx can't poison the chain.
+  private txChain: Promise<unknown> = Promise.resolve();
 
   reset() {
     (Object.keys(this.tables) as ModelName[]).forEach((m) => (this.tables[m] = []));
     this.idCounter = 0;
+    this.txChain = Promise.resolve();
   }
 
   rows(model: ModelName): Row[] {
@@ -194,6 +198,31 @@ class FakeDb {
     return this.tables[model].filter((r) => matchesWhere(r, args.where)).length;
   }
 
+  // Apply a Prisma `data` payload to a row, honouring the atomic field
+  // operators the services rely on ({ increment }, { decrement }, { set }).
+  // These matter for correctness: the real overselling fix uses
+  // `{ quantity: { decrement: n } }`, so the fake must compute it the same way
+  // the DB would rather than storing the operator object verbatim.
+  private applyData(rec: Row, data: Row) {
+    for (const [k, v] of Object.entries(data)) {
+      if (v !== null && typeof v === 'object' && !(v instanceof Date) && !Array.isArray(v)) {
+        if ('decrement' in v) {
+          rec[k] = (rec[k] ?? 0) - (v as any).decrement;
+          continue;
+        }
+        if ('increment' in v) {
+          rec[k] = (rec[k] ?? 0) + (v as any).increment;
+          continue;
+        }
+        if ('set' in v) {
+          rec[k] = (v as any).set;
+          continue;
+        }
+      }
+      rec[k] = v;
+    }
+  }
+
   update(model: ModelName, args: Row): Row {
     const hit = this.tables[model].find((r) => matchesWhere(r, args.where));
     if (!hit) {
@@ -202,19 +231,46 @@ class FakeDb {
         clientVersion: 'fake',
       });
     }
-    Object.assign(hit, args.data);
+    this.applyData(hit, args.data);
     return { ...hit };
+  }
+
+  // Bulk conditional update. Crucially returns `{ count }` like Prisma — the
+  // atomic guarded decrement in sale.service.ts keys off count === 0 to detect
+  // "someone else took the stock". The where-match + applyData run as one
+  // synchronous step, so the guard is evaluated and applied atomically (no
+  // check-then-act gap), exactly like a single SQL UPDATE ... WHERE.
+  updateMany(model: ModelName, args: Row): { count: number } {
+    const hits = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    for (const hit of hits) this.applyData(hit, args.data);
+    return { count: hits.length };
   }
 
   async transaction(arg: any): Promise<any> {
     if (typeof arg === 'function') {
-      const snap = this.snapshot();
-      try {
-        return await arg(prismaFake);
-      } catch (e) {
-        this.restore(snap);
-        throw e;
-      }
+      // Serialize interactive transactions. A real DB gives each transaction
+      // isolation; this fake has a single shared store, so we run transaction
+      // callbacks one-at-a-time. Without this, two "concurrent" callbacks would
+      // interleave at await points and the snapshot/restore-on-error would
+      // clobber a sibling's committed writes — a fake artefact, not a code bug.
+      // Sequential callers (every existing test) are unaffected: the chain is
+      // already resolved, so there is no added latency or ordering change.
+      const run = async () => {
+        const snap = this.snapshot();
+        try {
+          return await arg(prismaFake);
+        } catch (e) {
+          this.restore(snap);
+          throw e;
+        }
+      };
+      const result = this.txChain.then(run, run);
+      // Keep the chain alive regardless of this transaction's outcome.
+      this.txChain = result.then(
+        () => undefined,
+        () => undefined
+      );
+      return result;
     }
     return Promise.all(arg);
   }
@@ -231,6 +287,7 @@ function model(name: ModelName) {
     create: async (args: Row) =>
       db.includeOn(name, db.createOne(name, args.data), args.include),
     update: async (args: Row) => db.update(name, args),
+    updateMany: async (args: Row) => db.updateMany(name, args),
   };
 }
 

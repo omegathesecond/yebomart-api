@@ -234,6 +234,12 @@ model Sale {
   syncedAt      DateTime?
 
   @@unique([shopId, localId])
+  // Receipt numbers are generated per-shop (RCP-YYMMDD-NNNN). This guarantees
+  // no two sales in the same shop ever share a receipt number even under
+  // concurrent cashiers — the create path catches the P2002 and retries with a
+  // freshly recomputed sequence. NULLs are distinct in Postgres, so legacy
+  // rows with receiptNumber = NULL are unaffected.
+  @@unique([shopId, receiptNumber])
   @@index([shopId, createdAt])
   @@index([shopId, status])
   @@index([customerId])
