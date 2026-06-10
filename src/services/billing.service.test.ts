@@ -2,8 +2,10 @@
  * Tests for the billing credit path.
  *
  * billing.service.ts is a thin orchestration layer over the YeboPay wallet
- * (the credit ledger itself lives in yebopay). The money-safety guarantees we
- * can and must assert HERE are:
+ * (the credit ledger itself lives in yebopay). The shop->owner lookup runs
+ * against the REAL test DB; only the network-calling YeboPay client is mocked
+ * (it's an external HTTP service — there's nothing in-process to exercise). The
+ * money-safety guarantees we assert HERE are:
  *   - a charge that fails for INSUFFICIENT_BALANCE propagates loudly (no silent
  *     fallback) so a debit can never be masked into a fake "success"
  *   - the idempotencyKey is forwarded to yebopay so a retried charge can't
@@ -13,8 +15,6 @@
  *   - balance reads surface the shop-not-found error instead of guessing
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-
-// `@config/prisma` is redirected to the in-memory fake via vitest.config alias.
 
 // Keep the real YeboPayChargeError class (the service + tests rely on
 // instanceof / its code field); stub only the network-calling client methods.
@@ -33,16 +33,18 @@ vi.mock('./yebopay.client', async (importOriginal) => {
 
 import { BillingService } from './billing.service';
 import { YeboPayClient, YeboPayChargeError } from './yebopay.client';
-import { resetDb, seedShop } from '../test/prismaFake';
+import { resetDb } from '../test/db';
+import { seedShop } from '../test/factories';
 
 let shopId: string;
-const OWNER_SUB = '11111111-1111-1111-1111-111111111111';
+let ownerSub: string;
 
-beforeEach(() => {
-  resetDb();
+beforeEach(async () => {
+  await resetDb();
   vi.clearAllMocks();
-  const shop = seedShop({ ownerYeboidSub: OWNER_SUB });
+  const shop = await seedShop();
   shopId = shop.id;
+  ownerSub = shop.ownerYeboidSub;
 });
 
 describe('BillingService.getShopBalance', () => {
@@ -57,7 +59,7 @@ describe('BillingService.getShopBalance', () => {
     const balance = await BillingService.getShopBalance(shopId);
 
     expect(balance).toEqual({ available: 500, currency: 'SZL' });
-    expect(YeboPayClient.getBalance).toHaveBeenCalledWith(OWNER_SUB);
+    expect(YeboPayClient.getBalance).toHaveBeenCalledWith(ownerSub);
   });
 
   it('throws (no silent fallback) when the shop does not exist', async () => {
@@ -87,7 +89,7 @@ describe('BillingService.chargeShopCredits', () => {
     });
 
     expect(YeboPayClient.chargeWallet).toHaveBeenCalledWith({
-      yeboidSub: OWNER_SUB,
+      yeboidSub: ownerSub,
       amount: 1,
       description: 'AI query',
       idempotencyKey: 'idem-key-1', // forwarded => retry can't double-spend
@@ -97,11 +99,11 @@ describe('BillingService.chargeShopCredits', () => {
 
   it('propagates INSUFFICIENT_BALANCE loudly instead of silently succeeding', async () => {
     (YeboPayClient.chargeWallet as any).mockRejectedValue(
-      new YeboPayChargeError(402, 'Insufficient balance', 'INSUFFICIENT_BALANCE')
+      new YeboPayChargeError(402, 'Insufficient balance', 'INSUFFICIENT_BALANCE'),
     );
 
     await expect(
-      BillingService.chargeShopCredits({ shopId, amount: 999, description: 'AI query' })
+      BillingService.chargeShopCredits({ shopId, amount: 999, description: 'AI query' }),
     ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE', httpStatus: 402 });
   });
 });
@@ -129,9 +131,9 @@ describe('BillingService.createTopUpCheckout', () => {
       expect.objectContaining({
         amount: 450,
         currency: 'SZL',
-        yeboidSub: OWNER_SUB,
+        yeboidSub: ownerSub,
         metadata: expect.objectContaining({ credit_amount: '500', credit_pack: 'STANDARD' }),
-      })
+      }),
     );
   });
 
@@ -145,7 +147,7 @@ describe('BillingService.createTopUpCheckout', () => {
 
     expect(res).toMatchObject({ pack: 'CUSTOM', priceSzl: 50, credits: 50 });
     expect(YeboPayClient.createCheckout).toHaveBeenCalledWith(
-      expect.objectContaining({ amount: 50, metadata: expect.objectContaining({ credit_amount: '50' }) })
+      expect.objectContaining({ amount: 50, metadata: expect.objectContaining({ credit_amount: '50' }) }),
     );
   });
 
@@ -156,7 +158,7 @@ describe('BillingService.createTopUpCheckout', () => {
         customAmountSzl: 5,
         successUrl: 'https://app/success',
         cancelUrl: 'https://app/cancel',
-      })
+      }),
     ).rejects.toThrow(/customAmountSzl/);
     expect(YeboPayClient.createCheckout).not.toHaveBeenCalled();
   });
@@ -168,7 +170,7 @@ describe('BillingService.createTopUpCheckout', () => {
         packId: 'PLATINUM',
         successUrl: 'https://app/success',
         cancelUrl: 'https://app/cancel',
-      })
+      }),
     ).rejects.toThrow(/Unknown credit pack/);
     expect(YeboPayClient.createCheckout).not.toHaveBeenCalled();
   });
