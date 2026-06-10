@@ -4,6 +4,7 @@ import {
   adjustStockSchema,
   receiveStockSchema,
   listMovementsSchema,
+  reorderSuggestionsSchema,
 } from '@controllers/stock.controller';
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
@@ -19,6 +20,9 @@ router.get('/', StockController.getStock);
 
 // Low stock alerts
 router.get('/alerts', StockController.getAlerts);
+
+// Sales-velocity reorder suggestions (predicted stock-out + suggested qty)
+router.get('/reorder-suggestions', validateQuery(reorderSuggestionsSchema), StockController.getReorderSuggestions);
 
 // Stock movements history
 router.get('/movements', validateQuery(listMovementsSchema), StockController.getMovements);

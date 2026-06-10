@@ -32,6 +32,12 @@ export const listMovementsSchema = Joi.object({
   endDate: Joi.date().optional(),
 });
 
+export const reorderSuggestionsSchema = Joi.object({
+  days: Joi.number().optional().integer().min(1).max(365).default(30),
+  within: Joi.number().optional().integer().min(1).max(365).default(7),
+  targetCoverDays: Joi.number().optional().integer().min(1).max(365).default(14),
+});
+
 export class StockController {
   /**
    * Get current stock levels
@@ -116,6 +122,28 @@ export class StockController {
 
       const alerts = await StockService.getLowStockAlerts(req.user.shopId);
       ApiResponse.success(res, alerts);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * Get sales-velocity reorder suggestions (predicted stock-out + suggested qty)
+   */
+  static async getReorderSuggestions(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const suggestions = await StockService.getReorderSuggestions(req.user.shopId, {
+        days: req.query.days ? Number(req.query.days) : undefined,
+        within: req.query.within ? Number(req.query.within) : undefined,
+        targetCoverDays: req.query.targetCoverDays ? Number(req.query.targetCoverDays) : undefined,
+      });
+
+      ApiResponse.success(res, suggestions);
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }

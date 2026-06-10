@@ -195,6 +195,139 @@ export class StockService {
   }
 
   /**
+   * Sales-velocity reorder suggestions.
+   *
+   * For every active, stock-tracked product we compute the average daily sales
+   * velocity over a trailing window (from COMPLETED sales only), the predicted
+   * days of cover at the current quantity, and a suggested reorder quantity that
+   * tops the product up to `targetCoverDays` worth of demand.
+   *
+   * A product is flagged when it is predicted to run out within `within` days
+   * OR it is already at/below its reorder threshold. Products with NO sales in
+   * the window are only surfaced if they are below `reorderAt` — we never
+   * fabricate a velocity-based suggestion for a never-sold item.
+   */
+  static async getReorderSuggestions(
+    shopId: string,
+    opts: { days?: number; within?: number; targetCoverDays?: number } = {},
+  ) {
+    const days = opts.days && opts.days > 0 ? opts.days : 30;
+    const within = opts.within && opts.within > 0 ? opts.within : 7;
+    const targetCoverDays =
+      opts.targetCoverDays && opts.targetCoverDays > 0 ? opts.targetCoverDays : 14;
+
+    const windowStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const products = await prisma.product.findMany({
+      where: {
+        shopId,
+        isActive: true,
+        trackStock: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        barcode: true,
+        category: true,
+        unit: true,
+        quantity: true,
+        reorderAt: true,
+        costPrice: true,
+      },
+    });
+
+    if (products.length === 0) {
+      return { window: { days, within, targetCoverDays }, total: 0, items: [] };
+    }
+
+    // Sum units sold per product over the window from COMPLETED sales only.
+    // SaleItem has no shopId of its own, so we scope through the parent Sale.
+    const sold = await prisma.saleItem.groupBy({
+      by: ['productId'],
+      where: {
+        productId: { in: products.map(p => p.id) },
+        sale: {
+          shopId,
+          status: 'COMPLETED',
+          createdAt: { gte: windowStart },
+        },
+      },
+      _sum: { quantity: true },
+    });
+
+    const soldMap = new Map(sold.map(row => [row.productId, row._sum.quantity ?? 0]));
+
+    const items = [];
+
+    for (const product of products) {
+      const unitsSold = soldMap.get(product.id) ?? 0;
+      const velocityPerDay = unitsSold / days;
+      const belowReorder = product.quantity <= product.reorderAt;
+
+      if (velocityPerDay <= 0) {
+        // Never sold in the window — only a threshold alert, no prediction.
+        if (!belowReorder) continue;
+
+        items.push({
+          productId: product.id,
+          name: product.name,
+          barcode: product.barcode,
+          category: product.category,
+          unit: product.unit,
+          quantity: product.quantity,
+          reorderAt: product.reorderAt,
+          costPrice: product.costPrice,
+          velocityPerDay: 0,
+          daysOfCover: null as number | null, // no sales → infinite cover; null is JSON-safe
+          suggestedReorderQty: 0, // don't fabricate a qty for a never-sold item
+          reason: 'below_reorder' as const,
+        });
+        continue;
+      }
+
+      const daysOfCover = product.quantity / velocityPerDay;
+      const predictedStockout = daysOfCover <= within;
+
+      if (!predictedStockout && !belowReorder) continue;
+
+      const suggestedReorderQty = Math.max(
+        0,
+        Math.ceil(velocityPerDay * targetCoverDays) - product.quantity,
+      );
+
+      items.push({
+        productId: product.id,
+        name: product.name,
+        barcode: product.barcode,
+        category: product.category,
+        unit: product.unit,
+        quantity: product.quantity,
+        reorderAt: product.reorderAt,
+        costPrice: product.costPrice,
+        velocityPerDay: Math.round(velocityPerDay * 100) / 100,
+        daysOfCover: Math.round(daysOfCover * 10) / 10 as number | null,
+        suggestedReorderQty,
+        reason: predictedStockout
+          ? ('predicted_stockout' as const)
+          : ('below_reorder' as const),
+      });
+    }
+
+    // Soonest stock-out first; never-sold (null cover) items sink to the bottom.
+    items.sort((a, b) => {
+      const ax = a.daysOfCover ?? Number.POSITIVE_INFINITY;
+      const bx = b.daysOfCover ?? Number.POSITIVE_INFINITY;
+      return ax - bx;
+    });
+
+    return {
+      window: { days, within, targetCoverDays },
+      total: items.length,
+      items,
+    };
+  }
+
+  /**
    * Get stock movements with filtering and pagination
    */
   static async getMovements(params: ListMovementsParams) {
