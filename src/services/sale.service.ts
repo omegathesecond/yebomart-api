@@ -1,6 +1,7 @@
 import { prisma } from '@config/prisma';
 import { Prisma, PaymentMethod, SaleStatus } from '@prisma/client';
 import { paginate, paginationMeta } from '@utils/pagination';
+import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
 
@@ -97,8 +98,22 @@ export class SaleService {
     }
 
     const discount = input.discount || 0;
-    const tax = 0; // Could add VAT calculation here
-    const totalAmount = subtotal - discount + tax;
+
+    // VAT. The shop's tax config is authoritative — the client computes the
+    // same figure for display, but we recompute here so the persisted Sale.tax
+    // and totalAmount can't be spoofed by the request body. Existing shops
+    // default to taxRate 0 → tax 0, total = subtotal - discount (unchanged).
+    const shop = await prisma.shop.findUnique({
+      where: { id: input.shopId },
+      select: { taxRate: true, taxInclusive: true },
+    });
+    if (!shop) {
+      throw new Error('Shop not found');
+    }
+    const { tax, total: totalAmount } = computeTax(subtotal, discount, {
+      taxRate: shop.taxRate,
+      taxInclusive: shop.taxInclusive,
+    });
     const change = input.amountPaid - totalAmount;
 
     if (change < 0) {

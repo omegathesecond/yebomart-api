@@ -220,6 +220,10 @@ export class AuthService {
         countryCode: true,
         phoneCountryCode: true,
         currencySymbol: true,
+        // Tax / VAT — needed by the POS to show/charge tax and print the VAT number.
+        taxRate: true,
+        taxInclusive: true,
+        taxNumber: true,
         createdAt: true,
       },
     });

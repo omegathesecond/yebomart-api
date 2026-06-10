@@ -30,6 +30,7 @@ export class ReportService {
 
     // Calculate totals
     let totalSales = 0;
+    let totalTax = 0;
     let totalCost = 0;
     let cashSales = 0;
     let momoSales = 0;
@@ -41,6 +42,7 @@ export class ReportService {
 
     for (const sale of sales) {
       totalSales += sale.totalAmount;
+      totalTax += sale.tax;
 
       switch (sale.paymentMethod) {
         case 'CASH':
@@ -86,7 +88,11 @@ export class ReportService {
     });
 
     const totalExpenses = expenses._sum.amount || 0;
-    const grossProfit = totalSales - totalCost;
+    // For a VAT-registered shop the VAT collected is owed to the revenue
+    // authority, not income — so revenue/profit are reckoned NET of tax.
+    // Non-VAT shops have totalTax 0, so netRevenue === totalSales (unchanged).
+    const netRevenue = totalSales - totalTax;
+    const grossProfit = netRevenue - totalCost;
     const netProfit = grossProfit - totalExpenses;
 
     // Top products
@@ -113,6 +119,8 @@ export class ReportService {
       date: startOfDay,
       summary: {
         totalSales,
+        totalTax,
+        netRevenue,
         totalTransactions: sales.length,
         averageBasket: sales.length > 0 ? totalSales / sales.length : 0,
         totalCost,
@@ -152,28 +160,34 @@ export class ReportService {
 
     // Aggregate
     let totalSales = 0;
+    let totalTax = 0;
     let totalTransactions = 0;
     let totalCost = 0;
     let totalExpenses = 0;
 
     for (const report of dailyReports) {
       totalSales += report.summary.totalSales;
+      totalTax += report.summary.totalTax;
       totalTransactions += report.summary.totalTransactions;
       totalCost += report.summary.totalCost;
       totalExpenses += report.summary.totalExpenses;
     }
+
+    const netRevenue = totalSales - totalTax;
 
     return {
       weekStart: startOfWeek,
       weekEnd: endOfWeek,
       summary: {
         totalSales,
+        totalTax,
+        netRevenue,
         totalTransactions,
         averageDaily: totalSales / 7,
         totalCost,
-        grossProfit: totalSales - totalCost,
+        grossProfit: netRevenue - totalCost,
         totalExpenses,
-        netProfit: totalSales - totalCost - totalExpenses,
+        netProfit: netRevenue - totalCost - totalExpenses,
       },
       dailyBreakdown: dailyReports.map(r => ({
         date: r.date,

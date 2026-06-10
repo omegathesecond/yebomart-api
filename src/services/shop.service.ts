@@ -22,6 +22,12 @@ interface UpdateNotificationSettingsInput {
   notifyPhone?: string | null;
 }
 
+interface UpdateTaxSettingsInput {
+  taxRate?: number;
+  taxInclusive?: boolean;
+  taxNumber?: string | null;
+}
+
 export class ShopService {
   /**
    * Get shop by ID
@@ -49,6 +55,10 @@ export class ShopService {
         countryCode: true,
         phoneCountryCode: true,
         currencySymbol: true,
+        // Tax / VAT
+        taxRate: true,
+        taxInclusive: true,
+        taxNumber: true,
         _count: {
           select: {
             products: true,
@@ -88,10 +98,59 @@ export class ShopService {
         countryCode: true,
         phoneCountryCode: true,
         currencySymbol: true,
+        // Tax / VAT
+        taxRate: true,
+        taxInclusive: true,
+        taxNumber: true,
       },
     });
 
     return shop;
+  }
+
+  /**
+   * Get the shop's tax / VAT configuration. Same shape the PATCH returns so the
+   * client can refresh its view in one round-trip (mirrors the notification
+   * settings pair).
+   */
+  static async getTaxSettings(shopId: string) {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      select: { taxRate: true, taxInclusive: true, taxNumber: true },
+    });
+
+    if (!shop) {
+      throw new Error('Shop not found');
+    }
+
+    return {
+      taxRate: shop.taxRate,
+      taxInclusive: shop.taxInclusive,
+      taxNumber: shop.taxNumber,
+    };
+  }
+
+  /**
+   * Update tax / VAT configuration. Only the provided fields are written.
+   * An empty-string taxNumber clears it (back to null).
+   */
+  static async updateTaxSettings(shopId: string, data: UpdateTaxSettingsInput) {
+    const updateData: UpdateTaxSettingsInput = {};
+    if (data.taxRate !== undefined) updateData.taxRate = data.taxRate;
+    if (data.taxInclusive !== undefined) updateData.taxInclusive = data.taxInclusive;
+    if (data.taxNumber !== undefined) updateData.taxNumber = data.taxNumber || null;
+
+    const shop = await prisma.shop.update({
+      where: { id: shopId },
+      data: updateData,
+      select: { taxRate: true, taxInclusive: true, taxNumber: true },
+    });
+
+    return {
+      taxRate: shop.taxRate,
+      taxInclusive: shop.taxInclusive,
+      taxNumber: shop.taxNumber,
+    };
   }
 
   /**

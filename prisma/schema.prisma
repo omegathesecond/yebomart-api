@@ -39,6 +39,16 @@ model Shop {
   timezone      String    @default("Africa/Mbabane")
   address       String?
   logoUrl       String?
+
+  // Tax / VAT — per-shop config for compliant receipts. Additive with safe
+  // defaults: existing shops stay at 0% so sale totals are unchanged.
+  // taxInclusive=false  → VAT is added on top of the sell price at checkout.
+  // taxInclusive=true   → sell prices already include VAT; the tax portion is
+  //                       extracted from the price (total stays the same).
+  // taxNumber prints on the receipt when the shop is VAT-registered.
+  taxRate       Float     @default(0)     // percent, e.g. 15 for 15% VAT
+  taxInclusive  Boolean   @default(false)
+  taxNumber     String?                   // VAT registration number
   
   // Notifications — owner-controlled comms prefs. Delivered via YeboLink
   // (WhatsApp, SMS fallback) by the daily notification run. Default OFF so we
