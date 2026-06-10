@@ -74,7 +74,8 @@ model Shop {
   returns       Return[]
   suppliers     Supplier[]
   purchaseOrders PurchaseOrder[]
-  
+  cashSessions  CashSession[]
+
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -113,10 +114,11 @@ model User {
   sales         Sale[]
   stockLogs     StockLog[]
   auditLogs     AuditLog[]
-  
+  cashSessions  CashSession[]
+
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
-  
+
   @@unique([shopId, phone])
 }
 
@@ -183,7 +185,11 @@ model Sale {
   shopId        String
   userId        String?  // Cashier who made the sale
   customerId    String?  // Customer if credit sale
-  
+  // Cash-drawer attribution. Set on cash sales when a till session is OPEN so
+  // the end-of-day cash-up can reconcile against exactly the sales rung up
+  // during the shift. Null for non-cash sales or when no session is open.
+  cashSessionId String?
+
   // Totals
   subtotal      Float
   discount      Float    @default(0)
@@ -206,20 +212,22 @@ model Sale {
   shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   user          User?    @relation(fields: [userId], references: [id])
   customer      Customer? @relation("CustomerSales", fields: [customerId], references: [id])
+  cashSession   CashSession? @relation(fields: [cashSessionId], references: [id])
   items         SaleItem[]
   creditEntries CustomerCredit[]
-  
+
   createdAt     DateTime @default(now())
-  
+
   // Offline sync
   localId       String?  // Client-side ID for sync
   offlineAt     DateTime? // When created offline
   syncedAt      DateTime?
-  
+
   @@unique([shopId, localId])
   @@index([shopId, createdAt])
   @@index([shopId, status])
   @@index([customerId])
+  @@index([cashSessionId])
 }
 
 enum PaymentMethod {
@@ -256,6 +264,49 @@ model SaleItem {
   product     Product  @relation(fields: [productId], references: [id])
   
   @@index([saleId])
+}
+
+// ==================== CASH DRAWER / SHIFTS ====================
+
+// A cashier's till session: opened with a starting float, closed at end of
+// shift with a counted cash total. The cash-up reconciles the physical drawer
+// against expectedCash (openingFloat + cash sales rung up during the session),
+// recording any variance (shortage/overage) for loss prevention.
+model CashSession {
+  id           String   @id @default(cuid())
+  shopId       String
+  // The cashier who opened the till. Nullable for the same reason as
+  // StockLog.userId: shop OWNERS authenticate via YeboID and have no User row
+  // (their token's id is the Shop id, not a User id). Staff (PIN) tokens carry
+  // a real User id which we record here.
+  userId       String?
+
+  openingFloat Float    // Starting cash placed in the drawer
+  openedAt     DateTime @default(now())
+
+  // Populated at cash-up (close):
+  closedAt     DateTime?
+  countedCash  Float?   // Physical cash counted in the drawer
+  expectedCash Float?   // openingFloat + Σ cash sales during the session
+  variance     Float?   // countedCash - expectedCash (negative = short)
+
+  status       CashSessionStatus @default(OPEN)
+  notes        String?
+
+  // Relationships
+  shop         Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user         User?    @relation(fields: [userId], references: [id])
+  sales        Sale[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([shopId, status])
+}
+
+enum CashSessionStatus {
+  OPEN
+  CLOSED
 }
 
 // ==================== STOCK MANAGEMENT ====================

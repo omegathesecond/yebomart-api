@@ -2,6 +2,7 @@ import { prisma } from '@config/prisma';
 import { Prisma, PaymentMethod, SaleStatus } from '@prisma/client';
 import { paginate, paginationMeta } from '@utils/pagination';
 import { ShopService } from './shop.service';
+import { CashSessionService } from './cashSession.service';
 
 interface SaleItemInput {
   productId: string;
@@ -104,6 +105,19 @@ export class SaleService {
       throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
     }
 
+    // Cash-drawer attribution: tag CASH sales to the open till session so the
+    // end-of-day cash-up reconciles against exactly this shift. Best-effort —
+    // a lookup failure or no open session must never block the sale, so we
+    // swallow errors and leave cashSessionId null.
+    let cashSessionId: string | null = null;
+    if (input.paymentMethod === 'CASH') {
+      try {
+        cashSessionId = await CashSessionService.findOpenSessionId(input.shopId);
+      } catch {
+        cashSessionId = null;
+      }
+    }
+
     // Create sale and update stock in a transaction
     let sale;
     try {
@@ -136,6 +150,7 @@ export class SaleService {
           shopId: input.shopId,
           userId: input.userId,
           customerId: input.customerId || undefined,
+          cashSessionId: cashSessionId || undefined,
           receiptNumber,
           subtotal,
           discount,

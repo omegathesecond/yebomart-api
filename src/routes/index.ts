@@ -15,6 +15,7 @@ import uploadRoutes from '@routes/upload.routes';
 import returnRoutes from '@routes/return.routes';
 import supplierRoutes from '@routes/supplier.routes';
 import purchaseOrderRoutes from '@routes/purchaseOrder.routes';
+import cashSessionRoutes from '@routes/cashSession.routes';
 import billingRoutes from '@routes/billing.routes';
 import internalRoutes from '@routes/internal.routes';
 
@@ -68,6 +69,9 @@ router.use('/suppliers', supplierRoutes);
 
 // Purchase orders (raise PO + receive stock)
 router.use('/purchase-orders', purchaseOrderRoutes);
+
+// Cash drawer / shift management (open till, cash-up, Z-report)
+router.use('/cash-sessions', cashSessionRoutes);
 
 // Billing (pay-as-you-go credits via YeboPay; replaces legacy /pricing + /license surfaces)
 router.use('/billing', billingRoutes);
