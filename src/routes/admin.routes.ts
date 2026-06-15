@@ -22,5 +22,7 @@ router.get('/users/:id', AdminController.getUserDetail);
 // shop-status breakdown. Same shape (groupBy + _count) so dashboards keep
 // working.
 router.get('/subscriptions', AdminController.getSubscriptions);
+// Cross-shop audit log (voids, deletes, status changes across all shops).
+router.get('/audit', AdminController.getAuditLogs);
 
 export default router;

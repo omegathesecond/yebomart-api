@@ -450,4 +450,47 @@ export class AdminController {
       ApiResponse.error(res, 'Failed to fetch user details');
     }
   }
+
+  // Cross-shop audit log (ops fraud-detection / dispute-resolution surface).
+  //
+  // The shop-facing /api/audit route is owner-scoped to a single shop. This
+  // admin variant spans ALL shops so ops can see who did what (voids, deletes,
+  // status changes) across the platform. Filterable by shop, user, action
+  // type, and date range; paginated newest-first. Same AuditLog model + shop/
+  // user relations as AuditService — no new storage.
+  static async getAuditLogs(req: Request, res: Response): Promise<void> {
+    try {
+      const { page = 1, limit = 50, shopId, userId, action, startDate, endDate } = req.query as any;
+      const skip = (Number(page) - 1) * Number(limit);
+
+      const where: any = {};
+      if (shopId) where.shopId = shopId;
+      if (userId) where.userId = userId;
+      if (action) where.action = action;
+      if (startDate || endDate) {
+        where.createdAt = {};
+        if (startDate) where.createdAt.gte = new Date(startDate);
+        if (endDate) where.createdAt.lte = new Date(endDate);
+      }
+
+      const [logs, total] = await Promise.all([
+        prisma.auditLog.findMany({
+          where,
+          skip,
+          take: Number(limit),
+          orderBy: { createdAt: 'desc' },
+          include: {
+            shop: { select: { id: true, name: true } },
+            user: { select: { id: true, name: true, role: true } },
+          },
+        }),
+        prisma.auditLog.count({ where }),
+      ]);
+
+      ApiResponse.success(res, { logs, total, page: Number(page), limit: Number(limit) });
+    } catch (error) {
+      console.error('Get audit logs error:', error);
+      ApiResponse.error(res, 'Failed to fetch audit logs');
+    }
+  }
 }
