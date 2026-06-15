@@ -25,7 +25,14 @@ import { Prisma } from '@prisma/client';
 type Row = Record<string, any>;
 
 // Models this fake knows about (only what the tests need).
-type ModelName = 'shop' | 'product' | 'sale' | 'saleItem' | 'stockLog';
+type ModelName =
+  | 'shop'
+  | 'product'
+  | 'sale'
+  | 'saleItem'
+  | 'stockLog'
+  | 'customer'
+  | 'customerCredit';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -36,6 +43,8 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   sale: [['shopId', 'localId']],
   saleItem: [],
   stockLog: [],
+  customer: [['shopId', 'phone']],
+  customerCredit: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -81,6 +90,8 @@ class FakeDb {
     sale: [],
     saleItem: [],
     stockLog: [],
+    customer: [],
+    customerCredit: [],
   };
   private idCounter = 0;
 
@@ -202,7 +213,16 @@ class FakeDb {
         clientVersion: 'fake',
       });
     }
-    Object.assign(hit, args.data);
+    // Apply each field, honouring Prisma's atomic numeric ops ({ increment } /
+    // { decrement }) the way Postgres would — e.g. customer balance updates.
+    for (const [k, v] of Object.entries(args.data ?? {})) {
+      if (v && typeof v === 'object' && !(v instanceof Date) && ('increment' in v || 'decrement' in v)) {
+        const cur = typeof hit[k] === 'number' ? hit[k] : 0;
+        hit[k] = 'increment' in v ? cur + (v as any).increment : cur - (v as any).decrement;
+      } else {
+        hit[k] = v;
+      }
+    }
     return { ...hit };
   }
 
@@ -244,6 +264,8 @@ export const prismaFake: any = {
   sale: model('sale'),
   saleItem: model('saleItem'),
   stockLog: model('stockLog'),
+  customer: model('customer'),
+  customerCredit: model('customerCredit'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -285,6 +307,18 @@ export function seedProduct(partial: Partial<Row> = {}): Row {
     quantity: 100,
     isActive: true,
     trackStock: true,
+    ...partial,
+  });
+}
+
+export function seedCustomer(partial: Partial<Row> = {}): Row {
+  return db.createOne('customer', {
+    shopId: 'shop_1',
+    name: 'Sipho Dlamini',
+    phone: partial.phone ?? `+2687${Math.floor(Math.random() * 1e7)}`,
+    creditLimit: 0, // 0 = no limit configured
+    balance: 0, // positive = owes the shop
+    isActive: true,
     ...partial,
   });
 }

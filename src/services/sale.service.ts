@@ -114,10 +114,49 @@ export class SaleService {
       taxRate: shop.taxRate,
       taxInclusive: shop.taxInclusive,
     });
-    const change = input.amountPaid - totalAmount;
 
-    if (change < 0) {
-      throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
+    // CREDIT ("on the book" / pay-later) sales: nothing is tendered now, so the
+    // amountPaid>=total guard below is intentionally skipped and amountPaid/
+    // change are forced to 0 regardless of what the client sent. The full total
+    // is instead added to the customer's running balance (the CustomerCredit
+    // PURCHASE entry + balance increment inside the transaction). A credit sale
+    // MUST be attached to a customer, and must not push them past their limit.
+    const isCredit = input.paymentMethod === 'CREDIT';
+    let amountPaid: number;
+    let change: number;
+    let creditCustomer: { id: string; balance: number; creditLimit: number } | null = null;
+
+    if (isCredit) {
+      if (!input.customerId) {
+        throw new Error('A customer is required for credit (pay-later) sales');
+      }
+
+      creditCustomer = await prisma.customer.findFirst({
+        where: { id: input.customerId, shopId: input.shopId },
+        select: { id: true, balance: true, creditLimit: true },
+      });
+      if (!creditCustomer) {
+        throw new Error('Customer not found for credit sale');
+      }
+
+      const newBalance = creditCustomer.balance + totalAmount;
+      // creditLimit 0 = no limit configured (matches the Customers UI, which
+      // only shows a limit badge when creditLimit > 0). Enforce only when set.
+      if (creditCustomer.creditLimit > 0 && newBalance > creditCustomer.creditLimit) {
+        throw new Error(
+          `Credit limit exceeded. Limit: ${creditCustomer.creditLimit}, current balance: ${creditCustomer.balance}, this sale: ${totalAmount}. New balance would be ${newBalance}.`,
+        );
+      }
+
+      amountPaid = 0;
+      change = 0;
+    } else {
+      amountPaid = input.amountPaid;
+      change = amountPaid - totalAmount;
+
+      if (change < 0) {
+        throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
+      }
     }
 
     // Cash-drawer attribution: tag CASH sales to the open till session so the
@@ -172,7 +211,7 @@ export class SaleService {
           tax,
           totalAmount,
           paymentMethod: input.paymentMethod,
-          amountPaid: input.amountPaid,
+          amountPaid,
           change,
           status: 'COMPLETED',
           localId: input.localId,
@@ -214,7 +253,35 @@ export class SaleService {
         }
       }
 
-      return sale;
+      // Credit ("on the book") sale: record the PURCHASE in the customer ledger
+      // and increase their outstanding balance — same effect as
+      // CustomerController.addCredit, but committed atomically with the sale so
+      // stock + ledger + balance can never drift apart. amountPaid/change are
+      // already 0 (set above). Stock is still decremented in the loop above, so
+      // credit sales draw down inventory like any other sale.
+      let customerBalance: number | undefined;
+      if (isCredit) {
+        await tx.customerCredit.create({
+          data: {
+            shopId: input.shopId,
+            customerId: input.customerId!,
+            type: 'PURCHASE',
+            amount: totalAmount,
+            saleId: sale.id,
+            userId: input.userId,
+            note: `Credit sale ${sale.receiptNumber ?? sale.id}`,
+          },
+        });
+        const updatedCustomer = await tx.customer.update({
+          where: { id: input.customerId! },
+          data: { balance: { increment: totalAmount } },
+        });
+        customerBalance = updatedCustomer.balance;
+      }
+
+      // Expose the customer's new outstanding balance on the sale so the POS
+      // receipt can print it for credit sales (undefined for non-credit).
+      return { ...sale, customerBalance };
       });
     } catch (err) {
       // Race-proof idempotency backstop: two in-flight replays of the same
