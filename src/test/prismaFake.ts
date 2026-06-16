@@ -25,7 +25,14 @@ import { Prisma } from '@prisma/client';
 type Row = Record<string, any>;
 
 // Models this fake knows about (only what the tests need).
-type ModelName = 'shop' | 'product' | 'sale' | 'saleItem' | 'stockLog';
+type ModelName =
+  | 'shop'
+  | 'product'
+  | 'sale'
+  | 'saleItem'
+  | 'stockLog'
+  | 'customer'
+  | 'customerCredit';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -36,11 +43,14 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   sale: [['shopId', 'localId']],
   saleItem: [],
   stockLog: [],
+  customer: [['shopId', 'phone']],
+  customerCredit: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
 const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
   sale: { items: 'saleItem' },
+  customer: { credits: 'customerCredit' },
 };
 
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
@@ -81,6 +91,8 @@ class FakeDb {
     sale: [],
     saleItem: [],
     stockLog: [],
+    customer: [],
+    customerCredit: [],
   };
   private idCounter = 0;
 
@@ -202,7 +214,21 @@ class FakeDb {
         clientVersion: 'fake',
       });
     }
-    Object.assign(hit, args.data);
+    // Support Prisma's atomic numeric ops ({ increment } / { decrement }) in
+    // addition to plain scalar assignment.
+    for (const [field, val] of Object.entries(args.data)) {
+      if (val && typeof val === 'object' && !(val instanceof Date)) {
+        if ('increment' in val) {
+          hit[field] = (hit[field] ?? 0) + (val as any).increment;
+          continue;
+        }
+        if ('decrement' in val) {
+          hit[field] = (hit[field] ?? 0) - (val as any).decrement;
+          continue;
+        }
+      }
+      hit[field] = val;
+    }
     return { ...hit };
   }
 
@@ -244,6 +270,8 @@ export const prismaFake: any = {
   sale: model('sale'),
   saleItem: model('saleItem'),
   stockLog: model('stockLog'),
+  customer: model('customer'),
+  customerCredit: model('customerCredit'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -285,6 +313,18 @@ export function seedProduct(partial: Partial<Row> = {}): Row {
     quantity: 100,
     isActive: true,
     trackStock: true,
+    ...partial,
+  });
+}
+
+export function seedCustomer(partial: Partial<Row> = {}): Row {
+  return db.createOne('customer', {
+    shopId: 'shop_1',
+    name: 'Test Customer',
+    phone: null,
+    creditLimit: 0,
+    balance: 0,
+    isActive: true,
     ...partial,
   });
 }

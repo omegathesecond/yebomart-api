@@ -4,6 +4,7 @@ import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { YeboLinkClient } from '@services/yebolink.client';
+import { evaluateCredit } from '@services/customerCredit.service';
 
 export const createCustomerSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
@@ -15,9 +16,20 @@ export const createCustomerSchema = Joi.object({
 
 export const addCreditSchema = Joi.object({
   type: Joi.string().required().valid('PURCHASE', 'PAYMENT', 'ADJUSTMENT', 'REFUND'),
-  amount: Joi.number().required().min(0),
+  // ADJUSTMENT carries its own sign (a negative amount reduces the balance), so
+  // it's the only type allowed to be negative. It must be non-zero — a zero
+  // adjustment is a no-op. Everything else is a non-negative magnitude.
+  amount: Joi.when('type', {
+    is: 'ADJUSTMENT',
+    then: Joi.number().required().invalid(0),
+    otherwise: Joi.number().required().min(0),
+  }),
   note: Joi.string().optional().max(500),
   saleId: Joi.string().optional(),
+  // Set true to push an entry through even if it breaches the credit limit.
+  // Honoured only for shop OWNERs (see addCredit) — cashiers/managers cannot
+  // self-approve over-limit credit.
+  override: Joi.boolean().optional().default(false),
 });
 
 export const sendStatementSchema = Joi.object({
@@ -223,10 +235,11 @@ export class CustomerController {
       }
 
       const { id } = req.params;
-      const { type, amount, note, saleId } = req.body;
+      const { type, amount, note, saleId, override } = req.body;
 
       const customer = await prisma.customer.findFirst({
         where: { id, shopId: req.user.shopId },
+        include: { shop: { select: { currencySymbol: true } } },
       });
 
       if (!customer) {
@@ -234,16 +247,39 @@ export class CustomerController {
         return;
       }
 
-      // Calculate balance change
-      let balanceChange = 0;
-      if (type === 'PURCHASE') {
-        balanceChange = amount; // They owe more
-      } else if (type === 'PAYMENT') {
-        balanceChange = -amount; // They paid
-      } else if (type === 'REFUND') {
-        balanceChange = -amount; // We owe them
+      // Compute the signed balance change and check it against the credit limit.
+      const { balanceChange, newBalance, exceedsLimit } = evaluateCredit({
+        type,
+        amount,
+        currentBalance: customer.balance,
+        creditLimit: customer.creditLimit,
+      });
+
+      // Reject entries that would push the customer over their credit limit,
+      // unless a shop OWNER explicitly overrides. Surface a loud, specific error
+      // so the cashier knows exactly why it was blocked (no silent fallback).
+      if (exceedsLimit) {
+        const isOwner = req.user.role === 'OWNER';
+        if (!(override === true && isOwner)) {
+          const symbol = customer.shop?.currencySymbol ?? '';
+          const label = CREDIT_TYPE_LABEL[type] ?? type;
+          const base =
+            `Credit limit exceeded: this ${label} of ${money(symbol, amount)} would raise ` +
+            `${customer.name}'s balance to ${money(symbol, newBalance)}, over their ` +
+            `${money(symbol, customer.creditLimit)} limit.`;
+          const hint = isOwner
+            ? ' Re-submit with override=true to force it through.'
+            : ' An owner must approve to override.';
+          ApiResponse.error(res, base + hint, 422, {
+            code: 'CREDIT_LIMIT_EXCEEDED',
+            creditLimit: customer.creditLimit,
+            currentBalance: customer.balance,
+            attemptedBalance: newBalance,
+            requiresOverride: true,
+          });
+          return;
+        }
       }
-      // ADJUSTMENT can be positive or negative based on amount sign
 
       const [credit, updatedCustomer] = await prisma.$transaction([
         prisma.customerCredit.create({
@@ -263,7 +299,11 @@ export class CustomerController {
         }),
       ]);
 
-      ApiResponse.success(res, { credit, newBalance: updatedCustomer.balance }, 'Credit entry added');
+      ApiResponse.success(
+        res,
+        { credit, newBalance: updatedCustomer.balance, balanceChange },
+        'Credit entry added',
+      );
     } catch (error: any) {
       ApiResponse.badRequest(res, error.message);
     }
