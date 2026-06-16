@@ -1,5 +1,10 @@
 import { Router } from 'express';
-import { AdminController, adminLoginSchema } from '@controllers/admin.controller';
+import {
+  AdminController,
+  adminLoginSchema,
+  adminUpdateProfileSchema,
+  adminChangePasswordSchema,
+} from '@controllers/admin.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authenticateAdmin } from '@middleware/auth.middleware';
 
@@ -10,6 +15,11 @@ router.post('/login', validateRequest(adminLoginSchema), AdminController.login);
 
 // Protected routes (require admin auth)
 router.use(authenticateAdmin);
+
+// Authenticated admin's own account (Settings page)
+router.get('/profile', AdminController.getProfile);
+router.patch('/profile', validateRequest(adminUpdateProfileSchema), AdminController.updateProfile);
+router.post('/change-password', validateRequest(adminChangePasswordSchema), AdminController.changePassword);
 
 router.get('/dashboard', AdminController.getDashboard);
 router.get('/shops', AdminController.getShops);
