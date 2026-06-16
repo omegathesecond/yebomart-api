@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 import { AdminController } from './admin.controller';
-import { prismaFake, resetDb, seedShop, seedUser } from '../test/prismaFake';
+import { prismaFake, resetDb, seedShop, seedUser, seedAdmin, table } from '../test/prismaFake';
 
 // admin.controller imports `prisma` from `@config/prisma`, which the vitest
 // config aliases to the in-memory fake — so these controllers transparently
@@ -24,6 +26,12 @@ function mockRes() {
 
 function reqWith(query: Record<string, any>): any {
   return { query };
+}
+
+// The profile/password endpoints read the authenticated admin off req.user (set
+// by authenticateAdmin) and the payload off req.body — no query params.
+function reqAuth(user: any, body: Record<string, any> = {}): any {
+  return { user, body };
 }
 
 beforeEach(() => {
@@ -236,5 +244,114 @@ describe('AdminController.getUsers — pagination', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.data).toMatchObject({ page: 4, limit: 5 });
+  });
+});
+
+// The Settings-page endpoints operate on the authenticated admin's OWN row
+// (req.user.id), unlike the list endpoints above. These pin the happy paths and
+// the two error mappings that are easy to regress: P2002 -> 409 on email clash,
+// and a wrong current password -> 400 (never silently accepted).
+
+describe('AdminController.getProfile', () => {
+  it('returns the authenticated admin (without the password hash)', async () => {
+    seedAdmin({ id: 'admin_1', email: 'boss@yebomart.com', name: 'Boss', role: 'SUPER_ADMIN' });
+
+    const res = mockRes();
+    await AdminController.getProfile(reqAuth({ id: 'admin_1' }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toMatchObject({
+      id: 'admin_1',
+      email: 'boss@yebomart.com',
+      name: 'Boss',
+      role: 'SUPER_ADMIN',
+      isActive: true,
+    });
+    // The controller's `select` must NOT leak the password hash to the client.
+    expect(res.body.data.password).toBeUndefined();
+  });
+
+  it('returns 404 when the admin row no longer exists', async () => {
+    const res = mockRes();
+    await AdminController.getProfile(reqAuth({ id: 'ghost' }), res);
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body.success).toBe(false);
+  });
+});
+
+describe('AdminController.updateProfile', () => {
+  it('updates name and lower-cases the email', async () => {
+    seedAdmin({ id: 'admin_1', email: 'old@yebomart.com', name: 'Old Name' });
+
+    const res = mockRes();
+    await AdminController.updateProfile(
+      reqAuth({ id: 'admin_1' }, { name: 'New Name', email: 'New@Yebomart.COM' }),
+      res
+    );
+
+    expect(res.statusCode).toBe(200);
+    const stored = table('admin').find((a) => a.id === 'admin_1');
+    expect(stored?.name).toBe('New Name');
+    expect(stored?.email).toBe('new@yebomart.com');
+  });
+
+  it('maps a Prisma P2002 unique-constraint error to a 409 conflict', async () => {
+    seedAdmin({ id: 'admin_1', email: 'me@yebomart.com' });
+
+    // Simulate another admin already owning the target email: Prisma surfaces a
+    // P2002 on the unique `email` column, which the controller must translate
+    // to 409 (not a generic 500).
+    vi.spyOn(prismaFake.admin, 'update').mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['email'] },
+      })
+    );
+
+    const res = mockRes();
+    await AdminController.updateProfile(
+      reqAuth({ id: 'admin_1' }, { email: 'taken@yebomart.com' }),
+      res
+    );
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.success).toBe(false);
+  });
+});
+
+describe('AdminController.changePassword', () => {
+  it('rejects a wrong current password with 400 and leaves the hash untouched', async () => {
+    const currentHash = await bcrypt.hash('correct-horse', 4);
+    seedAdmin({ id: 'admin_1', password: currentHash });
+
+    const res = mockRes();
+    await AdminController.changePassword(
+      reqAuth({ id: 'admin_1' }, { currentPassword: 'wrong-guess', newPassword: 'brand-new-pass' }),
+      res
+    );
+
+    expect(res.statusCode).toBe(400);
+    // The stored hash must be unchanged when the current password is wrong.
+    expect(table('admin').find((a) => a.id === 'admin_1')?.password).toBe(currentHash);
+  });
+
+  it('bcrypt-rehashes the password on success (new hash verifies the new password)', async () => {
+    const currentHash = await bcrypt.hash('correct-horse', 4);
+    seedAdmin({ id: 'admin_1', password: currentHash });
+
+    const res = mockRes();
+    await AdminController.changePassword(
+      reqAuth({ id: 'admin_1' }, { currentPassword: 'correct-horse', newPassword: 'brand-new-pass' }),
+      res
+    );
+
+    expect(res.statusCode).toBe(200);
+    const stored = table('admin').find((a) => a.id === 'admin_1')?.password as string;
+    // It must be a fresh hash — not the old one, and not the plaintext.
+    expect(stored).not.toBe(currentHash);
+    expect(stored).not.toBe('brand-new-pass');
+    await expect(bcrypt.compare('brand-new-pass', stored)).resolves.toBe(true);
   });
 });
