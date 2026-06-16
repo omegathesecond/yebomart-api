@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma, UserRole, ShopStatus } from '@prisma/client';
 import { ApiResponse } from '@utils/ApiResponse';
 import Joi from 'joi';
 
@@ -151,17 +151,33 @@ export class AdminController {
   // List all shops
   static async getShops(req: Request, res: Response): Promise<void> {
     try {
-      const { page = 1, limit = 20, search } = req.query;
+      const { page = 1, limit = 20, search, status } = req.query;
       const skip = (Number(page) - 1) * Number(limit);
 
-      const where = search
-        ? {
-            OR: [
-              { name: { contains: String(search), mode: 'insensitive' as const } },
-              { ownerName: { contains: String(search), mode: 'insensitive' as const } },
-            ],
-          }
-        : {};
+      // Build the filter once and feed it to BOTH findMany and count so the
+      // returned total matches the filtered rows (pagination stays correct).
+      const where: Prisma.ShopWhereInput = {};
+
+      if (search) {
+        const term = String(search);
+        where.OR = [
+          { name: { contains: term, mode: 'insensitive' } },
+          { ownerName: { contains: term, mode: 'insensitive' } },
+          { ownerPhone: { contains: term, mode: 'insensitive' } },
+        ];
+      }
+
+      // Status filter — only accept real enum values; ignore "all"/garbage.
+      if (status && String(status).toLowerCase() !== 'all') {
+        const statusUpper = String(status).toUpperCase();
+        if ((Object.values(ShopStatus) as string[]).includes(statusUpper)) {
+          where.status = statusUpper as ShopStatus;
+        } else {
+          // A filter the DB can't satisfy must return nothing, not everything.
+          ApiResponse.success(res, { shops: [], total: 0, page: Number(page), limit: Number(limit) });
+          return;
+        }
+      }
 
       const [shops, total] = await Promise.all([
         prisma.shop.findMany({
@@ -273,17 +289,44 @@ export class AdminController {
   // List all users across shops
   static async getUsers(req: Request, res: Response): Promise<void> {
     try {
-      const { page = 1, limit = 20 } = req.query;
+      const { page = 1, limit = 20, search, role } = req.query;
       const skip = (Number(page) - 1) * Number(limit);
+
+      // Build the filter once and feed it to BOTH findMany and count so the
+      // returned total matches the filtered rows (pagination stays correct).
+      const where: Prisma.UserWhereInput = {};
+
+      if (search) {
+        const term = String(search);
+        where.OR = [
+          { name: { contains: term, mode: 'insensitive' } },
+          { email: { contains: term, mode: 'insensitive' } },
+          { phone: { contains: term, mode: 'insensitive' } },
+          { shop: { is: { name: { contains: term, mode: 'insensitive' } } } },
+        ];
+      }
+
+      // Role filter — only accept real enum values; ignore "all"/garbage.
+      if (role && String(role).toLowerCase() !== 'all') {
+        const roleUpper = String(role).toUpperCase();
+        if ((Object.values(UserRole) as string[]).includes(roleUpper)) {
+          where.role = roleUpper as UserRole;
+        } else {
+          // A filter the DB can't satisfy must return nothing, not everything.
+          ApiResponse.success(res, { users: [], total: 0, page: Number(page), limit: Number(limit) });
+          return;
+        }
+      }
 
       const [users, total] = await Promise.all([
         prisma.user.findMany({
+          where,
           skip,
           take: Number(limit),
           orderBy: { createdAt: 'desc' },
           include: { shop: { select: { id: true, name: true } } },
         }),
-        prisma.user.count(),
+        prisma.user.count({ where }),
       ]);
 
       ApiResponse.success(res, { users, total, page: Number(page), limit: Number(limit) });
