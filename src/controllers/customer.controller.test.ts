@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { CustomerController } from './customer.controller';
 import { resetDb, seedCustomer, table } from '../test/prismaFake';
 
@@ -122,4 +122,38 @@ describe('CustomerController.addCredit — credit limit enforcement (bug #1)', (
     expect(res.statusCode).toBe(200);
     expect(table('customer')[0].balance).toBe(450);
   });
+});
+
+describe('CustomerController.addCredit — machine-readable signal survives production', () => {
+  const originalEnv = process.env.NODE_ENV;
+  afterEach(() => {
+    process.env.NODE_ENV = originalEnv;
+  });
+
+  // The whole point of this case: ApiResponse.error strips the dev-only `error`
+  // arg in production, so the over-limit contract MUST ride the ungated
+  // top-level code/meta channel. Assert it survives with NODE_ENV unset/prod.
+  for (const env of ['production', undefined] as const) {
+    it(`returns code=CREDIT_LIMIT_EXCEEDED + requiresOverride when NODE_ENV=${env ?? 'unset'}`, async () => {
+      process.env.NODE_ENV = env as any;
+      const customer = seedCustomer({ balance: 50, creditLimit: 100 });
+      const res = mockRes();
+
+      await CustomerController.addCredit(reqFor(customer.id, { type: 'PURCHASE', amount: 80 }), res);
+
+      expect(res.statusCode).toBe(422);
+      // Stable, machine-readable signal — present regardless of environment.
+      expect(res.body.code).toBe('CREDIT_LIMIT_EXCEEDED');
+      expect(res.body.meta).toMatchObject({
+        requiresOverride: true,
+        creditLimit: 100,
+        currentBalance: 50,
+        attemptedBalance: 130,
+      });
+      // The loud human message is still there too.
+      expect(res.body.message).toMatch(/Credit limit exceeded/i);
+      // And the dev-only `error` debug field stays stripped in production.
+      expect(res.body.error).toBeUndefined();
+    });
+  }
 });
