@@ -32,7 +32,8 @@ type ModelName =
   | 'saleItem'
   | 'stockLog'
   | 'customer'
-  | 'customerCredit';
+  | 'customerCredit'
+  | 'user';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -45,6 +46,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   stockLog: [],
   customer: [['shopId', 'phone']],
   customerCredit: [],
+  user: [['shopId', 'phone']],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -93,6 +95,7 @@ class FakeDb {
     stockLog: [],
     customer: [],
     customerCredit: [],
+    user: [],
   };
   private idCounter = 0;
 
@@ -272,6 +275,7 @@ export const prismaFake: any = {
   stockLog: model('stockLog'),
   customer: model('customer'),
   customerCredit: model('customerCredit'),
+  user: model('user'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -325,6 +329,17 @@ export function seedCustomer(partial: Partial<Row> = {}): Row {
     creditLimit: 0,
     balance: 0,
     isActive: true,
+    ...partial,
+  });
+}
+
+export function seedUser(partial: Partial<Row> = {}): Row {
+  return db.createOne('user', {
+    shopId: 'shop_1',
+    name: 'Test User',
+    email: null,
+    phone: partial.phone ?? `+2687${Math.floor(Math.random() * 1e7)}`,
+    role: 'CASHIER',
     ...partial,
   });
 }
