@@ -270,12 +270,18 @@ export class CustomerController {
           const hint = isOwner
             ? ' Re-submit with override=true to force it through.'
             : ' An owner must approve to override.';
-          ApiResponse.error(res, base + hint, 422, {
+          // Surface the machine-readable signal via the PUBLIC code/meta
+          // channel (not the dev-only `error` arg) so the POS can detect
+          // over-limit / needs-override in production without parsing the
+          // human message.
+          ApiResponse.error(res, base + hint, 422, undefined, {
             code: 'CREDIT_LIMIT_EXCEEDED',
-            creditLimit: customer.creditLimit,
-            currentBalance: customer.balance,
-            attemptedBalance: newBalance,
-            requiresOverride: true,
+            meta: {
+              requiresOverride: true,
+              creditLimit: customer.creditLimit,
+              currentBalance: customer.balance,
+              attemptedBalance: newBalance,
+            },
           });
           return;
         }
