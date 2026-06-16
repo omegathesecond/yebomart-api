@@ -33,7 +33,8 @@ type ModelName =
   | 'stockLog'
   | 'customer'
   | 'customerCredit'
-  | 'user';
+  | 'user'
+  | 'admin';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -47,6 +48,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   customer: [['shopId', 'phone']],
   customerCredit: [],
   user: [['shopId', 'phone']],
+  admin: [['email']],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -96,6 +98,7 @@ class FakeDb {
     customer: [],
     customerCredit: [],
     user: [],
+    admin: [],
   };
   private idCounter = 0;
 
@@ -276,6 +279,7 @@ export const prismaFake: any = {
   customer: model('customer'),
   customerCredit: model('customerCredit'),
   user: model('user'),
+  admin: model('admin'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -340,6 +344,21 @@ export function seedUser(partial: Partial<Row> = {}): Row {
     email: null,
     phone: partial.phone ?? `+2687${Math.floor(Math.random() * 1e7)}`,
     role: 'CASHIER',
+    ...partial,
+  });
+}
+
+// Seed a platform admin (the Admin model backing /api/admin/profile). `password`
+// is stored as-is — pass an already-bcrypt-hashed value when a test needs
+// changePassword's bcrypt.compare to succeed.
+export function seedAdmin(partial: Partial<Row> = {}): Row {
+  return db.createOne('admin', {
+    email: partial.email ?? `admin-${Math.random().toString(36).slice(2)}@yebomart.com`,
+    password: 'not-a-real-hash',
+    name: 'Test Admin',
+    role: 'ADMIN',
+    isActive: true,
+    updatedAt: new Date(),
     ...partial,
   });
 }
