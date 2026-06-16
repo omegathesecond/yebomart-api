@@ -150,3 +150,91 @@ describe('AdminController.getUsers — server-side filtering', () => {
     expect(findMany.mock.calls[0][0].where).toEqual({});
   });
 });
+
+// Pagination wiring lives in the SAME getShops/getUsers methods as the filter
+// logic above. The filter tests pin the `where`; these pin the offset window
+// (skip/take), the ordering, and the page/limit echoed back to the client.
+// Query params arrive as strings over HTTP, so we pass strings to prove the
+// controller's Number() coercion actually runs.
+
+describe('AdminController.getShops — pagination', () => {
+  it('translates page/limit into skip=(page-1)*limit and take=limit on findMany', async () => {
+    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+
+    await AdminController.getShops(reqWith({ page: '3', limit: '10' }), mockRes());
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    const args = findMany.mock.calls[0][0];
+    expect(args.skip).toBe(20); // (3 - 1) * 10
+    expect(args.take).toBe(10);
+  });
+
+  it('orders by createdAt desc (newest first)', async () => {
+    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+
+    await AdminController.getShops(reqWith({}), mockRes());
+
+    expect(findMany.mock.calls[0][0].orderBy).toEqual({ createdAt: 'desc' });
+  });
+
+  it('defaults to page 1 / limit 20 (skip 0, take 20) when params are absent', async () => {
+    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+
+    const res = mockRes();
+    await AdminController.getShops(reqWith({}), res);
+
+    const args = findMany.mock.calls[0][0];
+    expect(args.skip).toBe(0); // (1 - 1) * 20
+    expect(args.take).toBe(20);
+    expect(res.body.data).toMatchObject({ page: 1, limit: 20 });
+  });
+
+  it('echoes the requested page/limit (as numbers) back in the response', async () => {
+    const res = mockRes();
+    await AdminController.getShops(reqWith({ page: '4', limit: '5' }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toMatchObject({ page: 4, limit: 5 });
+  });
+});
+
+describe('AdminController.getUsers — pagination', () => {
+  it('translates page/limit into skip=(page-1)*limit and take=limit on findMany', async () => {
+    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+
+    await AdminController.getUsers(reqWith({ page: '3', limit: '10' }), mockRes());
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    const args = findMany.mock.calls[0][0];
+    expect(args.skip).toBe(20); // (3 - 1) * 10
+    expect(args.take).toBe(10);
+  });
+
+  it('orders by createdAt desc (newest first)', async () => {
+    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+
+    await AdminController.getUsers(reqWith({}), mockRes());
+
+    expect(findMany.mock.calls[0][0].orderBy).toEqual({ createdAt: 'desc' });
+  });
+
+  it('defaults to page 1 / limit 20 (skip 0, take 20) when params are absent', async () => {
+    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+
+    const res = mockRes();
+    await AdminController.getUsers(reqWith({}), res);
+
+    const args = findMany.mock.calls[0][0];
+    expect(args.skip).toBe(0); // (1 - 1) * 20
+    expect(args.take).toBe(20);
+    expect(res.body.data).toMatchObject({ page: 1, limit: 20 });
+  });
+
+  it('echoes the requested page/limit (as numbers) back in the response', async () => {
+    const res = mockRes();
+    await AdminController.getUsers(reqWith({ page: '4', limit: '5' }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toMatchObject({ page: 4, limit: 5 });
+  });
+});
