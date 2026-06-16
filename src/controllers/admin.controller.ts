@@ -1,11 +1,10 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { PrismaClient, Prisma, UserRole, ShopStatus } from '@prisma/client';
+import { Prisma, UserRole, ShopStatus } from '@prisma/client';
+import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import Joi from 'joi';
-
-const prisma = new PrismaClient();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'yebomart-jwt-secret';
 
