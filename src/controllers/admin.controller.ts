@@ -3,15 +3,30 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { PrismaClient, Prisma, UserRole, ShopStatus } from '@prisma/client';
 import { ApiResponse } from '@utils/ApiResponse';
+import { AuthRequest } from '@middleware/auth.middleware';
 import Joi from 'joi';
 
 const prisma = new PrismaClient();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'yebomart-jwt-secret';
 
+// bcrypt cost factor — matches the admin seed (prisma/seed.ts) so a rehashed
+// password is consistent with seeded ones.
+const BCRYPT_ROUNDS = 12;
+
 export const adminLoginSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().required(),
+});
+
+export const adminUpdateProfileSchema = Joi.object({
+  name: Joi.string().trim().min(1).max(120),
+  email: Joi.string().email(),
+}).min(1); // at least one field required
+
+export const adminChangePasswordSchema = Joi.object({
+  currentPassword: Joi.string().required(),
+  newPassword: Joi.string().min(8).max(128).required(),
 });
 
 export class AdminController {
@@ -491,6 +506,119 @@ export class AdminController {
     } catch (error) {
       console.error('Get user detail error:', error);
       ApiResponse.error(res, 'Failed to fetch user details');
+    }
+  }
+
+  // Get the currently authenticated admin's own profile.
+  static async getProfile(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const adminId = req.user?.id;
+      if (!adminId) {
+        ApiResponse.unauthorized(res, 'Admin access required');
+        return;
+      }
+
+      const admin = await prisma.admin.findUnique({
+        where: { id: adminId },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          isActive: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      if (!admin) {
+        ApiResponse.notFound(res, 'Admin not found');
+        return;
+      }
+
+      ApiResponse.success(res, admin);
+    } catch (error) {
+      console.error('Get admin profile error:', error);
+      ApiResponse.error(res, 'Failed to fetch profile');
+    }
+  }
+
+  // Update the authenticated admin's own name and/or email.
+  static async updateProfile(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const adminId = req.user?.id;
+      if (!adminId) {
+        ApiResponse.unauthorized(res, 'Admin access required');
+        return;
+      }
+
+      const { name, email } = req.body as { name?: string; email?: string };
+      const data: Prisma.AdminUpdateInput = {};
+      if (name !== undefined) data.name = name;
+      if (email !== undefined) data.email = email.toLowerCase();
+
+      const admin = await prisma.admin.update({
+        where: { id: adminId },
+        data,
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          isActive: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      ApiResponse.success(res, admin, 'Profile updated');
+    } catch (error) {
+      // Unique constraint (email already in use) → 409, not a generic 500.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        ApiResponse.conflict(res, 'That email address is already in use');
+        return;
+      }
+      console.error('Update admin profile error:', error);
+      ApiResponse.error(res, 'Failed to update profile');
+    }
+  }
+
+  // Change the authenticated admin's password (requires the current password).
+  static async changePassword(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const adminId = req.user?.id;
+      if (!adminId) {
+        ApiResponse.unauthorized(res, 'Admin access required');
+        return;
+      }
+
+      const { currentPassword, newPassword } = req.body as {
+        currentPassword: string;
+        newPassword: string;
+      };
+
+      const admin = await prisma.admin.findUnique({ where: { id: adminId } });
+      if (!admin) {
+        ApiResponse.notFound(res, 'Admin not found');
+        return;
+      }
+
+      const isValid = await bcrypt.compare(currentPassword, admin.password);
+      if (!isValid) {
+        ApiResponse.badRequest(res, 'Current password is incorrect');
+        return;
+      }
+
+      const hashed = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+      await prisma.admin.update({
+        where: { id: adminId },
+        data: { password: hashed },
+      });
+
+      ApiResponse.success(res, null, 'Password changed');
+    } catch (error) {
+      console.error('Change admin password error:', error);
+      ApiResponse.error(res, 'Failed to change password');
     }
   }
 }
