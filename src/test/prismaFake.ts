@@ -34,7 +34,8 @@ type ModelName =
   | 'customer'
   | 'customerCredit'
   | 'user'
-  | 'admin';
+  | 'admin'
+  | 'expense';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -49,6 +50,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   customerCredit: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
+  expense: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -99,6 +101,7 @@ class FakeDb {
     customerCredit: [],
     user: [],
     admin: [],
+    expense: [],
   };
   private idCounter = 0;
 
@@ -212,6 +215,96 @@ class FakeDb {
     return this.tables[model].filter((r) => matchesWhere(r, args.where)).length;
   }
 
+  /**
+   * Prisma-shaped aggregate. Supports `_sum`/`_avg`/`_min`/`_max` (each an
+   * object of `{ field: true }`) and `_count` (either `true` → row count, or
+   * `{ field: true }` → per-field non-null count). Mirrors Postgres/Prisma
+   * semantics: with ZERO matching rows every `_sum`/`_avg`/`_min`/`_max` field
+   * is `null` (so callers' `agg._sum.amount || 0` fallback is exercised, not
+   * bypassed), while `_count` is always a real number.
+   */
+  aggregate(model: ModelName, args: Row = {}): Row {
+    const rows = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    const out: Row = {};
+
+    const fold = (
+      spec: Row,
+      reduce: (vals: number[]) => number | null,
+    ): Row => {
+      const res: Row = {};
+      for (const [field, want] of Object.entries(spec)) {
+        if (!want) continue;
+        const vals = rows
+          .map((r) => r[field])
+          .filter((v) => v !== null && v !== undefined) as number[];
+        res[field] = vals.length ? reduce(vals) : null;
+      }
+      return res;
+    };
+
+    if (args._sum) out._sum = fold(args._sum, (v) => v.reduce((a, b) => a + b, 0));
+    if (args._avg) out._avg = fold(args._avg, (v) => v.reduce((a, b) => a + b, 0) / v.length);
+    if (args._min) out._min = fold(args._min, (v) => Math.min(...v));
+    if (args._max) out._max = fold(args._max, (v) => Math.max(...v));
+    if (args._count !== undefined) {
+      if (args._count === true) {
+        out._count = rows.length;
+      } else {
+        const res: Row = {};
+        for (const [field, want] of Object.entries(args._count)) {
+          if (!want) continue;
+          res[field] = rows.filter((r) => r[field] !== null && r[field] !== undefined).length;
+        }
+        out._count = res;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Prisma-shaped groupBy. Groups matching rows by the `by` fields and folds
+   * `_sum`/`_avg`/`_count` per group, returning the grouping keys inline on
+   * each row (e.g. `{ productId, productName, _sum: { quantity } }`).
+   */
+  groupBy(model: ModelName, args: Row = {}): Row[] {
+    const by: string[] = args.by ?? [];
+    const rows = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    const groups = new Map<string, Row[]>();
+    for (const r of rows) {
+      const key = by.map((f) => String(r[f])).join(' ');
+      (groups.get(key) ?? groups.set(key, []).get(key)!).push(r);
+    }
+    return Array.from(groups.values()).map((groupRows) => {
+      const rep = groupRows[0];
+      const out: Row = {};
+      for (const f of by) out[f] = rep[f];
+      const fold = (spec: Row, reduce: (vals: number[]) => number | null): Row => {
+        const res: Row = {};
+        for (const [field, want] of Object.entries(spec)) {
+          if (!want) continue;
+          const vals = groupRows
+            .map((r) => r[field])
+            .filter((v) => v !== null && v !== undefined) as number[];
+          res[field] = vals.length ? reduce(vals) : null;
+        }
+        return res;
+      };
+      if (args._sum) out._sum = fold(args._sum, (v) => v.reduce((a, b) => a + b, 0));
+      if (args._avg) out._avg = fold(args._avg, (v) => v.reduce((a, b) => a + b, 0) / v.length);
+      if (args._count !== undefined) {
+        if (args._count === true) out._count = groupRows.length;
+        else {
+          const res: Row = {};
+          for (const [field, want] of Object.entries(args._count)) {
+            if (want) res[field] = groupRows.filter((r) => r[field] != null).length;
+          }
+          out._count = res;
+        }
+      }
+      return out;
+    });
+  }
+
   update(model: ModelName, args: Row): Row {
     const hit = this.tables[model].find((r) => matchesWhere(r, args.where));
     if (!hit) {
@@ -260,6 +353,8 @@ function model(name: ModelName) {
     findUnique: async (args?: Row) => db.findUnique(name, args),
     findMany: async (args?: Row) => db.findMany(name, args),
     count: async (args?: Row) => db.count(name, args),
+    aggregate: async (args?: Row) => db.aggregate(name, args),
+    groupBy: async (args?: Row) => db.groupBy(name, args),
     create: async (args: Row) =>
       db.includeOn(name, db.createOne(name, args.data), args.include),
     update: async (args: Row) => db.update(name, args),
@@ -280,6 +375,7 @@ export const prismaFake: any = {
   customerCredit: model('customerCredit'),
   user: model('user'),
   admin: model('admin'),
+  expense: model('expense'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -358,6 +454,21 @@ export function seedAdmin(partial: Partial<Row> = {}): Row {
     name: 'Test Admin',
     role: 'ADMIN',
     isActive: true,
+    updatedAt: new Date(),
+    ...partial,
+  });
+}
+
+// Seed an expense (backs prisma.expense.aggregate in the report services).
+// `date` defaults to now; pass an explicit Date to land it in/out of a report
+// range.
+export function seedExpense(partial: Partial<Row> = {}): Row {
+  return db.createOne('expense', {
+    shopId: 'shop_1',
+    category: 'OTHER',
+    amount: 0,
+    description: null,
+    date: partial.date ?? new Date(),
     updatedAt: new Date(),
     ...partial,
   });
