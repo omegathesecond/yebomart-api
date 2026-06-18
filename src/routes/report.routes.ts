@@ -10,6 +10,7 @@ router.use(managerAuth);
 
 router.get('/summary', ReportController.getSummary);
 router.get('/daily', ReportController.getDailyReport);
+router.get('/sales', ReportController.getSalesReport);
 router.get('/weekly', ReportController.getWeeklyReport);
 router.get('/products', ReportController.getProductReport);
 router.get('/staff', ReportController.getStaffReport);
