@@ -313,6 +313,7 @@ model CashSession {
   shop         Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   user         User?    @relation(fields: [userId], references: [id])
   sales        Sale[]
+  returns      Return[] // Cash REFUND returns paid out of this drawer
 
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -556,30 +557,39 @@ model Return {
   saleId        String?      // Original sale (if known)
   customerId    String?
   userId        String?      // Staff processing return
-  
+  // Cash-drawer attribution for REFUND returns. Set at completion time when a
+  // till session is OPEN, so the end-of-day cash-up subtracts cash paid OUT of
+  // the drawer for refunds (mirrors Sale.cashSessionId for cash IN). Null for
+  // non-cash refunds, store-credit/exchange returns, or when no session is open.
+  cashSessionId String?
+
   // Return details
   returnNumber  String?
   reason        String       // Defective, Wrong item, Change of mind, etc.
-  
+
   // Resolution
   type          ReturnType
-  refundAmount  Float        @default(0)  // For REFUND type
-  
+  // Monetary value handed back to the customer: cash for REFUND, ledger credit
+  // for STORE_CREDIT, 0 for EXCHANGE (the swap is value-neutral here).
+  refundAmount  Float        @default(0)
+
   // Status
   status        ReturnStatus @default(PENDING)
   notes         String?
-  
+
   // Timestamps
   createdAt     DateTime     @default(now())
   processedAt   DateTime?
-  
+
   // Relationships
   shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  cashSession   CashSession? @relation(fields: [cashSessionId], references: [id])
   items         ReturnItem[]
   exchangeItems ReturnExchangeItem[]  // Items given in exchange
-  
+
   @@index([shopId, createdAt])
   @@index([saleId])
+  @@index([cashSessionId])
 }
 
 model ReturnItem {
@@ -606,15 +616,21 @@ model ReturnExchangeItem {
   id          String   @id @default(cuid())
   returnId    String
   productId   String
-  
+
   // Exchange item details
   productName String
   quantity    Int
   unitPrice   Float
-  
+
+  // Stock handling. The exchange item LEAVES the shop again, so its stock is
+  // deducted when the return completes. This flag makes that deduction
+  // idempotent — a re-run of complete must not deduct it twice (mirrors
+  // ReturnItem.restocked on the inbound side).
+  deducted    Boolean  @default(false)
+
   // Relationships
   return      Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
-  
+
   @@index([returnId])
 }
 

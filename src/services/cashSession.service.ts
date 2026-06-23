@@ -53,6 +53,30 @@ export class CashSessionService {
   }
 
   /**
+   * Sum of cash paid OUT of the drawer for refunds during a session: COMPLETED
+   * REFUND returns tied to this session (ReturnController.process links a cash
+   * refund to the OPEN session when it completes). This is the counterpart to
+   * cashSalesTotal — money leaving the till — so expected drawer cash is
+   * openingFloat + cash sales − cash refunds.
+   */
+  private static async cashRefundsTotal(sessionId: string) {
+    const agg = await prisma.return.aggregate({
+      where: {
+        cashSessionId: sessionId,
+        type: 'REFUND',
+        status: 'COMPLETED',
+      },
+      _sum: { refundAmount: true },
+      _count: true,
+    });
+
+    return {
+      total: agg._sum.refundAmount ?? 0,
+      count: agg._count,
+    };
+  }
+
+  /**
    * Open a till for a shop. Rejects (throws CONFLICT) if one is already open —
    * a shop has at most one live drawer at a time.
    */
@@ -92,14 +116,19 @@ export class CashSessionService {
 
     if (!session) return null;
 
-    const cashSales = await this.cashSalesTotal(shopId, session.openedAt);
+    const [cashSales, cashRefunds] = await Promise.all([
+      this.cashSalesTotal(shopId, session.openedAt),
+      this.cashRefundsTotal(session.id),
+    ]);
 
     return {
       ...session,
       cashSalesTotal: cashSales.total,
       cashSalesCount: cashSales.count,
-      // Live expected drawer = float + cash taken so far.
-      expectedCash: session.openingFloat + cashSales.total,
+      cashRefundsTotal: cashRefunds.total,
+      cashRefundsCount: cashRefunds.count,
+      // Live expected drawer = float + cash taken − cash refunded.
+      expectedCash: session.openingFloat + cashSales.total - cashRefunds.total,
     };
   }
 
@@ -137,8 +166,12 @@ export class CashSessionService {
     }
 
     const now = new Date();
-    const cashSales = await this.cashSalesTotal(input.shopId, session.openedAt, now);
-    const expectedCash = session.openingFloat + cashSales.total;
+    const [cashSales, cashRefunds] = await Promise.all([
+      this.cashSalesTotal(input.shopId, session.openedAt, now),
+      this.cashRefundsTotal(session.id),
+    ]);
+    // Expected physical cash = opening float + cash sales − cash refunds paid out.
+    const expectedCash = session.openingFloat + cashSales.total - cashRefunds.total;
     const variance = input.countedCash - expectedCash;
 
     return prisma.$transaction(async (tx) => {
@@ -182,6 +215,8 @@ export class CashSessionService {
     const windowEnd = session.closedAt ?? new Date();
     const createdAt: Prisma.DateTimeFilter = { gte: session.openedAt, lte: windowEnd };
 
+    const cashRefunds = await this.cashRefundsTotal(session.id);
+
     const [byMethod, totals] = await Promise.all([
       prisma.sale.groupBy({
         by: ['paymentMethod'],
@@ -211,6 +246,10 @@ export class CashSessionService {
         variance: session.variance,
         notes: session.notes,
         cashier: session.user,
+      },
+      cashRefunds: {
+        total: cashRefunds.total,
+        count: cashRefunds.count,
       },
       shop: session.shop,
       transactionCount: totals._count,

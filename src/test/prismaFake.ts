@@ -34,7 +34,11 @@ type ModelName =
   | 'customer'
   | 'customerCredit'
   | 'user'
-  | 'admin';
+  | 'admin'
+  | 'cashSession'
+  | 'return'
+  | 'returnItem'
+  | 'returnExchangeItem';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -49,12 +53,17 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   customerCredit: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
+  cashSession: [],
+  return: [],
+  returnItem: [],
+  returnExchangeItem: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
 const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
   sale: { items: 'saleItem' },
   customer: { credits: 'customerCredit' },
+  return: { items: 'returnItem', exchangeItems: 'returnExchangeItem' },
 };
 
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
@@ -99,6 +108,10 @@ class FakeDb {
     customerCredit: [],
     user: [],
     admin: [],
+    cashSession: [],
+    return: [],
+    returnItem: [],
+    returnExchangeItem: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -216,6 +229,23 @@ class FakeDb {
     return this.tables[model].filter((r) => matchesWhere(r, args.where)).length;
   }
 
+  // Minimal aggregate: supports _sum (per field) and _count, which is all the
+  // cash-session reconciliation uses. Mirrors Prisma's null-for-empty-set _sum.
+  aggregate(model: ModelName, args: Row = {}): Row {
+    const rows = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    const out: Row = {};
+    if (args._sum) {
+      out._sum = {};
+      for (const field of Object.keys(args._sum)) {
+        out._sum[field] = rows.length
+          ? rows.reduce((s, r) => s + (r[field] ?? 0), 0)
+          : null;
+      }
+    }
+    if ('_count' in args) out._count = rows.length;
+    return out;
+  }
+
   // Apply a Prisma `data` payload to a row, honouring the atomic field
   // operators the services rely on ({ increment }, { decrement }, { set }).
   // These matter for correctness: the real overselling fix uses
@@ -302,6 +332,7 @@ function model(name: ModelName) {
     findUnique: async (args?: Row) => db.findUnique(name, args),
     findMany: async (args?: Row) => db.findMany(name, args),
     count: async (args?: Row) => db.count(name, args),
+    aggregate: async (args?: Row) => db.aggregate(name, args),
     create: async (args: Row) =>
       db.includeOn(name, db.createOne(name, args.data), args.include),
     update: async (args: Row) => db.update(name, args),
@@ -323,6 +354,10 @@ export const prismaFake: any = {
   customerCredit: model('customerCredit'),
   user: model('user'),
   admin: model('admin'),
+  cashSession: model('cashSession'),
+  return: model('return'),
+  returnItem: model('returnItem'),
+  returnExchangeItem: model('returnExchangeItem'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -376,6 +411,46 @@ export function seedCustomer(partial: Partial<Row> = {}): Row {
     creditLimit: 0,
     balance: 0,
     isActive: true,
+    ...partial,
+  });
+}
+
+// Seed a sale with optional line items. `items` is an array of
+// { productId, quantity, ... } applied as ReturnController's quantity ceiling
+// reads productId + quantity off the sale's SaleItem rows.
+export function seedSale(partial: Partial<Row> = {}): Row {
+  const items: Row[] = (partial.items as Row[]) ?? [];
+  const { items: _omit, ...rest } = partial;
+  const sale = db.createOne('sale', {
+    shopId: 'shop_1',
+    subtotal: 0,
+    totalAmount: 0,
+    paymentMethod: 'CASH',
+    amountPaid: 0,
+    status: 'COMPLETED',
+    ...rest,
+  });
+  for (const it of items) {
+    db.createOne('saleItem', {
+      saleId: sale.id,
+      productId: it.productId,
+      productName: it.productName ?? 'Widget',
+      quantity: it.quantity,
+      unitPrice: it.unitPrice ?? 10,
+      costPrice: it.costPrice ?? 5,
+      totalPrice: it.totalPrice ?? (it.quantity * (it.unitPrice ?? 10)),
+    });
+  }
+  return sale;
+}
+
+export function seedCashSession(partial: Partial<Row> = {}): Row {
+  return db.createOne('cashSession', {
+    shopId: 'shop_1',
+    openingFloat: 0,
+    status: 'OPEN',
+    openedAt: new Date(),
+    updatedAt: new Date(),
     ...partial,
   });
 }
