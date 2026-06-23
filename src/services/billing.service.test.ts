@@ -25,6 +25,7 @@ vi.mock('./yebopay.client', async (importOriginal) => {
     YeboPayClient: {
       getBalance: vi.fn(),
       chargeWallet: vi.fn(),
+      refundCharge: vi.fn(),
       createCheckout: vi.fn(),
       getCheckout: vi.fn(),
     },
@@ -103,6 +104,34 @@ describe('BillingService.chargeShopCredits', () => {
     await expect(
       BillingService.chargeShopCredits({ shopId, amount: 999, description: 'AI query' })
     ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE', httpStatus: 402 });
+  });
+});
+
+describe('BillingService.refundShopCredits', () => {
+  it('forwards a charge reversal to YeboPay (so a failed AI call is never billed)', async () => {
+    (YeboPayClient.refundCharge as any).mockResolvedValue({
+      charge_id: 'ch_1',
+      refunded_amount: '0.5',
+      status: 'REFUNDED',
+      processor_ref: 'tx_2',
+      processor_status: 'SUCCEEDED',
+    });
+
+    await BillingService.refundShopCredits({ chargeId: 'ch_1', reason: 'AI insights generation failed' });
+
+    expect(YeboPayClient.refundCharge).toHaveBeenCalledWith({
+      chargeId: 'ch_1',
+      amount: undefined, // full refund of the remaining amount
+      reason: 'AI insights generation failed',
+    });
+  });
+
+  it('propagates a refund failure loudly instead of swallowing it', async () => {
+    (YeboPayClient.refundCharge as any).mockRejectedValue(new Error('YeboPay POST /v1/refunds 403: missing scope'));
+
+    await expect(
+      BillingService.refundShopCredits({ chargeId: 'ch_1' })
+    ).rejects.toThrow(/v1\/refunds 403/);
   });
 });
 

@@ -59,6 +59,25 @@ export class BillingService {
   }
 
   /**
+   * Reverse a previously-charged credit debit (the charge returned by
+   * chargeShopCredits). Used when a pre-charged action fails downstream — e.g.
+   * an AI call that never produced output — so the shop is never billed for
+   * something it didn't receive. Errors propagate; the caller must surface a
+   * failed refund loudly (a swallowed refund means a wrongly-billed customer).
+   */
+  static async refundShopCredits(opts: {
+    chargeId: string;
+    amount?: number;
+    reason?: string;
+  }) {
+    return YeboPayClient.refundCharge({
+      chargeId: opts.chargeId,
+      amount: opts.amount,
+      reason: opts.reason,
+    });
+  }
+
+  /**
    * Create a top-up checkout for the given credit pack (or a custom amount).
    * Returns the yebopay-hosted checkout URL. On payment success, yebopay's
    * webhook handler reads checkout.metadata.credit_amount and credits the

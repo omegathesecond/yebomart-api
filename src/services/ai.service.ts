@@ -14,6 +14,20 @@ interface InsightInput {
   shopId: string;
 }
 
+/**
+ * Raised when AI generation can't be completed — model unconfigured, the
+ * provider call threw, or the response was unparseable. The route layer maps
+ * this to a loud 503 AND reverses the pre-charged credits: we must never bill
+ * for AI output the model never produced, and never paper over a failure with
+ * canned rule-based text dressed up as a successful AI result.
+ */
+export class AIUnavailableError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = 'AIUnavailableError';
+  }
+}
+
 export class AIService {
   private static genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
@@ -417,7 +431,9 @@ NEVER SAY:
    */
   static async generateInsights(input: InsightInput) {
     if (!GEMINI_API_KEY) {
-      return this.getOfflineInsights(input.shopId);
+      // No silent offline fallback: failing here is loud, and the route reverses
+      // the pre-charge so the shop isn't billed for an AI insight it never got.
+      throw new AIUnavailableError('AI insights unavailable: GEMINI_API_KEY is not configured');
     }
 
     const context = await this.getShopContext(input.shopId);
@@ -463,129 +479,39 @@ Generate insights as JSON array with:
 
 Return ONLY valid JSON array, no markdown.`;
 
+    let responseText: string;
     try {
       const result = await model.generateContent(prompt);
-      const responseText = result.response.text();
-      
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const insights = JSON.parse(jsonMatch[0]);
-        
-        await prisma.aIConversation.create({
-          data: {
-            shopId: input.shopId,
-            userMessage: 'Generate insights',
-            aiResponse: JSON.stringify(insights),
-            type: 'INSIGHT',
-          },
-        });
-
-        return { insights, generated: new Date() };
-      }
+      responseText = result.response.text();
     } catch (error) {
+      // Provider call failed — surface loudly so the route can refund + 503.
+      // We do NOT swap in canned rule-based text and pass it off as AI output.
       console.error('AI insights error:', error);
+      throw new AIUnavailableError('AI insights generation failed', error);
     }
 
-    return this.getOfflineInsights(input.shopId);
-  }
-
-  /**
-   * Offline/fallback insights with real data
-   */
-  private static async getOfflineInsights(shopId: string) {
-    const context = await this.getShopContext(shopId);
-    const insights = [];
-
-    const allLowStock = [
-      ...context.lowStockAlerts.items.critical,
-      ...context.lowStockAlerts.items.low,
-    ];
-
-    // Low stock insight with actual names
-    if (allLowStock.length > 0) {
-      const outOfStock = context.lowStockAlerts.items.critical;
-      const productNames = allLowStock.slice(0, 3).map(p => p.name).join(', ');
-      
-      insights.push({
-        title: outOfStock.length > 0 ? '🚨 Stock Emergency!' : '⚠️ Stock Running Low',
-        insight: outOfStock.length > 0 
-          ? `${outOfStock.map(p => p.name).join(', ')} ${outOfStock.length === 1 ? 'is' : 'are'} completely OUT OF STOCK! Plus ${allLowStock.length - outOfStock.length} more items running low.`
-          : `${productNames} and ${allLowStock.length - 3} more products need restocking soon.`,
-        action: outOfStock.length > 0 
-          ? `Reorder ${outOfStock[0].name} immediately - customers will be disappointed!`
-          : 'Place orders today to avoid stockouts.',
-        priority: outOfStock.length > 0 ? 'high' : 'medium',
-      });
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new AIUnavailableError('AI insights returned an unparseable response');
     }
 
-    // Slow movers insight
-    if (context.slowMovers.length > 0) {
-      const totalTiedUp = context.slowMovers.reduce((sum, p) => sum + p.stockValue, 0);
-      const worstMover = context.slowMovers[0];
-      
-      insights.push({
-        title: '🐌 Dead Stock Alert',
-        insight: `${context.slowMovers.length} products barely selling! ${worstMover.name} only sold ${worstMover.soldLast30Days} units in 30 days. E${totalTiedUp.toFixed(0)} tied up in slow stock.`,
-        action: `Consider a discount on ${worstMover.name} or bundle it with popular items.`,
-        priority: totalTiedUp > 500 ? 'high' : 'medium',
-      });
+    let insights: unknown;
+    try {
+      insights = JSON.parse(jsonMatch[0]);
+    } catch (error) {
+      throw new AIUnavailableError('AI insights returned malformed JSON', error);
     }
 
-    // Low margin alert
-    if (context.lowMarginProducts.length > 0) {
-      const lowestMargin = context.lowMarginProducts[0];
-      insights.push({
-        title: '💸 Thin Margins',
-        insight: `${lowestMargin.name} only has ${lowestMargin.margin.toFixed(0)}% margin - you're barely making money on it!`,
-        action: `Consider raising price by E${((lowestMargin.sellPrice || 0) * 0.1).toFixed(0)} or finding a cheaper supplier.`,
-        priority: 'medium',
-      });
-    }
+    await prisma.aIConversation.create({
+      data: {
+        shopId: input.shopId,
+        userMessage: 'Generate insights',
+        aiResponse: JSON.stringify(insights),
+        type: 'INSIGHT',
+      },
+    });
 
-    // Push high margin products
-    if (context.highMarginProducts.length > 0) {
-      const bestMargin = context.highMarginProducts[0];
-      insights.push({
-        title: '💎 Hidden Gold',
-        insight: `${bestMargin.name} has ${bestMargin.margin.toFixed(0)}% margin - push this product more!`,
-        action: 'Move it to a prominent display or suggest it to customers buying related items.',
-        priority: 'medium',
-      });
-    }
-
-    // Sales insight
-    if (context.todaySales.totalTransactions > 0) {
-      const topProduct = context.todaySales.topProducts[0];
-      insights.push({
-        title: '📈 Today\'s Performance',
-        insight: `You've made E${context.todaySales.totalSales.toFixed(2)} from ${context.todaySales.totalTransactions} sales. ${topProduct ? `${topProduct.name} is flying off the shelves!` : ''}`,
-        action: context.todaySales.averageBasket < 50 
-          ? 'Try suggesting add-ons to increase basket size.' 
-          : 'Great average basket! Keep it up!',
-        priority: 'medium',
-      });
-    } else {
-      const timeCtx = this.getTimeContext();
-      insights.push({
-        title: '🌅 New Day, Fresh Start',
-        insight: `No sales yet today. ${timeCtx.suggestion}`,
-        action: 'Consider a morning special or reach out to regular customers.',
-        priority: 'low',
-      });
-    }
-
-    // Top product insight
-    if (context.todaySales.topProducts.length > 0) {
-      const top = context.todaySales.topProducts[0];
-      insights.push({
-        title: `🏆 ${top.name} Winning!`,
-        insight: `${top.name} is your best seller with ${top.quantity} units sold (E${top.revenue.toFixed(2)} revenue).`,
-        action: 'Make sure you have enough stock of this popular item!',
-        priority: 'low',
-      });
-    }
-
-    return { insights, generated: new Date(), offline: true };
+    return { insights, generated: new Date() };
   }
 
   /**

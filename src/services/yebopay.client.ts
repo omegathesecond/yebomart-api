@@ -84,6 +84,20 @@ export interface YeboPayChargeDto {
   external_ref: string | null;
 }
 
+export interface RefundChargeInput {
+  chargeId: string;
+  amount?: number; // omit for a full refund of the remaining refundable amount
+  reason?: string;
+}
+
+export interface YeboPayRefundDto {
+  charge_id: string;
+  refunded_amount: string;
+  status: string;
+  processor_ref: string | null;
+  processor_status: string;
+}
+
 export interface YeboPayCheckoutDto {
   id: string;
   hosted_url: string | null;
@@ -224,6 +238,29 @@ export class YeboPayClient {
         body.error ?? 'Charge failed',
         res.status === 402 ? 'INSUFFICIENT_BALANCE' : 'CHARGE_FAILED'
       );
+    }
+    return body.data;
+  }
+
+  // Refund (reverse) a previously-succeeded wallet charge — full by default, or
+  // partial when `amount` is given. Used to undo a pre-charge when the billable
+  // action it paid for (e.g. an AI call) never produced output, so a customer
+  // is never billed for nothing. The WALLET processor credits the ledger back
+  // via an immutable compensating row. Throws on failure (no silent fallback);
+  // the caller must surface a failed refund loudly.
+  static async refundCharge(input: RefundChargeInput): Promise<YeboPayRefundDto> {
+    const res = await fetch(`${BASE_URL}/v1/refunds`, {
+      method: 'POST',
+      headers: { 'X-API-Key': getApiKey(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        charge_id: input.chargeId,
+        amount: input.amount,
+        reason: input.reason,
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayRefundDto>;
+    if (!res.ok || !body.success || !body.data) {
+      throw new Error(`YeboPay POST /v1/refunds ${res.status}: ${body.error ?? 'unknown error'}`);
     }
     return body.data;
   }
