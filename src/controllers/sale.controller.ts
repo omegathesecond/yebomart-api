@@ -15,9 +15,20 @@ export const createSaleSchema = Joi.object({
   paymentMethod: Joi.string().required().valid('CASH', 'MOMO', 'EMALI', 'CARD', 'MIXED', 'CREDIT'),
   amountPaid: Joi.number().required().min(0),
   discount: Joi.number().optional().min(0).default(0),
-  // Optional link to a Customer (Sale.customerId). Enables POS to attach a buyer
-  // so the sale shows up in that customer's purchase history / lifetime value.
-  customerId: Joi.string().optional().allow(null),
+  // Link to a Customer (Sale.customerId). Normally optional (attaching a buyer
+  // just adds the sale to their purchase history). REQUIRED for CREDIT sales —
+  // a pay-later sale has to land on someone's book — so we enforce it here for
+  // a clean 400 before the request reaches the service.
+  customerId: Joi.string()
+    .allow(null)
+    .when('paymentMethod', {
+      is: 'CREDIT',
+      then: Joi.string().required().messages({
+        'any.required': 'A customer is required for credit (pay-later) sales',
+        'string.empty': 'A customer is required for credit (pay-later) sales',
+      }),
+      otherwise: Joi.string().optional().allow(null),
+    }),
   localId: Joi.string().optional(),
   offlineAt: Joi.date().optional(),
 });
@@ -55,7 +66,14 @@ export class SaleController {
 
       ApiResponse.created(res, sale, 'Sale completed successfully');
     } catch (error: any) {
-      if (error.message.includes('Insufficient')) {
+      // Client-correctable sale rejections → 400 so the POS shows a clear toast:
+      // insufficient payment, over the credit limit, or a credit sale with no
+      // customer attached (no silent fallback — the cashier must see the reason).
+      if (
+        error.message.includes('Insufficient') ||
+        error.message.includes('Credit limit') ||
+        error.message.includes('required for credit')
+      ) {
         ApiResponse.badRequest(res, error.message);
       } else if (error.message.includes('not found')) {
         ApiResponse.notFound(res, error.message);

@@ -26,7 +26,14 @@ vi.mock('./shop.service', () => ({
 }));
 
 import { SaleService } from './sale.service';
-import { prismaFake, resetDb, seedShop, seedProduct, table } from '../test/prismaFake';
+import {
+  prismaFake,
+  resetDb,
+  seedShop,
+  seedProduct,
+  seedCustomer,
+  table,
+} from '../test/prismaFake';
 
 let shopId: string;
 
@@ -172,6 +179,102 @@ describe('SaleService.create — offline idempotency', () => {
     expect(table('sale')).toHaveLength(1);
     expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(97);
     expect(table('stockLog')).toHaveLength(1);
+  });
+});
+
+describe('SaleService.create — credit ("on the book") sales', () => {
+  it('books the full total to the customer ledger, sets amountPaid/change 0, and still decrements stock', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId, balance: 20, creditLimit: 0 });
+
+    const sale = await SaleService.create(
+      saleInput({
+        items: [{ productId: product.id, quantity: 3 }], // total 30
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        customerId: customer.id,
+      })
+    );
+
+    // Pay-later: nothing tendered, no change.
+    expect(sale.amountPaid).toBe(0);
+    expect(sale.change).toBe(0);
+    expect(sale.totalAmount).toBe(30);
+
+    // A PURCHASE ledger entry linked to the sale.
+    const credits = table('customerCredit');
+    expect(credits).toHaveLength(1);
+    expect(credits[0]).toMatchObject({
+      type: 'PURCHASE',
+      amount: 30,
+      saleId: sale.id,
+      customerId: customer.id,
+      shopId,
+    });
+
+    // Balance increased by the total; new balance exposed on the sale for the receipt.
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(50); // 20 + 30
+    expect((sale as any).customerBalance).toBe(50);
+
+    // Stock still drawn down.
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(97);
+  });
+
+  it('rejects a credit sale with no customer and writes nothing', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+
+    await expect(
+      SaleService.create(
+        saleInput({
+          items: [{ productId: product.id, quantity: 1 }],
+          paymentMethod: 'CREDIT',
+          amountPaid: 0,
+        })
+      )
+    ).rejects.toThrow(/customer is required for credit/i);
+
+    expect(table('sale')).toHaveLength(0);
+    expect(table('customerCredit')).toHaveLength(0);
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(100);
+  });
+
+  it('rejects when the new balance would exceed the credit limit (and rolls back everything)', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId, balance: 80, creditLimit: 100 });
+
+    // 3 × 10 = 30 → new balance 110 > limit 100.
+    await expect(
+      SaleService.create(
+        saleInput({
+          items: [{ productId: product.id, quantity: 3 }],
+          paymentMethod: 'CREDIT',
+          amountPaid: 0,
+          customerId: customer.id,
+        })
+      )
+    ).rejects.toThrow(/Credit limit exceeded/);
+
+    expect(table('sale')).toHaveLength(0);
+    expect(table('customerCredit')).toHaveLength(0);
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(80); // untouched
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(100); // untouched
+  });
+
+  it('treats creditLimit 0 as "no limit" — allows the credit sale', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId, balance: 500, creditLimit: 0 });
+
+    const sale = await SaleService.create(
+      saleInput({
+        items: [{ productId: product.id, quantity: 5 }], // total 50
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        customerId: customer.id,
+      })
+    );
+
+    expect(sale.totalAmount).toBe(50);
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(550);
   });
 });
 
