@@ -14,6 +14,21 @@ export const createCustomerSchema = Joi.object({
   creditLimit: Joi.number().optional().min(0).default(0),
 });
 
+// Whitelist for PATCH /:id. Only safe, customer-owned profile fields are
+// accepted. Critically NOT here: `balance` (only ever moves through the
+// credit-ledger path in addCredit), `shopId` (would move the record cross-tenant),
+// and `id`/`createdAt`/`updatedAt` (server-managed). The validateRequest
+// middleware runs with stripUnknown:true, so any of those sent by a client are
+// dropped before they reach Prisma — closing the mass-assignment hole.
+export const updateCustomerSchema = Joi.object({
+  name: Joi.string().optional().trim().min(2).max(100),
+  phone: Joi.string().optional().trim().allow(null, ''),
+  email: Joi.string().optional().email().allow(null, ''),
+  address: Joi.string().optional().max(500).allow(null, ''),
+  creditLimit: Joi.number().optional().min(0),
+  isActive: Joi.boolean().optional(),
+}).min(1); // reject a no-op / all-forbidden-fields PATCH with a clear 400
+
 export const addCreditSchema = Joi.object({
   type: Joi.string().required().valid('PURCHASE', 'PAYMENT', 'ADJUSTMENT', 'REFUND'),
   // ADJUSTMENT carries its own sign (a negative amount reduces the balance), so

@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { CustomerController } from './customer.controller';
+import { CustomerController, updateCustomerSchema } from './customer.controller';
 import { resetDb, seedCustomer, table } from '../test/prismaFake';
+
+// Mirror exactly how validateRequest runs the schema in production
+// (src/middleware/validation.middleware.ts): abortEarly:false + stripUnknown:true.
+// This is the boundary that protects PATCH /api/customers/:id from
+// mass-assignment, so we assert against the same options the route uses.
+function runUpdateSchema(body: Record<string, any>) {
+  return updateCustomerSchema.validate(body, { abortEarly: false, stripUnknown: true });
+}
 
 // Minimal Express req/res doubles. The controller only touches the fields set
 // here, and res records the status + JSON body for assertions.
@@ -32,6 +40,74 @@ function reqFor(
 
 beforeEach(() => {
   resetDb();
+});
+
+describe('updateCustomerSchema — blocks mass-assignment on PATCH /:id', () => {
+  it('strips balance, shopId, createdAt, updatedAt and id from the update body', () => {
+    const { value, error } = runUpdateSchema({
+      name: 'Jane Doe',
+      balance: 0, // attacker trying to wipe their debt
+      shopId: 'shop_2', // attacker trying to move the record cross-tenant
+      createdAt: '2000-01-01',
+      updatedAt: '2000-01-01',
+      id: 'someone_elses_id',
+      creditLimit: 999999, // attacker trying to raise their own limit (allowed field, but see note)
+    });
+
+    // The dangerous fields never survive validation...
+    expect(error).toBeUndefined();
+    expect(value).not.toHaveProperty('balance');
+    expect(value).not.toHaveProperty('shopId');
+    expect(value).not.toHaveProperty('createdAt');
+    expect(value).not.toHaveProperty('updatedAt');
+    expect(value).not.toHaveProperty('id');
+    // ...while the legitimate whitelisted fields pass through.
+    expect(value).toEqual({ name: 'Jane Doe', creditLimit: 999999 });
+  });
+
+  it('rejects a body that contains ONLY forbidden fields (nothing left to update)', () => {
+    const { value, error } = runUpdateSchema({ balance: 0, shopId: 'shop_2', createdAt: '2000-01-01' });
+
+    // After stripping, the object is empty, so .min(1) fails — the request is a
+    // 400, NOT a silent no-op that could mask the attempt.
+    expect(value).toEqual({});
+    expect(error).toBeDefined();
+    expect(error?.details[0].type).toBe('object.min');
+  });
+
+  it('allows a normal profile edit (name/phone/email/address/isActive)', () => {
+    const { value, error } = runUpdateSchema({
+      name: 'Jane Doe',
+      phone: '+26878422613',
+      email: 'jane@example.com',
+      address: '12 Market St',
+      isActive: false,
+    });
+
+    expect(error).toBeUndefined();
+    expect(value).toEqual({
+      name: 'Jane Doe',
+      phone: '+26878422613',
+      email: 'jane@example.com',
+      address: '12 Market St',
+      isActive: false,
+    });
+  });
+
+  it('controller cannot change balance/shop when the post-strip body has no such keys', async () => {
+    // Belt-and-suspenders: even if the controller is reached with a body that
+    // the middleware already stripped to {}, updateMany writes nothing dangerous.
+    const customer = seedCustomer({ balance: 100, shopId: 'shop_1', creditLimit: 0 });
+    const res = mockRes();
+
+    // Simulate the post-middleware body: forbidden keys already removed.
+    const { value } = runUpdateSchema({ balance: 0, shopId: 'shop_2' });
+    await CustomerController.update({ user: { id: 'u', shopId: 'shop_1', role: 'MANAGER' }, params: { id: customer.id }, body: value } as any, res);
+
+    // Balance and shop are untouched.
+    expect(table('customer')[0].balance).toBe(100);
+    expect(table('customer')[0].shopId).toBe('shop_1');
+  });
 });
 
 describe('CustomerController.addCredit — ADJUSTMENT applies its signed amount (bug #2)', () => {
