@@ -51,16 +51,26 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   admin: [['email']],
 };
 
-// Nested-relation field -> child model, for `{ create: [...] }` writes.
+// Nested-relation field -> child model, for `{ create: [...] }` writes and
+// has-many `include`s (child rows whose `${parent}Id` fk points back here).
 const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
   sale: { items: 'saleItem' },
   customer: { credits: 'customerCredit' },
+};
+
+// Belongs-to relations for `include`: field -> parent model. The fk lives on
+// THIS row as `${field}Id` (e.g. user.shop resolves via user.shopId).
+const BELONGS_TO: Partial<Record<ModelName, Record<string, ModelName>>> = {
+  user: { shop: 'shop' },
 };
 
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
   if (!where) return true;
   return Object.entries(where).every(([key, cond]) => {
     if (cond === undefined) return true;
+    // Boolean combinators. OR matches if any sub-clause matches; AND if all do.
+    if (key === 'OR') return (cond as Row[]).some((c) => matchesWhere(rec, c));
+    if (key === 'AND') return (cond as Row[]).every((c) => matchesWhere(rec, c));
     const val = rec[key];
     if (cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
       if ('in' in cond) return (cond.in as any[]).includes(val);
@@ -144,6 +154,7 @@ class FakeDb {
     if (!include) return { ...rec };
     const out = { ...rec };
     const rels = RELATIONS[model] ?? {};
+    const parents = BELONGS_TO[model] ?? {};
     for (const [field, want] of Object.entries(include)) {
       if (!want) continue;
       const childModel = rels[field];
@@ -152,6 +163,13 @@ class FakeDb {
         out[field] = this.tables[childModel]
           .filter((r) => r[fk] === rec.id)
           .map((r) => ({ ...r }));
+        continue;
+      }
+      const parentModel = parents[field];
+      if (parentModel) {
+        // belongs-to: fk on this row is `${field}Id`.
+        const parent = this.tables[parentModel].find((r) => r.id === rec[`${field}Id`]);
+        out[field] = parent ? { ...parent } : null;
       }
     }
     return out;

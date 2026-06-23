@@ -106,9 +106,15 @@ model User {
   // Staff (cashier/manager) auth = PIN-on-device, yebomart-internal. The
   // shop OWNER's identity lives on Shop.ownerYeboidSub (YeboID). Staff users
   // share devices in POS context; per-staff YeboID accounts are overkill.
-  pin           String?   // 4-digit PIN for quick auth
+  pin           String?   // 4-digit PIN, bcrypt-hashed (never plaintext)
   role          UserRole  @default(CASHIER)
   isActive      Boolean   @default(true)
+
+  // PIN brute-force protection. A 4-digit PIN has only 10k combinations, so
+  // failed staff logins are counted per-user and the account is temporarily
+  // locked after too many. Reset to 0 / null on a successful login.
+  failedPinAttempts Int       @default(0)
+  pinLockedUntil    DateTime?
 
   // Permissions
   canDiscount   Boolean   @default(false)

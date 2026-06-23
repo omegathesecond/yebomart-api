@@ -2,7 +2,15 @@ import { prisma } from '@config/prisma';
 import { JWTUtil, ITokenPayload } from '@utils/jwt';
 import { UserRole } from '@prisma/client';
 import { getCountryMetadata } from '@config/countries';
+import { hashPin, verifyPin } from '@utils/pin';
 import { YeboIDClient, type YeboIDUserInfo } from './yeboid.client';
+
+// PIN brute-force policy. After MAX_PIN_ATTEMPTS consecutive failures a staff
+// account is locked for PIN_LOCK_MS; a successful login resets the counter.
+// Tuned for a shared POS device: forgiving enough for honest typos, tight
+// enough that brute-forcing 10k combinations is infeasible.
+export const MAX_PIN_ATTEMPTS = 5;
+export const PIN_LOCK_MS = 15 * 60 * 1000; // 15 minutes
 
 // Map phone prefixes to country codes (ordered longest first for accurate matching)
 const PHONE_TO_COUNTRY: [string, string][] = [
@@ -166,13 +174,52 @@ export class AuthService {
       include: { shop: true },
     });
 
-    if (!user || !user.pin || user.pin !== pin) {
+    // Unknown phone / no PIN set → generic failure (don't reveal which).
+    if (!user || !user.pin) {
       throw new Error('Invalid phone or PIN');
     }
 
+    // Temporary lockout after too many failed attempts. Checked before the PIN
+    // is even verified so a locked account can't be probed further.
+    if (user.pinLockedUntil && user.pinLockedUntil.getTime() > Date.now()) {
+      const minutes = Math.ceil((user.pinLockedUntil.getTime() - Date.now()) / 60000);
+      throw new Error(
+        `Account locked due to too many failed PIN attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+      );
+    }
+
+    const { valid, needsUpgrade } = await verifyPin(pin, user.pin);
+
+    if (!valid) {
+      // Count the failure and lock the account if it crosses the threshold.
+      const attempts = (user.failedPinAttempts ?? 0) + 1;
+      const locked = attempts >= MAX_PIN_ATTEMPTS;
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedPinAttempts: locked ? 0 : attempts,
+          pinLockedUntil: locked ? new Date(Date.now() + PIN_LOCK_MS) : null,
+        },
+      });
+      if (locked) {
+        throw new Error(
+          `Account locked due to too many failed PIN attempts. Try again in ${Math.ceil(PIN_LOCK_MS / 60000)} minutes.`,
+        );
+      }
+      throw new Error('Invalid phone or PIN');
+    }
+
+    // Success: reset the brute-force counters, stamp the login, and — for a
+    // legacy plaintext PIN — upgrade it to a bcrypt hash so it is never stored
+    // in plaintext again.
     await prisma.user.update({
       where: { id: user.id },
-      data: { lastLoginAt: new Date() },
+      data: {
+        lastLoginAt: new Date(),
+        failedPinAttempts: 0,
+        pinLockedUntil: null,
+        ...(needsUpgrade ? { pin: await hashPin(pin) } : {}),
+      },
     });
 
     const payload: ITokenPayload = {
