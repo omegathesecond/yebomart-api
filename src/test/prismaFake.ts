@@ -34,7 +34,8 @@ type ModelName =
   | 'customer'
   | 'customerCredit'
   | 'user'
-  | 'admin';
+  | 'admin'
+  | 'auditLog';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -49,6 +50,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   customerCredit: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
+  auditLog: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -99,6 +101,7 @@ class FakeDb {
     customerCredit: [],
     user: [],
     admin: [],
+    auditLog: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -323,6 +326,7 @@ export const prismaFake: any = {
   customerCredit: model('customerCredit'),
   user: model('user'),
   admin: model('admin'),
+  auditLog: model('auditLog'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 

@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService, auditContext } from '@services/audit.service';
 
 export const createExpenseSchema = Joi.object({
   category: Joi.string().required().valid('RENT', 'UTILITIES', 'SUPPLIES', 'WAGES', 'TRANSPORT', 'MARKETING', 'REPAIRS', 'OTHER'),
@@ -37,6 +38,17 @@ export class ExpenseController {
           ...req.body,
         },
       });
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'EXPENSE_CREATE',
+          entityType: 'expense',
+          entityId: expense.id,
+          details: { category: expense.category, amount: expense.amount, description: expense.description },
+        });
+      }
 
       ApiResponse.created(res, expense, 'Expense recorded');
     } catch (error: any) {
@@ -155,9 +167,23 @@ export class ExpenseController {
       }
 
       const { id } = req.params;
-      await prisma.expense.deleteMany({
+      const before = await prisma.expense.findFirst({ where: { id, shopId: req.user.shopId } });
+      const deleted = await prisma.expense.deleteMany({
         where: { id, shopId: req.user.shopId },
       });
+
+      const actor = auditContext(req);
+      if (actor && deleted.count > 0) {
+        await AuditService.log({
+          ...actor,
+          action: 'EXPENSE_DELETE',
+          entityType: 'expense',
+          entityId: id,
+          details: before
+            ? { category: before.category, amount: before.amount, description: before.description }
+            : undefined,
+        });
+      }
 
       ApiResponse.success(res, null, 'Expense deleted');
     } catch (error: any) {

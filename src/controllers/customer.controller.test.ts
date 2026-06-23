@@ -124,6 +124,59 @@ describe('CustomerController.addCredit — credit limit enforcement (bug #1)', (
   });
 });
 
+describe('CustomerController — audit logging (owner-initiated writes succeed and appear)', () => {
+  it('an OWNER addCredit writes an audit row with NO userId (owners have no User row)', async () => {
+    const customer = seedCustomer({ balance: 0, creditLimit: 0 });
+    const res = mockRes();
+
+    // OWNER actor: reqFor sets role but no `type`, mirroring the YeboID owner
+    // shape (type === 'shop'), so auditContext stores userId = null.
+    await CustomerController.addCredit(
+      reqFor(customer.id, { type: 'ADJUSTMENT', amount: 30 }, 'OWNER'),
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const logs = table('auditLog');
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      shopId: 'shop_1',
+      userId: null,
+      actorRole: 'OWNER',
+      action: 'CREDIT_ADD',
+      entityType: 'customer',
+      entityId: customer.id,
+    });
+    expect(logs[0].details).toMatchObject({ creditType: 'ADJUSTMENT', amount: 30, newBalance: 30 });
+  });
+
+  it('a CASHIER (staff) addCredit writes an audit row carrying their userId', async () => {
+    const customer = seedCustomer({ balance: 0, creditLimit: 1000 });
+    const res = mockRes();
+
+    const req = reqFor(customer.id, { type: 'PURCHASE', amount: 40 }, 'CASHIER');
+    req.user.type = 'user'; // staff token shape
+    await CustomerController.addCredit(req, res);
+
+    expect(res.statusCode).toBe(200);
+    const logs = table('auditLog');
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ userId: 'user_1', actorRole: 'CASHIER', action: 'CREDIT_ADD' });
+  });
+
+  it('a CREATE writes a CUSTOMER_CREATE audit row', async () => {
+    const res = mockRes();
+    const req: any = { user: { id: 'shop_1', shopId: 'shop_1', role: 'OWNER' }, params: {}, body: { name: 'Walk-in' } };
+
+    await CustomerController.create(req, res);
+
+    expect(res.statusCode).toBe(201);
+    const logs = table('auditLog');
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ action: 'CUSTOMER_CREATE', entityType: 'customer', actorRole: 'OWNER', userId: null });
+  });
+});
+
 describe('CustomerController.addCredit — machine-readable signal survives production', () => {
   const originalEnv = process.env.NODE_ENV;
   afterEach(() => {

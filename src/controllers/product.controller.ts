@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { ProductService } from '@services/product.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService, auditContext } from '@services/audit.service';
 
 export const createProductSchema = Joi.object({
   barcode: Joi.string().optional().trim(),
@@ -90,6 +91,23 @@ export class ProductController {
         ...req.body,
         shopId: req.user.shopId,
       });
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'PRODUCT_CREATE',
+          entityType: 'product',
+          entityId: product.id,
+          details: {
+            name: product.name,
+            sku: product.sku,
+            costPrice: product.costPrice,
+            sellPrice: product.sellPrice,
+            quantity: product.quantity,
+          },
+        });
+      }
 
       ApiResponse.created(res, product, 'Product created successfully');
     } catch (error: any) {
@@ -183,7 +201,30 @@ export class ProductController {
       }
 
       const { id } = req.params;
+      // Capture the prior state so the audit row carries genuine before/after
+      // (also surfaces a "not found" before the update runs — same behaviour).
+      const before = await ProductService.getById(id, req.user.shopId);
       const product = await ProductService.update(id, req.user.shopId, req.body);
+
+      const actor = auditContext(req);
+      if (actor) {
+        // A change to either price is a price change — surface it under its own
+        // action so owners can audit margin/price tampering distinctly.
+        const priceChanged =
+          before.sellPrice !== product.sellPrice || before.costPrice !== product.costPrice;
+        await AuditService.log({
+          ...actor,
+          action: priceChanged ? 'PRICE_CHANGE' : 'PRODUCT_UPDATE',
+          entityType: 'product',
+          entityId: id,
+          details: {
+            before: { name: before.name, costPrice: before.costPrice, sellPrice: before.sellPrice },
+            after: { name: product.name, costPrice: product.costPrice, sellPrice: product.sellPrice },
+            changes: req.body,
+          },
+        });
+      }
+
       ApiResponse.success(res, product, 'Product updated successfully');
     } catch (error: any) {
       if (error.message.includes('not found')) {
@@ -207,7 +248,20 @@ export class ProductController {
       }
 
       const { id } = req.params;
+      const before = await ProductService.getById(id, req.user.shopId);
       await ProductService.delete(id, req.user.shopId);
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'PRODUCT_DELETE',
+          entityType: 'product',
+          entityId: id,
+          details: { name: before.name, sku: before.sku, quantity: before.quantity },
+        });
+      }
+
       ApiResponse.success(res, null, 'Product deleted successfully');
     } catch (error: any) {
       if (error.message.includes('not found')) {
@@ -270,6 +324,16 @@ export class ProductController {
 
       const { updates } = req.body;
       const result = await ProductService.bulkUpdate(req.user.shopId, updates);
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'PRICE_CHANGE',
+          entityType: 'product',
+          details: { bulk: true, requested: updates.length, updated: result.updated, failed: result.failed },
+        });
+      }
 
       ApiResponse.success(res, result, `Updated ${result.updated} products, failed ${result.failed}`);
     } catch (error: any) {

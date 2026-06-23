@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { StockService } from '@services/stock.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService, auditContext } from '@services/audit.service';
 
 export const adjustStockSchema = Joi.object({
   productId: Joi.string().required(),
@@ -72,6 +73,22 @@ export class StockController {
         userId: req.user.type === 'user' ? req.user.id : undefined,
       });
 
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'STOCK_ADJUST',
+          entityType: 'product',
+          entityId: req.body.productId,
+          details: {
+            type: req.body.type,
+            quantity: req.body.quantity,
+            note: req.body.note,
+            reference: req.body.reference,
+          },
+        });
+      }
+
       ApiResponse.success(res, result, 'Stock adjusted successfully');
     } catch (error: any) {
       if (error.message.includes('not found')) {
@@ -99,6 +116,19 @@ export class StockController {
         shopId: req.user.shopId,
         userId: req.user.type === 'user' ? req.user.id : undefined,
       });
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'STOCK_RECEIVE',
+          entityType: 'product',
+          details: {
+            itemCount: Array.isArray(req.body.items) ? req.body.items.length : undefined,
+            reference: req.body.reference,
+          },
+        });
+      }
 
       ApiResponse.success(res, result, 'Stock received successfully');
     } catch (error: any) {

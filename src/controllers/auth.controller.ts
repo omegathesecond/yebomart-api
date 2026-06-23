@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { AuthService } from '@services/auth.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService } from '@services/audit.service';
 import { JwksValidator } from '@yebo/mcp-server';
 
 // Shop OWNER sign-in via YeboID. Frontend completes OAuth on YeboID's hosted
@@ -59,6 +60,20 @@ export class AuthController {
         assistantName,
       });
 
+      // Owner login (unauthenticated route → no req.user; build the actor from
+      // the resolved shop). userId stays null: owners have no User row.
+      await AuditService.log({
+        shopId: result.shop.id,
+        userId: null,
+        actorRole: 'OWNER',
+        actorName: result.shop.ownerName ?? 'Owner',
+        ipAddress: req.ip,
+        action: 'LOGIN',
+        entityType: 'shop',
+        entityId: result.shop.id,
+        details: { method: 'yeboid', isNewShop: result.isNewShop },
+      });
+
       ApiResponse.success(
         res,
         result,
@@ -75,6 +90,21 @@ export class AuthController {
     try {
       const { phone, pin } = req.body;
       const result = await AuthService.loginUser(phone, pin);
+
+      if (result.user) {
+        await AuditService.log({
+          shopId: result.shop.id,
+          userId: result.user.id,
+          actorRole: result.user.role,
+          actorName: result.user.name,
+          ipAddress: req.ip,
+          action: 'LOGIN',
+          entityType: 'user',
+          entityId: result.user.id,
+          details: { method: 'pin', role: result.user.role },
+        });
+      }
+
       ApiResponse.success(res, result, 'Staff login successful');
     } catch (error: any) {
       if (error.message?.includes('Invalid')) {

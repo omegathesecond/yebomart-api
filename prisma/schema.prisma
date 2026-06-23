@@ -529,20 +529,28 @@ enum SyncStatus {
 model AuditLog {
   id          String   @id @default(cuid())
   shopId      String
-  userId      String
-  
+  // Nullable: shop OWNERs authenticate via YeboID and have NO User row (their
+  // token id is the Shop id), so owner-initiated writes must log with a null
+  // userId. Staff (cashier/manager) writes still set it and join to User below.
+  userId      String?
+  // Denormalized actor identity so an owner action (userId = null) is still
+  // attributable in the log. For staff, actorName mirrors the User but is kept
+  // here too so the row is self-describing even if the User is later deleted.
+  actorRole   String?  // OWNER, MANAGER, CASHIER
+  actorName   String?  // owner phone/email, or staff display name
+
   action      String   // LOGIN, PRODUCT_CREATE, SALE_VOID, etc.
   entityType  String   // product, sale, user, etc.
   entityId    String?
-  details     Json?    // Additional context
+  details     Json?    // Additional context (e.g. before/after)
   ipAddress   String?
-  
+
   // Relationships
   shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   createdAt   DateTime @default(now())
-  
+
   @@index([shopId, createdAt])
   @@index([userId, createdAt])
   @@index([action])

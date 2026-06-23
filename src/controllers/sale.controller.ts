@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { SaleService } from '@services/sale.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService, auditContext } from '@services/audit.service';
 
 export const createSaleSchema = Joi.object({
   items: Joi.array().items(
@@ -52,6 +53,23 @@ export class SaleController {
         shopId: req.user.shopId,
         userId: req.user.type === 'user' ? req.user.id : undefined,
       });
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'SALE_CREATE',
+          entityType: 'sale',
+          entityId: sale.id,
+          details: {
+            receiptNumber: sale.receiptNumber,
+            totalAmount: sale.totalAmount,
+            paymentMethod: sale.paymentMethod,
+            itemCount: Array.isArray(sale.items) ? sale.items.length : undefined,
+            customerId: sale.customerId ?? undefined,
+          },
+        });
+      }
 
       ApiResponse.created(res, sale, 'Sale completed successfully');
     } catch (error: any) {
@@ -149,6 +167,22 @@ export class SaleController {
         req.user.id,
         reason
       );
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'SALE_VOID',
+          entityType: 'sale',
+          entityId: id,
+          details: {
+            reason,
+            receiptNumber: sale.receiptNumber,
+            totalAmount: sale.totalAmount,
+            paymentMethod: sale.paymentMethod,
+          },
+        });
+      }
 
       ApiResponse.success(res, sale, 'Sale voided successfully');
     } catch (error: any) {

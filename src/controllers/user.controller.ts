@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { UserService } from '@services/user.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService, auditContext } from '@services/audit.service';
 
 export const createUserSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
@@ -81,6 +82,18 @@ export class UserController {
         ...req.body,
         shopId: req.user.shopId,
       });
+
+      const actor = auditContext(req);
+      if (actor) {
+        // NEVER log the PIN/password — only safe identity + authority fields.
+        await AuditService.log({
+          ...actor,
+          action: 'USER_CREATE',
+          entityType: 'user',
+          entityId: user.id,
+          details: { name: user.name, phone: user.phone, role: user.role },
+        });
+      }
 
       ApiResponse.created(res, user, 'User created successfully');
     } catch (error: any) {
@@ -162,7 +175,44 @@ export class UserController {
       }
 
       const { id } = req.params;
+      const before = await UserService.getById(id, req.user.shopId);
       const user = await UserService.update(id, req.user.shopId, req.body);
+
+      const actor = auditContext(req);
+      if (actor) {
+        // A PIN edit is a distinct security event. We record THAT it changed,
+        // never the value. Treat a non-empty `pin` in the body as a change.
+        const pinChanged = typeof req.body.pin === 'string' && req.body.pin.length > 0;
+        const passwordChanged = typeof req.body.password === 'string' && req.body.password.length > 0;
+        await AuditService.log({
+          ...actor,
+          action: pinChanged ? 'STAFF_PIN_CHANGE' : 'USER_UPDATE',
+          entityType: 'user',
+          entityId: id,
+          details: {
+            targetName: before.name,
+            pinChanged,
+            passwordChanged,
+            before: {
+              role: before.role,
+              isActive: before.isActive,
+              canDiscount: before.canDiscount,
+              canVoid: before.canVoid,
+              canViewReports: before.canViewReports,
+              canManageStock: before.canManageStock,
+            },
+            after: {
+              role: user.role,
+              isActive: user.isActive,
+              canDiscount: user.canDiscount,
+              canVoid: user.canVoid,
+              canViewReports: user.canViewReports,
+              canManageStock: user.canManageStock,
+            },
+          },
+        });
+      }
+
       ApiResponse.success(res, user, 'User updated successfully');
     } catch (error: any) {
       if (error.message.includes('not found')) {
@@ -192,7 +242,20 @@ export class UserController {
       }
 
       const { id } = req.params;
+      const before = await UserService.getById(id, req.user.shopId);
       await UserService.delete(id, req.user.shopId);
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'USER_DELETE',
+          entityType: 'user',
+          entityId: id,
+          details: { name: before.name, phone: before.phone, role: before.role },
+        });
+      }
+
       ApiResponse.success(res, null, 'User deleted successfully');
     } catch (error: any) {
       if (error.message.includes('not found')) {

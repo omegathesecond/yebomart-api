@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { ShopService } from '@services/shop.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { AuditService, auditContext } from '@services/audit.service';
 import { getAllBusinessTypes, getBusinessConfig, BUSINESS_TYPES } from '@config/businessTypes';
 
 export const updateShopSchema = Joi.object({
@@ -64,6 +65,18 @@ export class ShopController {
         return;
       }
       const settings = await ShopService.updateNotificationSettings(req.user.shopId, req.body);
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'SETTINGS_UPDATE',
+          entityType: 'shop',
+          entityId: req.user.shopId,
+          details: { settings: 'notifications', changes: req.body },
+        });
+      }
+
       ApiResponse.success(res, settings, 'Notification settings updated');
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
@@ -101,6 +114,18 @@ export class ShopController {
         return;
       }
       const settings = await ShopService.updateTaxSettings(req.user.shopId, req.body);
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'SETTINGS_UPDATE',
+          entityType: 'shop',
+          entityId: req.user.shopId,
+          details: { settings: 'tax', changes: req.body },
+        });
+      }
+
       ApiResponse.success(res, settings, 'Tax settings updated');
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
@@ -161,6 +186,18 @@ export class ShopController {
       }
 
       const shop = await ShopService.update(id, req.body);
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'SETTINGS_UPDATE',
+          entityType: 'shop',
+          entityId: id,
+          details: { settings: 'shop', changes: req.body },
+        });
+      }
+
       ApiResponse.success(res, shop, 'Shop updated successfully');
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);

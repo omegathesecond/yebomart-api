@@ -5,6 +5,7 @@ import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { YeboLinkClient } from '@services/yebolink.client';
 import { evaluateCredit } from '@services/customerCredit.service';
+import { AuditService, auditContext } from '@services/audit.service';
 
 export const createCustomerSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
@@ -137,6 +138,17 @@ export class CustomerController {
           ...req.body,
         },
       });
+
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'CUSTOMER_CREATE',
+          entityType: 'customer',
+          entityId: customer.id,
+          details: { name: customer.name, phone: customer.phone, creditLimit: customer.creditLimit },
+        });
+      }
 
       ApiResponse.created(res, customer, 'Customer created');
     } catch (error: any) {
@@ -305,6 +317,26 @@ export class CustomerController {
         }),
       ]);
 
+      const actor = auditContext(req);
+      if (actor) {
+        await AuditService.log({
+          ...actor,
+          action: 'CREDIT_ADD',
+          entityType: 'customer',
+          entityId: id,
+          details: {
+            creditType: type,
+            amount,
+            note,
+            saleId,
+            override: override === true,
+            previousBalance: customer.balance,
+            newBalance: updatedCustomer.balance,
+            balanceChange,
+          },
+        });
+      }
+
       ApiResponse.success(
         res,
         { credit, newBalance: updatedCustomer.balance, balanceChange },
@@ -325,14 +357,37 @@ export class CustomerController {
         return;
       }
 
-      const customer = await prisma.customer.updateMany({
+      // Load before-state for the audit row (and to scope the update to this
+      // shop). Missing → 404 exactly as before.
+      const before = await prisma.customer.findFirst({
         where: { id: req.params.id, shopId: req.user.shopId },
+      });
+      if (!before) {
+        ApiResponse.notFound(res, 'Customer not found');
+        return;
+      }
+
+      const customer = await prisma.customer.update({
+        where: { id: before.id },
         data: req.body,
       });
 
-      if (customer.count === 0) {
-        ApiResponse.notFound(res, 'Customer not found');
-        return;
+      const actor = auditContext(req);
+      if (actor) {
+        // A soft-delete (isActive → false) is recorded as CUSTOMER_DELETE so it
+        // reads correctly in the audit trail; everything else is an update.
+        const isSoftDelete = req.body.isActive === false && before.isActive !== false;
+        await AuditService.log({
+          ...actor,
+          action: isSoftDelete ? 'CUSTOMER_DELETE' : 'CUSTOMER_UPDATE',
+          entityType: 'customer',
+          entityId: before.id,
+          details: {
+            before: { name: before.name, phone: before.phone, creditLimit: before.creditLimit, isActive: before.isActive },
+            after: { name: customer.name, phone: customer.phone, creditLimit: customer.creditLimit, isActive: customer.isActive },
+            changes: req.body,
+          },
+        });
       }
 
       ApiResponse.success(res, null, 'Customer updated');
