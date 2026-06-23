@@ -26,7 +26,7 @@ vi.mock('./shop.service', () => ({
 }));
 
 import { SaleService } from './sale.service';
-import { prismaFake, resetDb, seedShop, seedProduct, table } from '../test/prismaFake';
+import { prismaFake, resetDb, seedShop, seedProduct, seedCustomer, table } from '../test/prismaFake';
 
 let shopId: string;
 
@@ -214,6 +214,146 @@ describe('SaleService.create — rejection paths write nothing', () => {
     ).rejects.toThrow(/not found/);
 
     expect(table('sale')).toHaveLength(0);
+  });
+});
+
+describe('SaleService.voidSale', () => {
+  it('flips the sale to VOIDED, restores stock, and writes a RETURN stock log', async () => {
+    const product = seedProduct({ shopId, quantity: 100, sellPrice: 10, costPrice: 5 });
+    const sale = await SaleService.create(
+      saleInput({ items: [{ productId: product.id, quantity: 3 }], amountPaid: 30 })
+    );
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(97);
+
+    const voided = await SaleService.voidSale(sale.id, shopId, 'user-1', 'wrong item rung up');
+
+    expect(voided.status).toBe('VOIDED');
+    expect(voided.voidReason).toBe('wrong item rung up');
+    // Stock restored.
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(100);
+    // RETURN stock log written (alongside the original SALE log).
+    const returnLogs = table('stockLog').filter((l) => l.type === 'RETURN');
+    expect(returnLogs).toHaveLength(1);
+    expect(returnLogs[0]).toMatchObject({
+      type: 'RETURN',
+      quantity: 3,
+      previousQty: 97,
+      newQty: 100,
+      reference: sale.id,
+    });
+  });
+
+  it('rejects voiding a sale that is already voided (or not COMPLETED)', async () => {
+    const product = seedProduct({ shopId, quantity: 10, sellPrice: 10 });
+    const sale = await SaleService.create(
+      saleInput({ items: [{ productId: product.id, quantity: 1 }], amountPaid: 10 })
+    );
+    await SaleService.voidSale(sale.id, shopId, 'user-1', 'first void');
+
+    await expect(
+      SaleService.voidSale(sale.id, shopId, 'user-1', 'second void')
+    ).rejects.toThrow(/not found or already voided/);
+  });
+
+  // NOTE: the CREDIT-sale *create* path (which mints the PURCHASE ledger entry +
+  // balance increment) lives on a sibling branch not yet in main, so these tests
+  // seed the completed credit sale directly via the fake — voidSale is the unit
+  // under test, and it must reverse the debt regardless of how the sale was made.
+  async function seedCreditSale(opts: {
+    customerId: string;
+    productId: string;
+    qty: number;
+    total: number;
+  }) {
+    const sale = await prismaFake.sale.create({
+      data: {
+        shopId,
+        customerId: opts.customerId,
+        receiptNumber: `RCP-CREDIT-${opts.customerId}`,
+        subtotal: opts.total,
+        discount: 0,
+        tax: 0,
+        totalAmount: opts.total,
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        change: 0,
+        status: 'COMPLETED',
+        items: {
+          create: [
+            {
+              productId: opts.productId,
+              productName: 'Widget',
+              quantity: opts.qty,
+              unitPrice: opts.total / opts.qty,
+              costPrice: 0,
+              totalPrice: opts.total,
+            },
+          ],
+        },
+      },
+      include: { items: true },
+    });
+    // Mirror the create path's ledger side-effects.
+    await prismaFake.customerCredit.create({
+      data: {
+        shopId,
+        customerId: opts.customerId,
+        type: 'PURCHASE',
+        amount: opts.total,
+        saleId: sale.id,
+      },
+    });
+    return sale;
+  }
+
+  it('reverses customer debt for a CREDIT sale: REFUND ledger entry + balance decrement', async () => {
+    // Stock already drawn down by 2 at sale time (48 left); void should restore to 50.
+    const product = seedProduct({ shopId, quantity: 48, sellPrice: 40, costPrice: 20 });
+    const customer = seedCustomer({ shopId, balance: 80, creditLimit: 0 });
+    const sale = await seedCreditSale({
+      customerId: customer.id,
+      productId: product.id,
+      qty: 2,
+      total: 80,
+    });
+    expect(table('customerCredit').filter((c) => c.type === 'PURCHASE')).toHaveLength(1);
+
+    const voided = await SaleService.voidSale(sale.id, shopId, 'user-1', 'customer returned goods');
+    expect(voided.status).toBe('VOIDED');
+
+    // Debt reversed to 0.
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(0);
+    // A reversing REFUND ledger entry was appended, linked to the sale.
+    const refunds = table('customerCredit').filter((c) => c.type === 'REFUND');
+    expect(refunds).toHaveLength(1);
+    expect(refunds[0]).toMatchObject({
+      customerId: customer.id,
+      type: 'REFUND',
+      amount: 80,
+      saleId: sale.id,
+    });
+    // Stock still restored for the credit sale.
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(50);
+  });
+
+  it('does NOT touch any customer ledger when voiding a non-credit sale with a customer', async () => {
+    const product = seedProduct({ shopId, quantity: 50, sellPrice: 10 });
+    const customer = seedCustomer({ shopId, balance: 0 });
+
+    // Cash sale attached to a customer (purchase history) — no debt incurred.
+    const sale = await SaleService.create(
+      saleInput({
+        items: [{ productId: product.id, quantity: 2 }],
+        amountPaid: 20,
+        customerId: customer.id,
+      })
+    );
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(0);
+
+    await SaleService.voidSale(sale.id, shopId, 'user-1', 'rang up by mistake');
+
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(0);
+    expect(table('customerCredit')).toHaveLength(0);
   });
 });
 

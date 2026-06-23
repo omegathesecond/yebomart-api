@@ -454,7 +454,9 @@ export class SaleService {
       throw new Error('Sale not found or already voided');
     }
 
-    // Void and restore stock in transaction
+    // Void, restore stock, and reverse any customer debt — all in ONE
+    // transaction so stock, the customer ledger, and the customer balance can
+    // never drift apart (mirror of the atomic create path).
     const updatedSale = await prisma.$transaction(async (tx) => {
       // Update sale status
       const updated = await tx.sale.update({
@@ -464,6 +466,33 @@ export class SaleService {
           voidReason: reason,
         },
       });
+
+      // Reverse customer debt for a CREDIT (pay-later) sale. The create path
+      // recorded a PURCHASE entry (+totalAmount on Customer.balance); voiding
+      // returns the goods, so the customer must no longer owe for them. We
+      // append a reversing REFUND ledger entry (creditBalanceChange maps REFUND
+      // to -amount) and decrement the balance by the same total, inside this
+      // transaction. Guard on paymentMethod === 'CREDIT' AND a customerId: a
+      // cash sale merely *attached* to a customer (purchase history) incurred no
+      // debt and must not be touched. Double-reversal is impossible because the
+      // void only runs when status was COMPLETED, which this flips to VOIDED.
+      if (sale.paymentMethod === 'CREDIT' && sale.customerId) {
+        await tx.customerCredit.create({
+          data: {
+            shopId,
+            customerId: sale.customerId,
+            type: 'REFUND',
+            amount: sale.totalAmount,
+            saleId: sale.id,
+            userId,
+            note: `Void reversal for credit sale ${sale.receiptNumber ?? sale.id}: ${reason}`,
+          },
+        });
+        await tx.customer.update({
+          where: { id: sale.customerId },
+          data: { balance: { decrement: sale.totalAmount } },
+        });
+      }
 
       // Restore stock
       for (const item of sale.items) {
