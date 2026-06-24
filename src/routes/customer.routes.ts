@@ -20,8 +20,8 @@ router.get('/:id', CustomerController.getById);
 router.post('/', validateRequest(createCustomerSchema), CustomerController.create);
 router.patch('/:id', managerAuth, CustomerController.update);
 
-// Credit management
-router.post('/:id/credit', validateRequest(addCreditSchema), CustomerController.addCredit);
+// Credit management (manager-gated — credit-ledger writes can wipe out customer debt)
+router.post('/:id/credit', managerAuth, validateRequest(addCreditSchema), CustomerController.addCredit);
 
 // Send the customer their statement / payment reminder via YeboLink (manager-gated)
 router.post(
