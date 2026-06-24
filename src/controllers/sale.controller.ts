@@ -143,10 +143,14 @@ export class SaleController {
       const { id } = req.params;
       const { reason } = req.body;
 
+      // StockLog.userId is a real User FK; only staff tokens carry a User id.
+      // A shop-owner token's `id` is the Shop id, so leave userId null for it.
+      const userId = req.user.type === 'user' ? req.user.id : undefined;
+
       const sale = await SaleService.voidSale(
         id,
         req.user.shopId,
-        req.user.id,
+        userId,
         reason
       );
 

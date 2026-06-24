@@ -440,7 +440,7 @@ export class SaleService {
   /**
    * Void a sale
    */
-  static async voidSale(saleId: string, shopId: string, userId: string, reason: string) {
+  static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
     const sale = await prisma.sale.findFirst({
       where: {
         id: saleId,
