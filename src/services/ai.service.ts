@@ -413,11 +413,22 @@ NEVER SAY:
   }
 
   /**
-   * Generate AI insights
+   * Generate AI insights.
+   *
+   * Fails loudly (no silent fallback — see CLAUDE.md). If Gemini is unconfigured,
+   * errors, or returns a body we can't parse into the insights JSON, this THROWS
+   * — exactly like chat() does. It must NEVER return locally-computed canned
+   * "insights" dressed up as a real AI result, because:
+   *   1. the customer would be misled into thinking the AI ran when it didn't, and
+   *   2. the /insights route authorises a credit charge for this call. Serving
+   *      fake data on a Gemini outage used to charge the shop for an AI call that
+   *      never happened AND hide the outage. The charge is now settled only AFTER
+   *      this resolves successfully (see ai.routes.ts + settlePendingCharge), so a
+   *      thrown error here means the shop is never billed for the failed call.
    */
   static async generateInsights(input: InsightInput) {
     if (!GEMINI_API_KEY) {
-      return this.getOfflineInsights(input.shopId);
+      throw new Error('AI service not configured');
     }
 
     const context = await this.getShopContext(input.shopId);
@@ -463,129 +474,31 @@ Generate insights as JSON array with:
 
 Return ONLY valid JSON array, no markdown.`;
 
-    try {
-      const result = await model.generateContent(prompt);
-      const responseText = result.response.text();
-      
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const insights = JSON.parse(jsonMatch[0]);
-        
-        await prisma.aIConversation.create({
-          data: {
-            shopId: input.shopId,
-            userMessage: 'Generate insights',
-            aiResponse: JSON.stringify(insights),
-            type: 'INSIGHT',
-          },
-        });
+    // Let Gemini errors propagate — a failed AI call must surface as a 5xx
+    // (handled by the controller), never be swallowed into canned data.
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
 
-        return { insights, generated: new Date() };
-      }
-    } catch (error) {
-      console.error('AI insights error:', error);
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      // The model answered but not in the JSON shape we asked for. That's a
+      // real failure of the AI call — fail loud rather than fabricate insights.
+      throw new Error('AI insights response did not contain valid JSON');
     }
 
-    return this.getOfflineInsights(input.shopId);
-  }
+    // JSON.parse throwing on malformed output also propagates by design.
+    const insights = JSON.parse(jsonMatch[0]);
 
-  /**
-   * Offline/fallback insights with real data
-   */
-  private static async getOfflineInsights(shopId: string) {
-    const context = await this.getShopContext(shopId);
-    const insights = [];
+    await prisma.aIConversation.create({
+      data: {
+        shopId: input.shopId,
+        userMessage: 'Generate insights',
+        aiResponse: JSON.stringify(insights),
+        type: 'INSIGHT',
+      },
+    });
 
-    const allLowStock = [
-      ...context.lowStockAlerts.items.critical,
-      ...context.lowStockAlerts.items.low,
-    ];
-
-    // Low stock insight with actual names
-    if (allLowStock.length > 0) {
-      const outOfStock = context.lowStockAlerts.items.critical;
-      const productNames = allLowStock.slice(0, 3).map(p => p.name).join(', ');
-      
-      insights.push({
-        title: outOfStock.length > 0 ? '🚨 Stock Emergency!' : '⚠️ Stock Running Low',
-        insight: outOfStock.length > 0 
-          ? `${outOfStock.map(p => p.name).join(', ')} ${outOfStock.length === 1 ? 'is' : 'are'} completely OUT OF STOCK! Plus ${allLowStock.length - outOfStock.length} more items running low.`
-          : `${productNames} and ${allLowStock.length - 3} more products need restocking soon.`,
-        action: outOfStock.length > 0 
-          ? `Reorder ${outOfStock[0].name} immediately - customers will be disappointed!`
-          : 'Place orders today to avoid stockouts.',
-        priority: outOfStock.length > 0 ? 'high' : 'medium',
-      });
-    }
-
-    // Slow movers insight
-    if (context.slowMovers.length > 0) {
-      const totalTiedUp = context.slowMovers.reduce((sum, p) => sum + p.stockValue, 0);
-      const worstMover = context.slowMovers[0];
-      
-      insights.push({
-        title: '🐌 Dead Stock Alert',
-        insight: `${context.slowMovers.length} products barely selling! ${worstMover.name} only sold ${worstMover.soldLast30Days} units in 30 days. E${totalTiedUp.toFixed(0)} tied up in slow stock.`,
-        action: `Consider a discount on ${worstMover.name} or bundle it with popular items.`,
-        priority: totalTiedUp > 500 ? 'high' : 'medium',
-      });
-    }
-
-    // Low margin alert
-    if (context.lowMarginProducts.length > 0) {
-      const lowestMargin = context.lowMarginProducts[0];
-      insights.push({
-        title: '💸 Thin Margins',
-        insight: `${lowestMargin.name} only has ${lowestMargin.margin.toFixed(0)}% margin - you're barely making money on it!`,
-        action: `Consider raising price by E${((lowestMargin.sellPrice || 0) * 0.1).toFixed(0)} or finding a cheaper supplier.`,
-        priority: 'medium',
-      });
-    }
-
-    // Push high margin products
-    if (context.highMarginProducts.length > 0) {
-      const bestMargin = context.highMarginProducts[0];
-      insights.push({
-        title: '💎 Hidden Gold',
-        insight: `${bestMargin.name} has ${bestMargin.margin.toFixed(0)}% margin - push this product more!`,
-        action: 'Move it to a prominent display or suggest it to customers buying related items.',
-        priority: 'medium',
-      });
-    }
-
-    // Sales insight
-    if (context.todaySales.totalTransactions > 0) {
-      const topProduct = context.todaySales.topProducts[0];
-      insights.push({
-        title: '📈 Today\'s Performance',
-        insight: `You've made E${context.todaySales.totalSales.toFixed(2)} from ${context.todaySales.totalTransactions} sales. ${topProduct ? `${topProduct.name} is flying off the shelves!` : ''}`,
-        action: context.todaySales.averageBasket < 50 
-          ? 'Try suggesting add-ons to increase basket size.' 
-          : 'Great average basket! Keep it up!',
-        priority: 'medium',
-      });
-    } else {
-      const timeCtx = this.getTimeContext();
-      insights.push({
-        title: '🌅 New Day, Fresh Start',
-        insight: `No sales yet today. ${timeCtx.suggestion}`,
-        action: 'Consider a morning special or reach out to regular customers.',
-        priority: 'low',
-      });
-    }
-
-    // Top product insight
-    if (context.todaySales.topProducts.length > 0) {
-      const top = context.todaySales.topProducts[0];
-      insights.push({
-        title: `🏆 ${top.name} Winning!`,
-        insight: `${top.name} is your best seller with ${top.quantity} units sold (E${top.revenue.toFixed(2)} revenue).`,
-        action: 'Make sure you have enough stock of this popular item!',
-        priority: 'low',
-      });
-    }
-
-    return { insights, generated: new Date(), offline: true };
+    return { insights, generated: new Date() };
   }
 
   /**
