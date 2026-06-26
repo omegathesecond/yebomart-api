@@ -1,10 +1,8 @@
 import { Response } from 'express';
 import Joi from 'joi';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
-
-const prisma = new PrismaClient();
 
 export const createSupplierSchema = Joi.object({
   name: Joi.string().required().min(2).max(200),
@@ -305,6 +303,28 @@ export class SupplierController {
       }
 
       const { id: supplierId, productId } = req.params;
+
+      // Verify supplier belongs to shop (tenancy guard — mirrors addProduct).
+      // Without this, the composite-key delete below would happily remove
+      // another shop's supplier-product link straight from req.params.
+      const supplier = await prisma.supplier.findFirst({
+        where: { id: supplierId, shopId: req.user.shopId },
+      });
+
+      if (!supplier) {
+        ApiResponse.notFound(res, 'Supplier not found');
+        return;
+      }
+
+      // Verify product belongs to shop
+      const product = await prisma.product.findFirst({
+        where: { id: productId, shopId: req.user.shopId },
+      });
+
+      if (!product) {
+        ApiResponse.notFound(res, 'Product not found');
+        return;
+      }
 
       await prisma.supplierProduct.delete({
         where: {

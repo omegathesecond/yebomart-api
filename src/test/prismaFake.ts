@@ -34,11 +34,15 @@ type ModelName =
   | 'customer'
   | 'customerCredit'
   | 'user'
-  | 'admin';
+  | 'admin'
+  | 'supplier'
+  | 'supplierProduct';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
-// are allowed — same as prod).
+// are allowed — same as prod). The joined name of a multi-field keyset (e.g.
+// 'supplierId_productId') is also the composite-where alias Prisma accepts on
+// findUnique/delete — normalizeWhere relies on that correspondence.
 const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   shop: [['ownerYeboidSub'], ['ownerPhone']],
   product: [['shopId', 'barcode']],
@@ -49,6 +53,8 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   customerCredit: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
+  supplier: [['shopId', 'phone']],
+  supplierProduct: [['supplierId', 'productId']],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -86,6 +92,26 @@ function matchesWhere(rec: Row, where: Row | undefined): boolean {
   });
 }
 
+// Prisma accepts a composite unique key on findUnique/delete as a single nested
+// object keyed by the joined field names (e.g.
+// `{ supplierId_productId: { supplierId, productId } }`). matchesWhere doesn't
+// understand that shape — it would treat `supplierId_productId` as a column whose
+// object value has no operators and match EVERY row — so flatten it back to plain
+// field equalities first. Single-field where clauses pass through untouched.
+function normalizeWhere(model: ModelName, where: Row | undefined): Row | undefined {
+  if (!where) return where;
+  const out: Row = {};
+  for (const [k, v] of Object.entries(where)) {
+    const composite = UNIQUE_KEYS[model].find((ks) => ks.length > 1 && ks.join('_') === k);
+    if (composite && v && typeof v === 'object' && !(v instanceof Date)) {
+      Object.assign(out, v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 function project(rec: Row, select: Row | undefined): Row {
   if (!select) return { ...rec };
   const out: Row = {};
@@ -106,6 +132,8 @@ class FakeDb {
     customerCredit: [],
     user: [],
     admin: [],
+    supplier: [],
+    supplierProduct: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -281,6 +309,25 @@ class FakeDb {
     return { count: hits.length };
   }
 
+  // Single-row delete keyed by a unique where (id or a composite key). Throws a
+  // real P2025 when nothing matches — exactly like Prisma — so controllers that
+  // catch `error.code === 'P2025'` (e.g. SupplierController.removeProduct) run
+  // against the genuine error shape, not a stub. Composite where clauses are
+  // normalized so a `{ supplierId_productId: {...} }` delete can't accidentally
+  // match (and wipe) the whole table.
+  delete(model: ModelName, args: Row): Row {
+    const where = normalizeWhere(model, args.where);
+    const idx = this.tables[model].findIndex((r) => matchesWhere(r, where));
+    if (idx === -1) {
+      throw new Prisma.PrismaClientKnownRequestError('Record to delete does not exist.', {
+        code: 'P2025',
+        clientVersion: 'fake',
+      });
+    }
+    const [removed] = this.tables[model].splice(idx, 1);
+    return { ...removed };
+  }
+
   async transaction(arg: any): Promise<any> {
     if (typeof arg === 'function') {
       // Serialize interactive transactions. A real DB gives each transaction
@@ -323,6 +370,7 @@ function model(name: ModelName) {
       db.includeOn(name, db.createOne(name, args.data), args.include),
     update: async (args: Row) => db.update(name, args),
     updateMany: async (args: Row) => db.updateMany(name, args),
+    delete: async (args: Row) => db.delete(name, args),
   };
 }
 
@@ -340,6 +388,8 @@ export const prismaFake: any = {
   customerCredit: model('customerCredit'),
   user: model('user'),
   admin: model('admin'),
+  supplier: model('supplier'),
+  supplierProduct: model('supplierProduct'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -419,6 +469,29 @@ export function seedAdmin(partial: Partial<Row> = {}): Row {
     role: 'ADMIN',
     isActive: true,
     updatedAt: new Date(),
+    ...partial,
+  });
+}
+
+export function seedSupplier(partial: Partial<Row> = {}): Row {
+  return db.createOne('supplier', {
+    shopId: 'shop_1',
+    name: 'Test Supplier',
+    phone: partial.phone ?? `+2687${Math.floor(Math.random() * 1e7)}`,
+    isActive: true,
+    ...partial,
+  });
+}
+
+// Link a product to a supplier (the SupplierProduct join row that
+// removeProduct deletes). The @@unique([supplierId, productId]) is enforced.
+export function seedSupplierProduct(partial: Partial<Row> = {}): Row {
+  return db.createOne('supplierProduct', {
+    supplierId: 'supplier_1',
+    productId: 'product_1',
+    costPrice: 5,
+    minOrder: 1,
+    isPreferred: false,
     ...partial,
   });
 }
