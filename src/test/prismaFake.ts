@@ -57,6 +57,13 @@ const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
   customer: { credits: 'customerCredit' },
 };
 
+// Belongs-to (parent) relation field -> [parent model, FK field on this row].
+// Used by includeOn for `include: { shop: { select } }`-style joins, where the
+// row carries a FK (e.g. Sale.shopId) pointing at the parent's id.
+const PARENT_RELATIONS: Partial<Record<ModelName, Record<string, [ModelName, string]>>> = {
+  sale: { shop: ['shop', 'shopId'], customer: ['customer', 'customerId'] },
+};
+
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
   if (!where) return true;
   return Object.entries(where).every(([key, cond]) => {
@@ -144,6 +151,7 @@ class FakeDb {
     if (!include) return { ...rec };
     const out = { ...rec };
     const rels = RELATIONS[model] ?? {};
+    const parents = PARENT_RELATIONS[model] ?? {};
     for (const [field, want] of Object.entries(include)) {
       if (!want) continue;
       const childModel = rels[field];
@@ -152,6 +160,15 @@ class FakeDb {
         out[field] = this.tables[childModel]
           .filter((r) => r[fk] === rec.id)
           .map((r) => ({ ...r }));
+        continue;
+      }
+      const parent = parents[field];
+      if (parent) {
+        const [parentModel, fkField] = parent;
+        const parentRow = this.tables[parentModel].find((r) => r.id === rec[fkField]);
+        // Honour a nested `select` (e.g. shop: { select: { name: true } }).
+        const select = want && typeof want === 'object' ? (want as Row).select : undefined;
+        out[field] = parentRow ? (select ? project(parentRow, select) : { ...parentRow }) : null;
       }
     }
     return out;
@@ -403,5 +420,25 @@ export function seedAdmin(partial: Partial<Row> = {}): Row {
     isActive: true,
     updatedAt: new Date(),
     ...partial,
+  });
+}
+
+// Seed a completed Sale (optionally with line items). Used by the receipt
+// controller tests, which read the persisted sale back to build the message.
+export function seedSale(partial: Partial<Row> = {}): Row {
+  const { items, ...rest } = partial;
+  return db.createOne('sale', {
+    shopId: 'shop_1',
+    subtotal: 100,
+    discount: 0,
+    tax: 0,
+    totalAmount: 100,
+    paymentMethod: 'CASH',
+    amountPaid: 100,
+    change: 0,
+    status: 'COMPLETED',
+    receiptNumber: 'RCP-260626-0001',
+    ...(items ? { items: { create: items } } : {}),
+    ...rest,
   });
 }
