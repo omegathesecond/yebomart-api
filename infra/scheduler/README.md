@@ -34,20 +34,25 @@ ENV=dev ./provision-daily-notifications-job.sh
 The script is idempotent (create-or-update) and fails loud if the backing
 secret is missing rather than provisioning a job that would 401 forever.
 
-## ⚠️ Verification finding (2026-06-17) — DO NOT skip the prerequisites
+## ⚠️ Verification finding (re-verified 2026-06-27; first found 2026-06-17) — DO NOT skip the prerequisites
 
 A verification audit found the daily report **does not fire in prod**, for two
-compounding reasons:
+compounding reasons. **Re-verified 2026-06-27: still unchanged — nothing below
+has been remediated.** No yebomart scheduler job exists; both secrets are still
+absent; prod is still serving `00015-p7w`; the endpoint still returns 404.
 
 1. **The Cloud Scheduler job was never provisioned.** No yebomart job exists in
-   `europe-west1` (only `ceodashboard-cron-tick`, `eneza-low-balance-alerts`,
-   `money-coach-weekly-digest`).
+   `europe-west1` (confirmed 2026-06-27 — the only daily-cadence jobs there are
+   `eneza-low-balance-alerts` and `money-coach-weekly-digest`; no
+   `yebomart-daily-notifications`).
 
 2. **The target endpoint is dead in prod anyway.** `POST
    https://api.yebomart.com/api/internal/notifications/run` returns **404**
-   because prod traffic is pinned to revision `yebomart-api-prod-00015-p7w`,
-   which predates the notifications feature (shipped in commit `1b090ea`). Every
-   newer revision (through `00027-tq5`) is stuck `Ready=False`.
+   (re-confirmed 2026-06-27) because prod traffic is pinned to revision
+   `yebomart-api-prod-00015-p7w`, which predates the notifications feature
+   (shipped in commit `1b090ea`). Every newer revision is stuck `Ready=False`
+   — as of 2026-06-27 the latest is `00034-k7q`, and `00031`–`00034` all carry
+   the same permission-denied message below.
 
    **Root cause:** `cloudbuild.yaml` binds `YEBOMART__YEBOLINK_API_KEY` and
    `YEBOMART__INTERNAL_NOTIFICATIONS_SECRET`, but **neither secret exists** in
