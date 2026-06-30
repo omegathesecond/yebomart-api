@@ -1,10 +1,8 @@
 import { Response } from 'express';
 import Joi from 'joi';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
-
-const prisma = new PrismaClient();
 
 // ==================== Validation schemas ====================
 
@@ -48,6 +46,13 @@ export const receivePurchaseOrderSchema = Joi.object({
   // When true, each received product's costPrice is updated to the PO unitCost.
   updateCost: Joi.boolean().optional().default(false),
   notes: Joi.string().optional().max(1000),
+});
+
+export const recordPaymentSchema = Joi.object({
+  // Amount paid to the supplier against this PO. Partial payments are allowed
+  // and may be repeated until the PO's balance due is settled.
+  amount: Joi.number().min(0.01).required(),
+  note: Joi.string().optional().max(1000),
 });
 
 export class PurchaseOrderController {
@@ -194,7 +199,7 @@ export class PurchaseOrderController {
         return;
       }
 
-      ApiResponse.success(res, po);
+      ApiResponse.success(res, { ...po, balanceDue: po.amountReceived - po.amountPaid });
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }
@@ -281,7 +286,14 @@ export class PurchaseOrderController {
       }
 
       const updatedPo = await prisma.$transaction(async (tx) => {
+        // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
+        // amount booked as a supplier payable so purchases are no longer
+        // understated — independent of whether a product row still exists.
+        let receivedValue = 0;
+
         for (const { item, qty } of toReceive) {
+          receivedValue += qty * item.unitCost;
+
           const product = await tx.product.findUnique({ where: { id: item.productId } });
           // Product may have been deleted after the PO was raised; receiving the
           // remaining lines should still succeed, so skip the stock bump but
@@ -319,6 +331,31 @@ export class PurchaseOrderController {
           });
         }
 
+        // Book the received cost as a supplier payable: an append-only BILL
+        // ledger entry + a matching bump to the supplier's running balance, all
+        // in this same transaction so the books and the audit trail stay in
+        // lock-step. Without this, receiving stock raised inventory value but
+        // never recorded the cost owed — understating purchases and overstating
+        // profit. Guard on >0 so a no-cost receipt writes nothing.
+        if (receivedValue > 0) {
+          await tx.supplierLedger.create({
+            data: {
+              shopId,
+              supplierId: po.supplierId,
+              type: 'BILL',
+              amount: receivedValue,
+              poId: po.id,
+              userId,
+              note: `Goods received on PO ${po.orderNumber ?? po.id}`,
+            },
+          });
+
+          await tx.supplier.update({
+            where: { id: po.supplierId },
+            data: { balance: { increment: receivedValue } },
+          });
+        }
+
         // Recompute PO status from the line receipts.
         const fullyReceived = po.items.every((item) => {
           const extra = toReceive.find((t) => t.item.id === item.id)?.qty ?? 0;
@@ -330,16 +367,107 @@ export class PurchaseOrderController {
           data: {
             status: fullyReceived ? 'RECEIVED' : 'PARTIAL',
             receivedDate: fullyReceived ? new Date() : po.receivedDate ?? new Date(),
+            // Grow the cumulative billed value for this PO. balanceDue is
+            // derived as amountReceived - amountPaid.
+            amountReceived: { increment: receivedValue },
             notes: notes ?? po.notes,
           },
           include: {
-            supplier: { select: { id: true, name: true, phone: true } },
+            supplier: { select: { id: true, name: true, phone: true, balance: true } },
             items: true,
           },
         });
       });
 
-      ApiResponse.success(res, updatedPo, 'Purchase order received');
+      ApiResponse.success(
+        res,
+        { ...updatedPo, balanceDue: updatedPo.amountReceived - updatedPo.amountPaid },
+        'Purchase order received'
+      );
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * Record a payment to the supplier against a purchase order.
+   *
+   * This is the second half of supplier-payable tracking: receiving goods books
+   * a BILL (what we owe); paying the supplier books a PAYMENT (settling some or
+   * all of it). Partial payments are allowed and may repeat until the PO's
+   * balance due is cleared. The PAYMENT ledger entry, the supplier balance
+   * decrement, and the PO's amountPaid bump all happen in one transaction so
+   * the running balance and audit trail never drift apart.
+   */
+  static async recordPayment(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const shopId = req.user.shopId;
+      // Only staff tokens carry a real User id (see receive()).
+      const userId = req.user.type === 'user' ? req.user.id : undefined;
+      const poId = req.params.id;
+      const { amount, note } = req.body;
+
+      const po = await prisma.purchaseOrder.findFirst({
+        where: { id: poId, shopId },
+      });
+      if (!po) {
+        ApiResponse.notFound(res, 'Purchase order not found');
+        return;
+      }
+
+      // Can't pay more than is owed on the PO (amountReceived - amountPaid).
+      // Fail loudly rather than silently clamping — overpayment is a data error.
+      const balanceDue = po.amountReceived - po.amountPaid;
+      if (balanceDue <= 0) {
+        ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
+        return;
+      }
+      if (amount > balanceDue) {
+        ApiResponse.badRequest(
+          res,
+          `Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`
+        );
+        return;
+      }
+
+      const updatedPo = await prisma.$transaction(async (tx) => {
+        await tx.supplierLedger.create({
+          data: {
+            shopId,
+            supplierId: po.supplierId,
+            type: 'PAYMENT',
+            amount,
+            poId: po.id,
+            userId,
+            note: note ?? `Payment for PO ${po.orderNumber ?? po.id}`,
+          },
+        });
+
+        await tx.supplier.update({
+          where: { id: po.supplierId },
+          data: { balance: { decrement: amount } },
+        });
+
+        return tx.purchaseOrder.update({
+          where: { id: poId },
+          data: { amountPaid: { increment: amount } },
+          include: {
+            supplier: { select: { id: true, name: true, phone: true, balance: true } },
+            items: true,
+          },
+        });
+      });
+
+      ApiResponse.success(
+        res,
+        { ...updatedPo, balanceDue: updatedPo.amountReceived - updatedPo.amountPaid },
+        'Payment recorded'
+      );
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }

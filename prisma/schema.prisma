@@ -656,16 +656,25 @@ model Supplier {
   leadTimeDays Int?     // Typical delivery time in days
   notes       String?
   
+  // Accounts payable — running balance of what THIS SHOP owes the supplier.
+  // Positive = we owe them (mirror of Customer.balance, where positive = they
+  // owe us). Increased when goods are received on a PO (a BILL ledger entry);
+  // decreased when we pay the supplier (a PAYMENT ledger entry). Kept in sync
+  // with the SupplierLedger inside the same transaction so the running balance
+  // and its audit trail never drift apart.
+  balance     Float    @default(0)
+
   isActive    Boolean  @default(true)
-  
+
   // Relationships
   shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   products    SupplierProduct[]
   orders      PurchaseOrder[]
-  
+  ledger      SupplierLedger[]
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  
+
   @@unique([shopId, phone])
   @@index([shopId, name])
 }
@@ -705,22 +714,33 @@ model PurchaseOrder {
   subtotal    Float
   tax         Float    @default(0)
   totalAmount Float
-  
+
+  // Accounts payable for this PO.
+  //  amountReceived — cumulative cost VALUE of goods actually received so far
+  //                   (Σ qty*unitCost over receipts). This is what has been
+  //                   billed/booked as a payable; it grows on each receive and
+  //                   may end below totalAmount if some lines never arrive.
+  //  amountPaid     — cumulative amount paid to the supplier against this PO.
+  // Balance due for the PO = amountReceived - amountPaid (derived in responses).
+  amountReceived Float @default(0)
+  amountPaid     Float @default(0)
+
   // Dates
   orderDate   DateTime @default(now())
   expectedDate DateTime?
   receivedDate DateTime?
-  
+
   notes       String?
-  
+
   // Relationships
   shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   supplier    Supplier @relation(fields: [supplierId], references: [id])
   items       POItem[]
-  
+  ledger      SupplierLedger[]
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  
+
   @@index([shopId, createdAt])
   @@index([supplierId])
 }
@@ -750,6 +770,46 @@ enum POStatus {
   PARTIAL     // Partially received
   RECEIVED
   CANCELLED
+}
+
+// ==================== SUPPLIER PAYABLE (ACCOUNTS PAYABLE) ====================
+
+// Append-only ledger of every change to what the shop owes a supplier. Mirrors
+// CustomerCredit on the receivables side. A BILL is booked automatically when
+// goods are received on a purchase order (so purchases/payables are no longer
+// understated); a PAYMENT is booked when the shop pays the supplier, which is
+// how partial payments are represented. The Supplier.balance running total is
+// updated in lock-step inside the same transaction.
+model SupplierLedger {
+  id          String   @id @default(cuid())
+  shopId      String
+  supplierId  String
+
+  type        SupplierLedgerType
+  // Always the positive magnitude of the transaction. Its effect on the
+  // balance is determined by `type` (BILL/+ , PAYMENT/- , ADJUSTMENT/signed).
+  amount      Float
+  poId        String?  // Set when the entry came from receiving a purchase order
+  note        String?
+
+  // Who processed it (staff User id; null for shop-owner tokens / system)
+  userId      String?
+
+  // Relationships
+  supplier    Supplier       @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  po          PurchaseOrder? @relation(fields: [poId], references: [id], onDelete: SetNull)
+
+  createdAt   DateTime @default(now())
+
+  @@index([supplierId, createdAt])
+  @@index([shopId, createdAt])
+  @@index([poId])
+}
+
+enum SupplierLedgerType {
+  BILL        // Goods received on a PO -> we owe more (balance +)
+  PAYMENT     // We paid the supplier -> we owe less (balance -)
+  ADJUSTMENT  // Manual signed adjustment (e.g. credit note, write-off)
 }
 
 // ==================== CUSTOMER CREDIT ====================
