@@ -372,6 +372,16 @@ export const prismaFake: any = {
   returnItem: model('returnItem'),
   returnExchangeItem: model('returnExchangeItem'),
   $transaction: (arg: any) => db.transaction(arg),
+  // No-op tagged-template stub for raw SQL. The only raw statement the tested
+  // code issues is `SELECT … FOR UPDATE` to take a row lock; its RESULT is
+  // never read (existence + balance come from the ORM findFirst). The lock's
+  // mutual-exclusion is already faithfully modelled by transaction() serialising
+  // interactive callbacks one-at-a-time, so this stub correctly has no behaviour
+  // of its own. Returns [] like a Postgres SELECT with no projected rows.
+  $queryRaw: async (..._args: any[]) => [],
+  $queryRawUnsafe: async (..._args: any[]) => [],
+  $executeRaw: async (..._args: any[]) => 0,
+  $executeRawUnsafe: async (..._args: any[]) => 0,
 };
 
 export default prismaFake;

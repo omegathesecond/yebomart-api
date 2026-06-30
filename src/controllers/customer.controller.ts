@@ -6,6 +6,34 @@ import { AuthRequest } from '@middleware/auth.middleware';
 import { YeboLinkClient } from '@services/yebolink.client';
 import { evaluateCredit } from '@services/customerCredit.service';
 
+/**
+ * Thrown INSIDE the addCredit transaction when the locked re-read shows the
+ * entry would breach the credit limit. Carries the authoritative (locked)
+ * figures so the caller can build the 422 + machine-readable meta. Throwing
+ * (rather than returning) ensures the surrounding $transaction rolls back the
+ * row lock and any partial write.
+ */
+class CreditLimitExceededError extends Error {
+  constructor(
+    public readonly meta: {
+      creditLimit: number;
+      currentBalance: number;
+      attemptedBalance: number;
+    },
+  ) {
+    super('CREDIT_LIMIT_EXCEEDED');
+    this.name = 'CreditLimitExceededError';
+  }
+}
+
+/** Thrown if the customer row vanished between the existence check and the lock. */
+class CustomerGoneError extends Error {
+  constructor() {
+    super('Customer not found');
+    this.name = 'CustomerGoneError';
+  }
+}
+
 export const createCustomerSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
   phone: Joi.string().optional().trim(),
@@ -236,9 +264,15 @@ export class CustomerController {
 
       const { id } = req.params;
       const { type, amount, note, saleId, override } = req.body;
+      const { shopId } = req.user;
+      const isOwner = req.user.role === 'OWNER';
 
+      // Existence check + currency symbol for the error message. The
+      // authoritative balance/limit used for the limit decision is re-read
+      // INSIDE the transaction under a row lock (below) — the value here is NOT
+      // trusted for enforcement, only for scoping and message formatting.
       const customer = await prisma.customer.findFirst({
-        where: { id, shopId: req.user.shopId },
+        where: { id, shopId },
         include: { shop: { select: { currencySymbol: true } } },
       });
 
@@ -247,69 +281,104 @@ export class CustomerController {
         return;
       }
 
-      // Compute the signed balance change and check it against the credit limit.
-      const { balanceChange, newBalance, exceedsLimit } = evaluateCredit({
-        type,
-        amount,
-        currentBalance: customer.balance,
-        creditLimit: customer.creditLimit,
-      });
+      // The credit-limit check and the balance write MUST be atomic, or two
+      // concurrent over-limit entries can each pass the check against the same
+      // stale balance and then both increment, silently breaching the limit
+      // (TOCTOU). We re-read the balance/limit INSIDE the transaction holding a
+      // `SELECT … FOR UPDATE` row lock: the second concurrent request blocks on
+      // the lock until the first commits, then re-evaluates against the
+      // already-incremented balance and is correctly rejected.
+      let result;
+      try {
+        result = await prisma.$transaction(async (tx) => {
+          // Acquire the row lock. We don't read from this statement's result —
+          // existence was already confirmed above and we re-read the fresh
+          // balance via the ORM below; this purely serialises concurrent
+          // writers on this customer.
+          await tx.$queryRaw`SELECT 1 FROM "Customer" WHERE id = ${id} AND "shopId" = ${shopId} FOR UPDATE`;
 
-      // Reject entries that would push the customer over their credit limit,
-      // unless a shop OWNER explicitly overrides. Surface a loud, specific error
-      // so the cashier knows exactly why it was blocked (no silent fallback).
-      if (exceedsLimit) {
-        const isOwner = req.user.role === 'OWNER';
-        if (!(override === true && isOwner)) {
+          // Authoritative, post-lock read of the values the limit decision
+          // hinges on. Under the lock this reflects any concurrent entry that
+          // committed before us.
+          const locked = await tx.customer.findFirst({
+            where: { id, shopId },
+            select: { balance: true, creditLimit: true },
+          });
+          if (!locked) {
+            throw new CustomerGoneError();
+          }
+
+          const { balanceChange, newBalance, exceedsLimit } = evaluateCredit({
+            type,
+            amount,
+            currentBalance: locked.balance,
+            creditLimit: locked.creditLimit,
+          });
+
+          // Reject entries that would push the customer over their credit
+          // limit, unless a shop OWNER explicitly overrides. Throw so the whole
+          // transaction (lock + any write) rolls back; handled just below.
+          if (exceedsLimit && !(override === true && isOwner)) {
+            throw new CreditLimitExceededError({
+              creditLimit: locked.creditLimit,
+              currentBalance: locked.balance,
+              attemptedBalance: newBalance,
+            });
+          }
+
+          const credit = await tx.customerCredit.create({
+            data: {
+              shopId,
+              customerId: id,
+              type,
+              amount,
+              note,
+              saleId,
+              userId: req.user!.id,
+            },
+          });
+          const updatedCustomer = await tx.customer.update({
+            where: { id },
+            data: { balance: { increment: balanceChange } },
+          });
+
+          return { credit, newBalance: updatedCustomer.balance, balanceChange };
+        });
+      } catch (txError) {
+        // Over-limit is a loud, specific 422 (no silent fallback). Built here
+        // where `customer` (for currency/name) and `isOwner` are in scope.
+        if (txError instanceof CreditLimitExceededError) {
           const symbol = customer.shop?.currencySymbol ?? '';
           const label = CREDIT_TYPE_LABEL[type] ?? type;
           const base =
             `Credit limit exceeded: this ${label} of ${money(symbol, amount)} would raise ` +
-            `${customer.name}'s balance to ${money(symbol, newBalance)}, over their ` +
-            `${money(symbol, customer.creditLimit)} limit.`;
+            `${customer.name}'s balance to ${money(symbol, txError.meta.attemptedBalance)}, over their ` +
+            `${money(symbol, txError.meta.creditLimit)} limit.`;
           const hint = isOwner
             ? ' Re-submit with override=true to force it through.'
             : ' An owner must approve to override.';
-          // Surface the machine-readable signal via the PUBLIC code/meta
-          // channel (not the dev-only `error` arg) so the POS can detect
-          // over-limit / needs-override in production without parsing the
-          // human message.
+          // Machine-readable signal rides the PUBLIC code/meta channel (not the
+          // dev-only `error` arg) so the POS can detect over-limit /
+          // needs-override in production without parsing the human message.
           ApiResponse.error(res, base + hint, 422, undefined, {
             code: 'CREDIT_LIMIT_EXCEEDED',
             meta: {
               requiresOverride: true,
-              creditLimit: customer.creditLimit,
-              currentBalance: customer.balance,
-              attemptedBalance: newBalance,
+              creditLimit: txError.meta.creditLimit,
+              currentBalance: txError.meta.currentBalance,
+              attemptedBalance: txError.meta.attemptedBalance,
             },
           });
           return;
         }
+        if (txError instanceof CustomerGoneError) {
+          ApiResponse.notFound(res, 'Customer not found');
+          return;
+        }
+        throw txError;
       }
 
-      const [credit, updatedCustomer] = await prisma.$transaction([
-        prisma.customerCredit.create({
-          data: {
-            shopId: req.user.shopId,
-            customerId: id,
-            type,
-            amount,
-            note,
-            saleId,
-            userId: req.user.id,
-          },
-        }),
-        prisma.customer.update({
-          where: { id },
-          data: { balance: { increment: balanceChange } },
-        }),
-      ]);
-
-      ApiResponse.success(
-        res,
-        { credit, newBalance: updatedCustomer.balance, balanceChange },
-        'Credit entry added',
-      );
+      ApiResponse.success(res, result, 'Credit entry added');
     } catch (error: any) {
       ApiResponse.badRequest(res, error.message);
     }

@@ -124,6 +124,53 @@ describe('CustomerController.addCredit — credit limit enforcement (bug #1)', (
   });
 });
 
+describe('CustomerController.addCredit — concurrent over-limit entries (TOCTOU)', () => {
+  // Two credit sales that each pass the limit check against the SAME stale
+  // balance must not BOTH commit and push the customer over the limit. The
+  // limit is re-evaluated inside the row-locked transaction, so the second
+  // writer sees the first's committed balance and is rejected.
+  it('rejects the second of two concurrent PURCHASEs that would jointly breach the limit', async () => {
+    const customer = seedCustomer({ balance: 50, creditLimit: 100 });
+    const resA = mockRes();
+    const resB = mockRes();
+
+    // Fire both before awaiting either — they both read the stale balance (50)
+    // outside the transaction, exactly as concurrent requests would.
+    await Promise.all([
+      CustomerController.addCredit(reqFor(customer.id, { type: 'PURCHASE', amount: 40 }), resA),
+      CustomerController.addCredit(reqFor(customer.id, { type: 'PURCHASE', amount: 40 }), resB),
+    ]);
+
+    // Exactly one succeeded; the other was blocked at the limit.
+    const statuses = [resA.statusCode, resB.statusCode].sort();
+    expect(statuses).toEqual([200, 422]);
+
+    // The over-limit one carries the machine-readable signal.
+    const rejected = resA.statusCode === 422 ? resA : resB;
+    expect(rejected.body.code).toBe('CREDIT_LIMIT_EXCEEDED');
+
+    // Only ONE entry committed — the balance never breached the limit.
+    expect(table('customer')[0].balance).toBe(90);
+    expect(table('customerCredit')).toHaveLength(1);
+  });
+
+  it('lets both concurrent PURCHASEs through when they jointly stay within the limit', async () => {
+    const customer = seedCustomer({ balance: 0, creditLimit: 100 });
+    const resA = mockRes();
+    const resB = mockRes();
+
+    await Promise.all([
+      CustomerController.addCredit(reqFor(customer.id, { type: 'PURCHASE', amount: 30 }), resA),
+      CustomerController.addCredit(reqFor(customer.id, { type: 'PURCHASE', amount: 30 }), resB),
+    ]);
+
+    expect(resA.statusCode).toBe(200);
+    expect(resB.statusCode).toBe(200);
+    expect(table('customer')[0].balance).toBe(60);
+    expect(table('customerCredit')).toHaveLength(2);
+  });
+});
+
 describe('CustomerController.addCredit — machine-readable signal survives production', () => {
   const originalEnv = process.env.NODE_ENV;
   afterEach(() => {
