@@ -39,7 +39,10 @@ type ModelName =
   | 'purchaseOrder'
   | 'pOItem'
   | 'supplierLedger'
-  | 'cashSession';
+  | 'cashSession'
+  | 'return'
+  | 'returnItem'
+  | 'returnExchangeItem';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -59,6 +62,9 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   pOItem: [],
   supplierLedger: [],
   cashSession: [],
+  return: [],
+  returnItem: [],
+  returnExchangeItem: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -66,6 +72,7 @@ const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
   sale: { items: 'saleItem' },
   customer: { credits: 'customerCredit' },
   purchaseOrder: { items: 'pOItem' },
+  return: { items: 'returnItem', exchangeItems: 'returnExchangeItem' },
 };
 
 // Belongs-to (parent) relation field -> [parent model, FK field on this row].
@@ -123,6 +130,9 @@ class FakeDb {
     pOItem: [],
     supplierLedger: [],
     cashSession: [],
+    return: [],
+    returnItem: [],
+    returnExchangeItem: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -387,6 +397,9 @@ export const prismaFake: any = {
   pOItem: model('pOItem'),
   supplierLedger: model('supplierLedger'),
   cashSession: model('cashSession'),
+  return: model('return'),
+  returnItem: model('returnItem'),
+  returnExchangeItem: model('returnExchangeItem'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
