@@ -34,7 +34,11 @@ type ModelName =
   | 'customer'
   | 'customerCredit'
   | 'user'
-  | 'admin';
+  | 'admin'
+  | 'supplier'
+  | 'purchaseOrder'
+  | 'pOItem'
+  | 'supplierLedger';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -49,12 +53,17 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   customerCredit: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
+  supplier: [['shopId', 'phone']],
+  purchaseOrder: [],
+  pOItem: [],
+  supplierLedger: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
 const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
   sale: { items: 'saleItem' },
   customer: { credits: 'customerCredit' },
+  purchaseOrder: { items: 'pOItem' },
 };
 
 // Belongs-to (parent) relation field -> [parent model, FK field on this row].
@@ -62,6 +71,7 @@ const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
 // row carries a FK (e.g. Sale.shopId) pointing at the parent's id.
 const PARENT_RELATIONS: Partial<Record<ModelName, Record<string, [ModelName, string]>>> = {
   sale: { shop: ['shop', 'shopId'], customer: ['customer', 'customerId'] },
+  purchaseOrder: { shop: ['shop', 'shopId'], supplier: ['supplier', 'supplierId'] },
 };
 
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
@@ -106,6 +116,10 @@ class FakeDb {
     customerCredit: [],
     user: [],
     admin: [],
+    supplier: [],
+    purchaseOrder: [],
+    pOItem: [],
+    supplierLedger: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -340,6 +354,10 @@ export const prismaFake: any = {
   customerCredit: model('customerCredit'),
   user: model('user'),
   admin: model('admin'),
+  supplier: model('supplier'),
+  purchaseOrder: model('purchaseOrder'),
+  pOItem: model('pOItem'),
+  supplierLedger: model('supplierLedger'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -420,6 +438,44 @@ export function seedAdmin(partial: Partial<Row> = {}): Row {
     isActive: true,
     updatedAt: new Date(),
     ...partial,
+  });
+}
+
+// Seed a Supplier. `balance` defaults to 0 (positive = we owe them).
+export function seedSupplier(partial: Partial<Row> = {}): Row {
+  return db.createOne('supplier', {
+    shopId: 'shop_1',
+    name: 'Test Supplier',
+    phone: partial.phone ?? null,
+    currency: 'SZL',
+    balance: 0,
+    isActive: true,
+    updatedAt: new Date(),
+    ...partial,
+  });
+}
+
+// Seed a PurchaseOrder, optionally with line items. Pass `items: [{ productId,
+// productName, quantity, unitCost, totalCost, receivedQty? }]`.
+let poSeq = 0;
+export function seedPurchaseOrder(partial: Partial<Row> = {}): Row {
+  const { items, ...rest } = partial;
+  const subtotal =
+    rest.subtotal ??
+    (items ? items.reduce((s: number, i: Row) => s + (i.totalCost ?? i.quantity * i.unitCost), 0) : 0);
+  return db.createOne('purchaseOrder', {
+    shopId: 'shop_1',
+    supplierId: 'supplier_1',
+    orderNumber: `PO-${++poSeq}`,
+    status: 'SENT',
+    subtotal,
+    tax: 0,
+    totalAmount: subtotal,
+    amountReceived: 0,
+    amountPaid: 0,
+    updatedAt: new Date(),
+    ...(items ? { items: { create: items } } : {}),
+    ...rest,
   });
 }
 
