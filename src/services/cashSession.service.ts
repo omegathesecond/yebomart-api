@@ -26,10 +26,19 @@ interface CloseSessionInput {
  */
 export class CashSessionService {
   /**
-   * Sum of cash taken during a session: COMPLETED sales paid with CASH for this
-   * shop since the session opened. We match on createdAt >= openedAt rather than
-   * cashSessionId alone so that a sale rung up in the tiny window before its
-   * cashSessionId was attached (or an offline sale synced late) still counts.
+   * Cash actually taken into the drawer during a session: COMPLETED sales paid
+   * with CASH for this shop since the session opened. We match on
+   * createdAt >= openedAt rather than cashSessionId alone so that a sale rung up
+   * in the tiny window before its cashSessionId was attached (or an offline sale
+   * synced late) still counts.
+   *
+   * The physical cash that lands in the till per sale is the customer's cash
+   * TENDERED (Sale.amountPaid) minus the CHANGE handed back (Sale.change), which
+   * by definition equals the sale total. We derive the expected drawer from the
+   * persisted tendered/change (rather than just summing totalAmount) so the
+   * cash-up can surface the real tendered-vs-change breakdown and reconcile
+   * over/short against what the cashier actually counted out. Legacy rows have
+   * change = 0 and amountPaid = total, so net is unchanged for them.
    */
   private static async cashSalesTotal(shopId: string, openedAt: Date, closedAt?: Date | null) {
     const createdAt: Prisma.DateTimeFilter = { gte: openedAt };
@@ -42,12 +51,18 @@ export class CashSessionService {
         paymentMethod: 'CASH',
         createdAt,
       },
-      _sum: { totalAmount: true },
+      _sum: { amountPaid: true, change: true },
       _count: true,
     });
 
+    const tendered = agg._sum.amountPaid ?? 0;
+    const change = agg._sum.change ?? 0;
+
     return {
-      total: agg._sum.totalAmount ?? 0,
+      // Net cash that should be in the drawer for these sales = tendered − change.
+      net: tendered - change,
+      tendered,
+      change,
       count: agg._count,
     };
   }
@@ -96,10 +111,13 @@ export class CashSessionService {
 
     return {
       ...session,
-      cashSalesTotal: cashSales.total,
+      cashSalesTotal: cashSales.net,
       cashSalesCount: cashSales.count,
-      // Live expected drawer = float + cash taken so far.
-      expectedCash: session.openingFloat + cashSales.total,
+      // Tendered/change tally so the POS can show the drawer breakdown live.
+      cashTendered: cashSales.tendered,
+      cashChangeGiven: cashSales.change,
+      // Live expected drawer = float + net cash taken so far.
+      expectedCash: session.openingFloat + cashSales.net,
     };
   }
 
@@ -138,7 +156,7 @@ export class CashSessionService {
 
     const now = new Date();
     const cashSales = await this.cashSalesTotal(input.shopId, session.openedAt, now);
-    const expectedCash = session.openingFloat + cashSales.total;
+    const expectedCash = session.openingFloat + cashSales.net;
     const variance = input.countedCash - expectedCash;
 
     return prisma.$transaction(async (tx) => {
@@ -182,6 +200,9 @@ export class CashSessionService {
     const windowEnd = session.closedAt ?? new Date();
     const createdAt: Prisma.DateTimeFilter = { gte: session.openedAt, lte: windowEnd };
 
+    // Cash-drawer tally for this window — tendered in, change out, net retained.
+    const cashDrawer = await this.cashSalesTotal(shopId, session.openedAt, windowEnd);
+
     const [byMethod, totals] = await Promise.all([
       prisma.sale.groupBy({
         by: ['paymentMethod'],
@@ -213,6 +234,14 @@ export class CashSessionService {
         cashier: session.user,
       },
       shop: session.shop,
+      // Cash drawer reconciliation tally: how much cash customers handed over
+      // (tendered), how much change was given back, and the net retained in the
+      // till — the figure expectedCash is built from.
+      cashDrawer: {
+        tendered: cashDrawer.tendered,
+        changeGiven: cashDrawer.change,
+        netCash: cashDrawer.net,
+      },
       transactionCount: totals._count,
       // Gross = sum of totalAmount (which already nets line discounts/sale
       // discount). Net here = gross − sale-level discounts removed at header.

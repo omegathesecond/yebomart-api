@@ -38,7 +38,8 @@ type ModelName =
   | 'supplier'
   | 'purchaseOrder'
   | 'pOItem'
-  | 'supplierLedger';
+  | 'supplierLedger'
+  | 'cashSession';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -57,6 +58,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   purchaseOrder: [],
   pOItem: [],
   supplierLedger: [],
+  cashSession: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -120,6 +122,7 @@ class FakeDb {
     purchaseOrder: [],
     pOItem: [],
     supplierLedger: [],
+    cashSession: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -247,6 +250,30 @@ class FakeDb {
     return this.tables[model].filter((r) => matchesWhere(r, args.where)).length;
   }
 
+  // Minimal Prisma `aggregate` — supports _count plus _sum/_avg over the
+  // matched rows. Mirrors Prisma's "null for an empty set" behaviour on _sum/_avg
+  // so callers' `?? 0` coalescing is exercised the same way it is against the DB.
+  aggregate(model: ModelName, args: Row = {}): Row {
+    const rows = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    const out: Row = {};
+    if (args._count !== undefined) out._count = rows.length;
+    const reduceField = (field: string) =>
+      rows.reduce((s, r) => s + (typeof r[field] === 'number' ? r[field] : 0), 0);
+    if (args._sum) {
+      out._sum = {};
+      for (const field of Object.keys(args._sum)) {
+        out._sum[field] = rows.length ? reduceField(field) : null;
+      }
+    }
+    if (args._avg) {
+      out._avg = {};
+      for (const field of Object.keys(args._avg)) {
+        out._avg[field] = rows.length ? reduceField(field) / rows.length : null;
+      }
+    }
+    return out;
+  }
+
   // Apply a Prisma `data` payload to a row, honouring the atomic field
   // operators the services rely on ({ increment }, { decrement }, { set }).
   // These matter for correctness: the real overselling fix uses
@@ -333,6 +360,7 @@ function model(name: ModelName) {
     findUnique: async (args?: Row) => db.findUnique(name, args),
     findMany: async (args?: Row) => db.findMany(name, args),
     count: async (args?: Row) => db.count(name, args),
+    aggregate: async (args?: Row) => db.aggregate(name, args),
     create: async (args: Row) =>
       db.includeOn(name, db.createOne(name, args.data), args.include),
     update: async (args: Row) => db.update(name, args),
@@ -358,6 +386,7 @@ export const prismaFake: any = {
   purchaseOrder: model('purchaseOrder'),
   pOItem: model('pOItem'),
   supplierLedger: model('supplierLedger'),
+  cashSession: model('cashSession'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -476,6 +505,20 @@ export function seedPurchaseOrder(partial: Partial<Row> = {}): Row {
     updatedAt: new Date(),
     ...(items ? { items: { create: items } } : {}),
     ...rest,
+  });
+}
+
+// Seed an OPEN cash session. `openedAt` defaults to an hour ago so sales seeded
+// "now" fall inside the session window (cashSalesTotal matches createdAt >= openedAt).
+export function seedCashSession(partial: Partial<Row> = {}): Row {
+  return db.createOne('cashSession', {
+    shopId: 'shop_1',
+    userId: null,
+    openingFloat: 100,
+    openedAt: new Date(Date.now() - 60 * 60 * 1000),
+    status: 'OPEN',
+    updatedAt: new Date(),
+    ...partial,
   });
 }
 
