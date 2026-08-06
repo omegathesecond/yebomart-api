@@ -4,6 +4,7 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
+import { creditBalanceChange } from './customerCredit.service';
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -467,15 +468,24 @@ export class SaleService {
         },
       });
 
-      // Reverse customer debt for a CREDIT (pay-later) sale. The create path
-      // recorded a PURCHASE entry (+totalAmount on Customer.balance); voiding
-      // returns the goods, so the customer must no longer owe for them. We
-      // append a reversing REFUND ledger entry (creditBalanceChange maps REFUND
-      // to -amount) and decrement the balance by the same total, inside this
-      // transaction. Guard on paymentMethod === 'CREDIT' AND a customerId: a
-      // cash sale merely *attached* to a customer (purchase history) incurred no
-      // debt and must not be touched. Double-reversal is impossible because the
-      // void only runs when status was COMPLETED, which this flips to VOIDED.
+      // Reverse customer debt for a CREDIT (pay-later) sale. The sale recorded a
+      // PURCHASE entry (+totalAmount on Customer.balance); voiding returns the
+      // goods, so the customer must no longer owe for them. We append a
+      // reversing REFUND ledger entry and apply its signed balance change in
+      // this same transaction, so the ledger and the balance can never drift.
+      //
+      // The sign comes from `creditBalanceChange` — the single source of truth
+      // for CreditType -> balance effect (REFUND => -amount), shared with
+      // customer.controller's manual-entry path. Never hardcode the direction
+      // here: if that rule ever changes, void must change with it.
+      //
+      // No credit-limit check: `evaluateCredit` only blocks entries that RAISE
+      // debt, and a REFUND always lowers it, so a void can never be rejected.
+      //
+      // Guard on paymentMethod === 'CREDIT' AND a customerId: a cash sale merely
+      // *attached* to a customer (purchase history) incurred no debt and must
+      // not be touched. Double-reversal is impossible because the void only runs
+      // when status was COMPLETED, which this flips to VOIDED.
       if (sale.paymentMethod === 'CREDIT' && sale.customerId) {
         await tx.customerCredit.create({
           data: {
@@ -490,7 +500,7 @@ export class SaleService {
         });
         await tx.customer.update({
           where: { id: sale.customerId },
-          data: { balance: { decrement: sale.totalAmount } },
+          data: { balance: { increment: creditBalanceChange('REFUND', sale.totalAmount) } },
         });
       }
 
