@@ -27,13 +27,15 @@ vi.mock('./yebopay.client', async (importOriginal) => {
       chargeWallet: vi.fn(),
       createCheckout: vi.fn(),
       getCheckout: vi.fn(),
+      getWalletTransactions: vi.fn(),
+      adjustWallet: vi.fn(),
     },
   };
 });
 
 import { BillingService } from './billing.service';
-import { YeboPayClient, YeboPayChargeError } from './yebopay.client';
-import { resetDb, seedShop } from '../test/prismaFake';
+import { YeboPayClient, YeboPayChargeError, YeboPayAdjustmentError } from './yebopay.client';
+import { resetDb, seedShop, table } from '../test/prismaFake';
 
 let shopId: string;
 const OWNER_SUB = '11111111-1111-1111-1111-111111111111';
@@ -171,5 +173,173 @@ describe('BillingService.createTopUpCheckout', () => {
       })
     ).rejects.toThrow(/Unknown credit pack/);
     expect(YeboPayClient.createCheckout).not.toHaveBeenCalled();
+  });
+});
+
+// ── Admin credit adjustments ────────────────────────────────────────────────
+//
+// The audit guarantee under test: EVERY adjustment attempt leaves a durable
+// local row naming the admin and the reason — including attempts that fail.
+// An audit trail that erases its own failures isn't an audit trail, and a
+// failed top-up fix that vanishes is exactly the ticket nobody can resolve.
+
+const ADMIN = { adminId: 'admin_1', adminEmail: 'ops@yebomart.com' };
+
+function adjustmentResult(over: Record<string, any> = {}) {
+  return {
+    replayed: false,
+    transaction: { id: 'ctx_1', amount: 100, balance_after: 150 },
+    balance: { available: 150, frozen: 0, total: 150, currency: 'SZL' },
+    ...over,
+  };
+}
+
+describe('BillingService.adjustShopCredits', () => {
+  it('writes the audit row BEFORE calling yebopay and passes its id as external_ref', async () => {
+    (YeboPayClient.adjustWallet as any).mockResolvedValue(adjustmentResult());
+
+    await BillingService.adjustShopCredits({
+      shopId,
+      amount: 100,
+      type: 'GOODWILL',
+      reason: 'Apology for the 3 Aug outage',
+      ...ADMIN,
+    });
+
+    const rows = table('creditAdjustment');
+    expect(rows).toHaveLength(1);
+    // external_ref MUST be the local row id — that's what makes a retry after a
+    // network timeout replay yebopay's row instead of crediting twice.
+    expect(YeboPayClient.adjustWallet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        yeboidSub: OWNER_SUB,
+        amount: 100,
+        reason: 'Apology for the 3 Aug outage',
+        actor: 'ops@yebomart.com',
+        externalRef: rows[0]!.id,
+      })
+    );
+  });
+
+  it('marks the row APPLIED with the yebopay txn id and resulting balance', async () => {
+    (YeboPayClient.adjustWallet as any).mockResolvedValue(adjustmentResult());
+
+    const res = await BillingService.adjustShopCredits({
+      shopId,
+      amount: 100,
+      type: 'GOODWILL',
+      reason: 'Goodwill credit',
+      ...ADMIN,
+    });
+
+    expect(res.adjustment.status).toBe('APPLIED');
+    expect(res.adjustment.yebopayTxnId).toBe('ctx_1');
+    expect(res.adjustment.balanceAfter).toBe(150);
+    expect(res.balance.available).toBe(150);
+    expect(table('creditAdjustment')[0]!.status).toBe('APPLIED');
+  });
+
+  it('preserves the SIGN so a negative amount claws credits back', async () => {
+    (YeboPayClient.adjustWallet as any).mockResolvedValue(adjustmentResult());
+
+    await BillingService.adjustShopCredits({
+      shopId,
+      amount: -40,
+      type: 'CORRECTION',
+      reason: 'Reversing credits granted in error',
+      ...ADMIN,
+    });
+
+    expect(YeboPayClient.adjustWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: -40 })
+    );
+    expect(table('creditAdjustment')[0]!.amount).toBe(-40);
+  });
+
+  it('marks the row FAILED (keeping it) and RETHROWS when yebopay rejects', async () => {
+    (YeboPayClient.adjustWallet as any).mockRejectedValue(
+      new YeboPayAdjustmentError(409, 'Cannot debit 500 — wallet holds only 12', 'INSUFFICIENT_BALANCE')
+    );
+
+    await expect(
+      BillingService.adjustShopCredits({
+        shopId,
+        amount: -500,
+        type: 'CORRECTION',
+        reason: 'Clawback',
+        ...ADMIN,
+      })
+    ).rejects.toBeInstanceOf(YeboPayAdjustmentError);
+
+    // The row survives, flagged, with the reason — never deleted, never APPLIED.
+    const rows = table('creditAdjustment');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('FAILED');
+    expect(rows[0]!.failureReason).toContain('INSUFFICIENT_BALANCE');
+    // No balance was recorded because the wallet never moved. (`?? null` because
+    // the in-memory fake omits unset columns where Postgres stores NULL.)
+    expect(rows[0]!.balanceAfter ?? null).toBeNull();
+  });
+
+  it('marks the row FAILED and rethrows on a transport error too (no silent success)', async () => {
+    (YeboPayClient.adjustWallet as any).mockRejectedValue(new Error('fetch failed'));
+
+    await expect(
+      BillingService.adjustShopCredits({
+        shopId, amount: 10, type: 'REFUND', reason: 'Re-issue failed top-up', ...ADMIN,
+      })
+    ).rejects.toThrow(/fetch failed/);
+
+    expect(table('creditAdjustment')[0]!.status).toBe('FAILED');
+    expect(table('creditAdjustment')[0]!.failureReason).toContain('fetch failed');
+  });
+
+  it('records WHO authorised it, so the adjustment is attributable', async () => {
+    (YeboPayClient.adjustWallet as any).mockResolvedValue(adjustmentResult());
+
+    await BillingService.adjustShopCredits({
+      shopId, amount: 25, type: 'GOODWILL', reason: 'Support gesture', ...ADMIN,
+    });
+
+    expect(table('creditAdjustment')[0]).toMatchObject({
+      adminId: 'admin_1',
+      adminEmail: 'ops@yebomart.com',
+      reason: 'Support gesture',
+      type: 'GOODWILL',
+    });
+  });
+});
+
+describe('BillingService.getShopLedger / getShopAdjustments', () => {
+  it('fetches the ledger keyed on the owner yeboid sub, forwarding pagination', async () => {
+    (YeboPayClient.getWalletTransactions as any).mockResolvedValue({
+      transactions: [], total: 0, limit: 25, offset: 50,
+    });
+
+    await BillingService.getShopLedger(shopId, { limit: 25, offset: 50 });
+
+    expect(YeboPayClient.getWalletTransactions).toHaveBeenCalledWith(OWNER_SUB, {
+      limit: 25, offset: 50,
+    });
+  });
+
+  it('propagates a ledger failure rather than returning an empty list', async () => {
+    (YeboPayClient.getWalletTransactions as any).mockRejectedValue(
+      new Error('YeboPay GET /wallet/v1/transactions 503: upstream down')
+    );
+
+    // An empty ledger and an unreachable ledger must never look the same.
+    await expect(BillingService.getShopLedger(shopId)).rejects.toThrow(/503/);
+  });
+
+  it('returns local adjustments newest-first', async () => {
+    const { seedCreditAdjustment } = await import('../test/prismaFake');
+    seedCreditAdjustment({ shopId, reason: 'older', createdAt: new Date('2026-01-01') });
+    seedCreditAdjustment({ shopId, reason: 'newer', createdAt: new Date('2026-06-01') });
+    seedCreditAdjustment({ shopId: 'other_shop', reason: 'other shop', createdAt: new Date('2026-07-01') });
+
+    const rows = await BillingService.getShopAdjustments(shopId);
+
+    expect(rows.map((r: any) => r.reason)).toEqual(['newer', 'older']);
   });
 });

@@ -85,6 +85,7 @@ model Shop {
   suppliers     Supplier[]
   purchaseOrders PurchaseOrder[]
   cashSessions  CashSession[]
+  creditAdjustments CreditAdjustment[]
 
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -887,4 +888,66 @@ enum AdminRole {
   SUPER_ADMIN
   ADMIN
   SUPPORT
+}
+
+// ==================== ADMIN CREDIT ADJUSTMENTS ====================
+
+// Audit trail for manual, operator-initiated changes to a shop's credit
+// balance. The MONEY itself lives in yebopay's wallet (yebomart holds no
+// balance column — see the Shop model's status comment); this table records
+// the yebomart-side facts yebopay cannot know: WHICH admin authorised it and
+// WHY, plus whether the remote call actually landed.
+//
+// Why a local table rather than relying on yebopay's ledger alone:
+//   1. yebopay's CreditTransaction has no notion of a yebomart Admin, so
+//      "who did this" would otherwise be unanswerable.
+//   2. The row is written BEFORE the yebopay call and its id is sent as
+//      external_ref. That makes the remote adjustment idempotent — a retry
+//      after a timeout replays yebopay's existing row instead of double
+//      crediting — and leaves a FAILED row behind when the call never landed,
+//      which is exactly the evidence a billing ticket needs.
+//
+// adminId/adminEmail are denormalised on purpose (no FK to Admin): an audit
+// record must survive the deletion or renaming of the admin who created it.
+model CreditAdjustment {
+  id          String   @id @default(cuid())
+  shopId      String
+
+  // Signed, in credits (1 credit = E1). Positive = granted to the shop,
+  // negative = clawed back. Never zero.
+  amount      Float
+  type        CreditAdjustmentType
+  reason      String
+  status      CreditAdjustmentStatus @default(PENDING)
+
+  // Who authorised it. Denormalised — see note above.
+  adminId     String
+  adminEmail  String
+
+  // Set once yebopay confirms. balanceAfter is yebopay's authoritative balance
+  // at the moment the adjustment landed, kept for reconciliation.
+  yebopayTxnId  String?
+  balanceAfter  Float?
+  // Populated when status=FAILED, so an operator can see why it didn't land.
+  failureReason String?
+
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([shopId, createdAt])
+  @@index([status])
+}
+
+enum CreditAdjustmentType {
+  GOODWILL    // Discretionary credit (e.g. apology after an outage)
+  REFUND      // Re-issuing credits for a top-up that was paid but never landed
+  CORRECTION  // Fixing an over- or under-credit; signed either way
+}
+
+enum CreditAdjustmentStatus {
+  PENDING   // Local row written, yebopay call not yet confirmed
+  APPLIED   // yebopay confirmed the wallet moved
+  FAILED    // yebopay rejected or was unreachable; balance did NOT change
 }

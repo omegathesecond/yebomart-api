@@ -1,6 +1,7 @@
 import { prisma } from '@config/prisma';
-import { YeboPayClient, YeboPayChargeError } from './yebopay.client';
+import { YeboPayClient, YeboPayChargeError, YeboPayAdjustmentError } from './yebopay.client';
 import { CREDIT_PACKS, findPack, type CreditPack } from '@config/creditPacks';
+import type { CreditAdjustmentType } from '@prisma/client';
 
 /**
  * Get the shop owner's YeboID UUID. This is what yebopay keys wallets on,
@@ -55,6 +56,114 @@ export class BillingService {
       description: opts.description,
       idempotencyKey: opts.idempotencyKey,
       metadata: { shopId: opts.shopId, ...(opts.metadata ?? {}) },
+    });
+  }
+
+  /**
+   * The shop's wallet ledger — the rows behind the balance. Support needs this
+   * to answer "where did my credits go" and "did my top-up land".
+   * Errors propagate (no silent fallback).
+   */
+  static async getShopLedger(
+    shopId: string,
+    opts: { limit?: number; offset?: number } = {}
+  ) {
+    const yeboidSub = await getShopOwnerYeboidSub(shopId);
+    return YeboPayClient.getWalletTransactions(yeboidSub, opts);
+  }
+
+  /**
+   * Apply a manual, admin-authorised credit adjustment to a shop's wallet.
+   *
+   * Two-phase on purpose:
+   *   1. Write the local CreditAdjustment row FIRST, status=PENDING. Its id is
+   *      then passed to yebopay as `external_ref`.
+   *   2. Call yebopay. On success mark APPLIED and record the ledger txn id +
+   *      resulting balance; on failure mark FAILED with the reason and rethrow.
+   *
+   * Phase 1 before phase 2 is what makes this safe to retry: the external_ref
+   * is stable, so if the network drops after yebopay committed, a retry replays
+   * the same ledger row rather than crediting twice. It also means a call that
+   * never landed leaves a FAILED row behind — visible evidence for the ticket,
+   * instead of a silent no-op.
+   *
+   * NOTE: the local row is never deleted on failure. An audit trail that erases
+   * its own failed attempts isn't an audit trail.
+   */
+  static async adjustShopCredits(opts: {
+    shopId: string;
+    /** SIGNED: positive grants credits, negative claws them back. Never zero. */
+    amount: number;
+    type: CreditAdjustmentType;
+    reason: string;
+    adminId: string;
+    adminEmail: string;
+  }) {
+    const yeboidSub = await getShopOwnerYeboidSub(opts.shopId);
+
+    const adjustment = await prisma.creditAdjustment.create({
+      data: {
+        shopId: opts.shopId,
+        amount: opts.amount,
+        type: opts.type,
+        reason: opts.reason,
+        adminId: opts.adminId,
+        adminEmail: opts.adminEmail,
+        status: 'PENDING',
+      },
+    });
+
+    try {
+      const result = await YeboPayClient.adjustWallet({
+        yeboidSub,
+        amount: opts.amount,
+        reason: opts.reason,
+        actor: opts.adminEmail,
+        externalRef: adjustment.id,
+        metadata: {
+          shopId: opts.shopId,
+          adjustmentId: adjustment.id,
+          adjustmentType: opts.type,
+        },
+      });
+
+      const applied = await prisma.creditAdjustment.update({
+        where: { id: adjustment.id },
+        data: {
+          status: 'APPLIED',
+          yebopayTxnId: result.transaction.id,
+          balanceAfter: result.balance.available,
+        },
+      });
+
+      return { adjustment: applied, balance: result.balance, replayed: result.replayed };
+    } catch (error: any) {
+      const failureReason =
+        error instanceof YeboPayAdjustmentError
+          ? `${error.code}: ${error.message}`
+          : error?.message || 'Unknown error calling yebopay';
+
+      // Record the failure, then rethrow — the operator must SEE that the
+      // balance did not move, never be told it worked.
+      await prisma.creditAdjustment.update({
+        where: { id: adjustment.id },
+        data: { status: 'FAILED', failureReason },
+      });
+
+      console.error(
+        `[Billing] Credit adjustment ${adjustment.id} FAILED for shop ${opts.shopId}:`,
+        failureReason
+      );
+      throw error;
+    }
+  }
+
+  /** Local audit history of admin adjustments for a shop, newest first. */
+  static async getShopAdjustments(shopId: string, opts: { limit?: number } = {}) {
+    return prisma.creditAdjustment.findMany({
+      where: { shopId },
+      orderBy: { createdAt: 'desc' },
+      take: opts.limit ?? 50,
     });
   }
 

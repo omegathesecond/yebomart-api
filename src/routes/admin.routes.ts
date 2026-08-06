@@ -5,8 +5,13 @@ import {
   adminUpdateProfileSchema,
   adminChangePasswordSchema,
 } from '@controllers/admin.controller';
-import { validateRequest } from '@middleware/validation.middleware';
-import { authenticateAdmin, requireSuperAdmin } from '@middleware/auth.middleware';
+import {
+  AdminBillingController,
+  adjustCreditsSchema,
+  billingQuerySchema,
+} from '@controllers/adminBilling.controller';
+import { validateRequest, validateQuery } from '@middleware/validation.middleware';
+import { authenticateAdmin, requireSuperAdmin, requireAdminWrite } from '@middleware/auth.middleware';
 
 const router = Router();
 
@@ -29,6 +34,20 @@ router.get('/shops/:id', AdminController.getShop);
 // SUPPORT/ADMIN token must not be able to trigger it.
 router.patch('/shops/:id/status', requireSuperAdmin, AdminController.updateShopStatus);
 router.delete('/shops/:id', requireSuperAdmin, AdminController.deleteShop);
+
+// Billing — a shop's credit wallet (balance + yebopay ledger + local audit).
+// READ is open to every admin role, SUPPORT included: making billing tickets
+// actionable is the entire point, and support staff are the ones fielding them.
+router.get('/shops/:id/billing', validateQuery(billingQuerySchema), AdminBillingController.getShopBilling);
+// WRITE moves real money, so SUPPORT is excluded (requireAdminWrite =
+// SUPER_ADMIN or ADMIN). Not requireSuperAdmin: a goodwill credit is routine
+// operational work, not a destructive cross-tenant action like delete/suspend.
+router.post(
+  '/shops/:id/billing/adjust',
+  requireAdminWrite,
+  validateRequest(adjustCreditsSchema),
+  AdminBillingController.adjustShopCredits
+);
 router.get('/users', AdminController.getUsers);
 router.get('/users/:id', AdminController.getUserDetail);
 // Backwards-compat alias: this used to return tier breakdown; now returns

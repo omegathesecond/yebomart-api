@@ -41,7 +41,8 @@ type ModelName =
   | 'supplierLedger'
   | 'return'
   | 'returnItem'
-  | 'returnExchangeItem';
+  | 'returnExchangeItem'
+  | 'creditAdjustment';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -63,6 +64,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   return: [],
   returnItem: [],
   returnExchangeItem: [],
+  creditAdjustment: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -112,6 +114,33 @@ function project(rec: Row, select: Row | undefined): Row {
   return out;
 }
 
+// Sort rows the way Prisma's `orderBy` would. Accepts a single
+// `{ field: 'asc'|'desc' }` or an array of them (applied left to right, the
+// first non-equal comparison wins). Unknown/undefined values sort last on asc.
+function applyOrderBy(rows: Row[], orderBy: Row | Row[] | undefined): Row[] {
+  if (!orderBy) return rows;
+  const clauses = (Array.isArray(orderBy) ? orderBy : [orderBy]).flatMap((o) =>
+    Object.entries(o).map(([field, dir]) => ({ field, desc: dir === 'desc' }))
+  );
+  if (clauses.length === 0) return rows;
+
+  // Copy first — Array.prototype.sort mutates, and these are the live table rows.
+  return [...rows].sort((a, b) => {
+    for (const { field, desc } of clauses) {
+      const av = a[field];
+      const bv = b[field];
+      if (av === bv) continue;
+      if (av === undefined || av === null) return 1;
+      if (bv === undefined || bv === null) return -1;
+      const cmp = av instanceof Date && bv instanceof Date
+        ? av.getTime() - bv.getTime()
+        : av < bv ? -1 : 1;
+      if (cmp !== 0) return desc ? -cmp : cmp;
+    }
+    return 0;
+  });
+}
+
 class FakeDb {
   private tables: Record<ModelName, Row[]> = {
     shop: [],
@@ -130,6 +159,7 @@ class FakeDb {
     return: [],
     returnItem: [],
     returnExchangeItem: [],
+    creditAdjustment: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -246,6 +276,10 @@ class FakeDb {
 
   findMany(model: ModelName, args: Row = {}): Row[] {
     let out = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    // orderBy MUST be applied before skip/take — same as SQL, where ORDER BY
+    // precedes OFFSET/LIMIT. Sorting the page instead of the result set would
+    // let a paginated "newest first" query silently return the wrong rows.
+    out = applyOrderBy(out, args.orderBy);
     if (typeof args.skip === 'number') out = out.slice(args.skip);
     if (typeof args.take === 'number') out = out.slice(0, args.take);
     return out.map((r) =>
@@ -371,6 +405,7 @@ export const prismaFake: any = {
   return: model('return'),
   returnItem: model('returnItem'),
   returnExchangeItem: model('returnExchangeItem'),
+  creditAdjustment: model('creditAdjustment'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -449,6 +484,26 @@ export function seedAdmin(partial: Partial<Row> = {}): Row {
     name: 'Test Admin',
     role: 'ADMIN',
     isActive: true,
+    updatedAt: new Date(),
+    ...partial,
+  });
+}
+
+// Seed a CreditAdjustment (the admin credit-adjustment audit row). `amount` is
+// SIGNED — positive granted, negative clawed back. Pass an explicit `createdAt`
+// when a test asserts newest-first ordering.
+export function seedCreditAdjustment(partial: Partial<Row> = {}): Row {
+  return db.createOne('creditAdjustment', {
+    shopId: 'shop_1',
+    amount: 100,
+    type: 'GOODWILL',
+    reason: 'Test adjustment',
+    status: 'APPLIED',
+    adminId: 'admin_1',
+    adminEmail: 'ops@yebomart.com',
+    yebopayTxnId: null,
+    balanceAfter: null,
+    failureReason: null,
     updatedAt: new Date(),
     ...partial,
   });

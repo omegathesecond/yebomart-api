@@ -74,6 +74,66 @@ export interface ChargeWalletInput {
   metadata?: Record<string, unknown>;
 }
 
+/** A single immutable row from yebopay's wallet ledger. */
+export interface YeboPayLedgerEntryDto {
+  id: string;
+  type: 'CREDIT' | 'DEBIT';
+  ref_type: string;
+  amount: number;
+  balance_before: number;
+  balance_after: number;
+  description: string | null;
+  external_ref: string | null;
+  merchant_app: string | null;
+  created_at: string;
+}
+
+export interface YeboPayLedgerPageDto {
+  transactions: YeboPayLedgerEntryDto[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AdjustWalletInput {
+  yeboidSub: string;
+  /** SIGNED: positive credits the wallet, negative debits it. Never zero. */
+  amount: number;
+  /** Required by yebopay — becomes the ledger row's description. */
+  reason: string;
+  /** Who authorised it (admin email). Recorded on the ledger row. */
+  actor?: string;
+  /**
+   * Caller-owned dedupe token. We pass the local CreditAdjustment.id, so a
+   * retry after a timeout replays yebopay's existing row instead of moving
+   * money a second time.
+   */
+  externalRef?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface YeboPayAdjustmentDto {
+  replayed: boolean;
+  transaction: YeboPayLedgerEntryDto;
+  balance: YeboPayBalanceDto;
+}
+
+/**
+ * Raised when a wallet adjustment is rejected for a reason the operator can act
+ * on (over-debit, no wallet, missing scope) rather than a transport failure.
+ * `httpStatus` is forwarded so the admin API can echo a faithful status.
+ */
+export class YeboPayAdjustmentError extends Error {
+  constructor(
+    public readonly httpStatus: number,
+    message: string,
+    public readonly code: string
+  ) {
+    super(message);
+    this.name = 'YeboPayAdjustmentError';
+  }
+}
+
 export interface YeboPayChargeDto {
   id: string;
   status: string;
@@ -190,6 +250,69 @@ export class YeboPayClient {
     const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayBalanceDto>;
     if (!res.ok || !body.success || !body.data) {
       throw new Error(`YeboPay GET /wallet/v1/balance ${res.status}: ${body.error ?? 'unknown error'}`);
+    }
+    return body.data;
+  }
+
+  /**
+   * Paginated wallet ledger for a yeboid_sub — the rows behind the balance.
+   * Uses scope `wallet.read`, the same one /wallet/v1/balance already needs, so
+   * no API-key re-grant is required to start reading history.
+   */
+  static async getWalletTransactions(
+    yeboidSub: string,
+    opts: { limit?: number; offset?: number; refType?: string } = {}
+  ): Promise<YeboPayLedgerPageDto> {
+    const params = new URLSearchParams({ yeboid_sub: yeboidSub });
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset));
+    if (opts.refType) params.set('ref_type', opts.refType);
+
+    const res = await fetch(`${BASE_URL}/wallet/v1/transactions?${params.toString()}`, {
+      headers: { 'X-API-Key': getApiKey() },
+    });
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayLedgerPageDto>;
+    if (!res.ok || !body.success || !body.data) {
+      throw new Error(
+        `YeboPay GET /wallet/v1/transactions ${res.status}: ${body.error ?? 'unknown error'}`
+      );
+    }
+    return body.data;
+  }
+
+  /**
+   * Apply a manual, operator-authorised correction to the wallet.
+   *
+   * `amount` is SIGNED — positive credits (goodwill, re-issuing a top-up that
+   * was paid for but never landed), negative debits (clawing back credits
+   * granted in error).
+   *
+   * Requires scope `wallet.write` on the API key. That scope is admin-granted
+   * only; if it's missing yebopay answers 403 and we surface it verbatim rather
+   * than pretending the adjustment worked.
+   */
+  static async adjustWallet(input: AdjustWalletInput): Promise<YeboPayAdjustmentDto> {
+    const res = await fetch(`${BASE_URL}/wallet/v1/adjustments`, {
+      method: 'POST',
+      headers: { 'X-API-Key': getApiKey(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        yeboid_sub: input.yeboidSub,
+        amount: input.amount,
+        reason: input.reason,
+        actor: input.actor,
+        external_ref: input.externalRef,
+        metadata: input.metadata,
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayAdjustmentDto> & {
+      code?: string;
+    };
+    if (!res.ok || !body.success || !body.data) {
+      throw new YeboPayAdjustmentError(
+        res.status,
+        body.error ?? 'Wallet adjustment failed',
+        body.code ?? 'ADJUSTMENT_FAILED'
+      );
     }
     return body.data;
   }
