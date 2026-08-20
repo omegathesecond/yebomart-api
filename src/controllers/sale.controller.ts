@@ -98,6 +98,8 @@ interface SmsReceiptItem {
   totalPrice: number;
 }
 
+const TAX_LABEL = (taxNumber: string | null) => (taxNumber ? `VAT (${taxNumber})` : 'VAT');
+
 /**
  * Build a concise SMS receipt. Kept short on purpose (it's an SMS): shop name,
  * receipt #, date, a capped list of line items, the total, and how it was paid.
@@ -112,9 +114,11 @@ function buildSmsReceiptMessage(
     receiptNumber: string | null;
     createdAt: Date;
     totalAmount: number;
+    tax: number;
     paymentMethod: string;
     items: SmsReceiptItem[];
   },
+  taxNumber: string | null,
 ): string {
   const lines: string[] = [];
   lines.push(shopName);
@@ -129,6 +133,9 @@ function buildSmsReceiptMessage(
     lines.push(`…and ${sale.items.length - MAX_ITEMS} more item(s)`);
   }
 
+  if (sale.tax > 0) {
+    lines.push(`${TAX_LABEL(taxNumber)}: ${money(currencySymbol, sale.tax)}`);
+  }
   lines.push(`Total: ${money(currencySymbol, sale.totalAmount)}`);
   lines.push(`Paid: ${PAYMENT_LABEL[sale.paymentMethod] ?? sale.paymentMethod}`);
   lines.push('Thank you!');
@@ -368,7 +375,7 @@ export class SaleController {
           : { receiptNumber: receiptNumber as string, shopId: req.user.shopId },
         include: {
           items: true,
-          shop: { select: { name: true, countryCode: true, ownerYeboidSub: true } },
+          shop: { select: { name: true, countryCode: true, ownerYeboidSub: true, taxInclusive: true } },
         },
       });
 
@@ -388,12 +395,31 @@ export class SaleController {
       const currency = getCurrencyForCountry(sale.shop.countryCode);
       const invoiceCurrency = currency.directBillable ? currency.code : 'USD';
       const fxRate = currency.directBillable ? 1 : currency.rate;
+      const fx = (amount: number) => Math.round((amount / fxRate) * 100) / 100;
 
+      // item.unitPrice is the raw sell price, not discount-adjusted — use the
+      // persisted totalPrice (sellPrice*qty - itemDiscount) per line so the
+      // invoice reflects what the item actually rang up for.
       const lineItems = sale.items.map((item: typeof sale.items[number]) => ({
         description: item.productName,
         quantity: item.quantity,
-        unitPrice: Math.round((item.unitPrice / fxRate) * 100) / 100,
+        unitPrice: fx(item.totalPrice / item.quantity),
       }));
+
+      // Sale.discount is a cart-wide discount not attributed to any single
+      // item, so it must be its own line for the invoice total to reconcile.
+      if (sale.discount > 0) {
+        lineItems.push({ description: 'Discount', quantity: 1, unitPrice: -fx(sale.discount) });
+      }
+
+      // Sale.tax: for exclusive VAT it's added on top of the items above, so it
+      // needs its own line for sum(lineItems) to equal amountPaid (= totalAmount)
+      // and for the invoice to show VAT as its own line. For inclusive VAT the
+      // tax is already baked into the item prices above (totalAmount ==
+      // subtotal - discount), so adding a line here would double-count it.
+      if (sale.tax > 0 && !sale.shop.taxInclusive) {
+        lineItems.push({ description: 'VAT', quantity: 1, unitPrice: fx(sale.tax) });
+      }
 
       // Create the invoice as PAID — the customer has already paid the shop.
       const invoice = await YeboPayClient.createInvoice({
@@ -406,7 +432,7 @@ export class SaleController {
         description: `Receipt from ${sale.shop.name} — sale ${sale.receiptNumber ?? sale.id}`,
         status: 'PAID',
         paidAt: sale.createdAt.toISOString(),
-        amountPaid: Math.round((sale.totalAmount / fxRate) * 100) / 100,
+        amountPaid: fx(sale.totalAmount),
         metadata: {
           flow: 'yebomart-pos-receipt',
           saleId: sale.id,
@@ -463,7 +489,7 @@ export class SaleController {
           : { receiptNumber: receiptNumber as string, shopId: req.user.shopId },
         include: {
           items: true,
-          shop: { select: { name: true, currencySymbol: true } },
+          shop: { select: { name: true, currencySymbol: true, taxNumber: true } },
         },
       });
 
@@ -472,18 +498,24 @@ export class SaleController {
         return;
       }
 
-      const message = buildSmsReceiptMessage(sale.shop.name, sale.shop.currencySymbol, {
-        id: sale.id,
-        receiptNumber: sale.receiptNumber,
-        createdAt: sale.createdAt,
-        totalAmount: sale.totalAmount,
-        paymentMethod: sale.paymentMethod,
-        items: sale.items.map((item: SmsReceiptItem) => ({
-          productName: item.productName,
-          quantity: item.quantity,
-          totalPrice: item.totalPrice,
-        })),
-      });
+      const message = buildSmsReceiptMessage(
+        sale.shop.name,
+        sale.shop.currencySymbol,
+        {
+          id: sale.id,
+          receiptNumber: sale.receiptNumber,
+          createdAt: sale.createdAt,
+          totalAmount: sale.totalAmount,
+          tax: sale.tax,
+          paymentMethod: sale.paymentMethod,
+          items: sale.items.map((item: SmsReceiptItem) => ({
+            productName: item.productName,
+            quantity: item.quantity,
+            totalPrice: item.totalPrice,
+          })),
+        },
+        sale.shop.taxNumber,
+      );
 
       const result = await YeboLinkClient.sendSMS(phone, message);
 

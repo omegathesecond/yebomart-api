@@ -2,6 +2,29 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SaleController, smsReceiptSchema, createSaleSchema } from './sale.controller';
 import { resetDb, seedShop, seedSale, seedProduct, seedCustomer, table } from '../test/prismaFake';
 
+// emailReceipt dynamically imports @services/yebopay.client — vi.mock still
+// hoists and intercepts that resolution regardless of the static/dynamic
+// import site.
+vi.mock('../services/yebopay.client', () => ({
+  YeboPayClient: {
+    createInvoice: vi.fn(async (input: any) => ({
+      id: 'inv_1',
+      number: 'INV-0001',
+      status: 'PAID',
+      amount_due: '0',
+      amount_paid: String(input.amountPaid),
+      currency: input.currency,
+      pdf_url: null,
+      sent_at: null,
+      paid_at: input.paidAt ?? null,
+      to_email: input.toEmail,
+      charge_id: null,
+    })),
+    sendInvoice: vi.fn(async () => ({ pdf_url: 'https://example.com/inv_1.pdf' })),
+  },
+}));
+import { YeboPayClient } from '../services/yebopay.client';
+
 // Minimal Express req/res doubles. The controller only touches the fields set
 // here; res records the status + JSON body for assertions.
 function mockRes() {
@@ -18,9 +41,9 @@ function mockRes() {
   return res;
 }
 
-function reqFor(body: Record<string, any>): any {
+function reqFor(body: Record<string, any>, shopId = 'shop_1'): any {
   return {
-    user: { id: 'user_1', shopId: 'shop_1', role: 'CASHIER', type: 'user' },
+    user: { id: 'user_1', shopId, role: 'CASHIER', type: 'user' },
     body,
   };
 }
@@ -137,6 +160,129 @@ describe('SaleController.smsReceipt — failures surface loudly (no silent fallb
     expect(res.statusCode).toBeGreaterThanOrEqual(500);
     expect(res.body.success).toBe(false);
     expect(res.body.message).toMatch(/Failed to send SMS receipt/i);
+  });
+});
+
+describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sale total', () => {
+  it('exclusive VAT: adds a VAT line so lineItems sum to amountPaid (= totalAmount)', async () => {
+    // South Africa: directBillable, fxRate 1 — keeps assertions currency-neutral.
+    seedShop({ id: 'shop_vat1', name: 'Corner Store', countryCode: 'ZA', ownerYeboidSub: 'yeboid_owner_vat1' });
+    const sale = seedSale({
+      shopId: 'shop_vat1',
+      subtotal: 100,
+      discount: 0,
+      tax: 15,
+      totalAmount: 115,
+      amountPaid: 115,
+      items: [{ productName: 'Bread', quantity: 1, unitPrice: 100, costPrice: 60, totalPrice: 100 }],
+    });
+    const res = mockRes();
+
+    await SaleController.emailReceipt(reqFor({ email: 'buyer@example.com', saleId: sale.id }, 'shop_vat1'), res);
+
+    expect(res.statusCode).toBe(200);
+    const input = (YeboPayClient.createInvoice as any).mock.calls[0][0];
+    expect(input.amountPaid).toBe(115);
+    expect(input.lineItems).toEqual([
+      { description: 'Bread', quantity: 1, unitPrice: 100 },
+      { description: 'VAT', quantity: 1, unitPrice: 15 },
+    ]);
+    const sum = input.lineItems.reduce((s: number, li: any) => s + li.quantity * li.unitPrice, 0);
+    expect(sum).toBe(input.amountPaid);
+  });
+
+  it('exclusive VAT + cart discount: adds both a Discount and a VAT line', async () => {
+    seedShop({ id: 'shop_vat2', name: 'Corner Store', countryCode: 'ZA', ownerYeboidSub: 'yeboid_owner_vat2' });
+    // base = 100 - 20 = 80; tax = 80 * 15/100 = 12; total = 92.
+    const sale = seedSale({
+      shopId: 'shop_vat2',
+      subtotal: 100,
+      discount: 20,
+      tax: 12,
+      totalAmount: 92,
+      amountPaid: 92,
+      items: [{ productName: 'Bread', quantity: 1, unitPrice: 100, costPrice: 60, totalPrice: 100 }],
+    });
+    const res = mockRes();
+
+    await SaleController.emailReceipt(reqFor({ email: 'buyer@example.com', saleId: sale.id }, 'shop_vat2'), res);
+
+    const input = (YeboPayClient.createInvoice as any).mock.calls[0][0];
+    expect(input.lineItems).toEqual([
+      { description: 'Bread', quantity: 1, unitPrice: 100 },
+      { description: 'Discount', quantity: 1, unitPrice: -20 },
+      { description: 'VAT', quantity: 1, unitPrice: 12 },
+    ]);
+    const sum = input.lineItems.reduce((s: number, li: any) => s + li.quantity * li.unitPrice, 0);
+    expect(sum).toBe(92);
+    expect(input.amountPaid).toBe(92);
+  });
+
+  it('inclusive VAT: tax is already inside the item price — no separate VAT line, still reconciles', async () => {
+    seedShop({
+      id: 'shop_vat3',
+      name: 'Corner Store',
+      countryCode: 'ZA',
+      ownerYeboidSub: 'yeboid_owner_vat3',
+      taxInclusive: true,
+    });
+    // 100 inclusive @ 15% -> tax 13.04 backed out, total unchanged at 100.
+    const sale = seedSale({
+      shopId: 'shop_vat3',
+      subtotal: 100,
+      discount: 0,
+      tax: 13.04,
+      totalAmount: 100,
+      amountPaid: 100,
+      items: [{ productName: 'Bread', quantity: 1, unitPrice: 100, costPrice: 60, totalPrice: 100 }],
+    });
+    const res = mockRes();
+
+    await SaleController.emailReceipt(reqFor({ email: 'buyer@example.com', saleId: sale.id }, 'shop_vat3'), res);
+
+    const input = (YeboPayClient.createInvoice as any).mock.calls[0][0];
+    expect(input.lineItems).toEqual([{ description: 'Bread', quantity: 1, unitPrice: 100 }]);
+    expect(input.amountPaid).toBe(100);
+  });
+
+  it('no VAT (default 0% shop): behaves exactly as before', async () => {
+    seedShop({ id: 'shop_vat4', name: 'Corner Store', countryCode: 'ZA', ownerYeboidSub: 'yeboid_owner_vat4' });
+    const sale = seedSale({
+      shopId: 'shop_vat4',
+      subtotal: 42,
+      discount: 0,
+      tax: 0,
+      totalAmount: 42,
+      amountPaid: 42,
+      items: [{ productName: 'Bread', quantity: 2, unitPrice: 21, costPrice: 12, totalPrice: 42 }],
+    });
+    const res = mockRes();
+
+    await SaleController.emailReceipt(reqFor({ email: 'buyer@example.com', saleId: sale.id }, 'shop_vat4'), res);
+
+    const input = (YeboPayClient.createInvoice as any).mock.calls[0][0];
+    expect(input.lineItems).toEqual([{ description: 'Bread', quantity: 2, unitPrice: 21 }]);
+    expect(input.amountPaid).toBe(42);
+  });
+});
+
+describe('SaleController.smsReceipt — shows a VAT line when the sale has tax', () => {
+  it('prints the shop VAT number alongside the tax amount', async () => {
+    seedShop({ id: 'shop_smsvat', name: 'Corner Store', currencySymbol: 'E', taxNumber: 'VAT-12345' });
+    const sale = seedSale({
+      shopId: 'shop_smsvat',
+      totalAmount: 115,
+      tax: 15,
+      items: [{ productName: 'Bread', quantity: 1, unitPrice: 100, costPrice: 60, totalPrice: 100 }],
+    });
+    const { calls } = stubFetchOk();
+    const res = mockRes();
+
+    await SaleController.smsReceipt(reqFor({ saleId: sale.id, phone: '+26878422613' }, 'shop_smsvat'), res);
+
+    const text: string = calls[0].body.content.text;
+    expect(text).toContain('VAT (VAT-12345): E15.00');
+    expect(text).toContain('Total: E115.00');
   });
 });
 
