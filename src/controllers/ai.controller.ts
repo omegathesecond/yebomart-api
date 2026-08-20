@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { AIService } from '@services/ai.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { settlePendingCharge } from '@middleware/billing.middleware';
 
 export const chatSchema = Joi.object({
   message: Joi.string().required().min(1).max(1000),
@@ -29,6 +30,8 @@ export class AIController {
         message,
       });
 
+      // Charge ONLY now that the AI call succeeded (see requireCreditBalance).
+      await settlePendingCharge(req);
       ApiResponse.success(res, result);
     } catch (error: any) {
       if (error.message.includes('not configured')) {
@@ -52,6 +55,7 @@ export class AIController {
       const { transcription } = req.body;
       const result = await AIService.voice(req.user.shopId, transcription);
 
+      await settlePendingCharge(req);
       ApiResponse.success(res, result);
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
@@ -72,6 +76,10 @@ export class AIController {
         shopId: req.user.shopId,
       });
 
+      // generateInsights THROWS on any AI failure (unconfigured / Gemini error /
+      // unparseable response), so we only reach here — and only charge — when a
+      // real AI result was produced.
+      await settlePendingCharge(req);
       ApiResponse.success(res, insights);
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
@@ -89,6 +97,7 @@ export class AIController {
       }
 
       const analysis = await AIService.getSlowMovers(req.user.shopId);
+      await settlePendingCharge(req);
       ApiResponse.success(res, analysis);
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
@@ -106,6 +115,7 @@ export class AIController {
       }
 
       const summary = await AIService.getBusinessSummary(req.user.shopId);
+      await settlePendingCharge(req);
       ApiResponse.success(res, summary);
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);

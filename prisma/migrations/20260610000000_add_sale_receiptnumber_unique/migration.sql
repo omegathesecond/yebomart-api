@@ -1,0 +1,12 @@
+-- Collision-free receipt numbers under concurrency.
+-- Receipt numbers are generated per-shop as RCP-YYMMDD-NNNN. Previously this
+-- came from a COUNT(*)+1 with no uniqueness guarantee, so two concurrent
+-- cashiers (or online + offline-sync sales) could mint identical numbers.
+-- This unique index makes a duplicate impossible; SaleService.create catches
+-- the resulting P2002 and retries with a freshly recomputed sequence.
+--
+-- Postgres treats NULLs as distinct, so existing rows with receiptNumber = NULL
+-- are unaffected. NOTE: if any shop already holds duplicate non-null receipt
+-- numbers (minted by the old racy code), this CREATE will fail loudly — that is
+-- intentional: those duplicates must be reconciled before the index can apply.
+CREATE UNIQUE INDEX "Sale_shopId_receiptNumber_key" ON "Sale"("shopId", "receiptNumber");

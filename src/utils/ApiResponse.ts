@@ -5,6 +5,18 @@ export interface IApiResponse<T = any> {
   data?: T;
   message?: string;
   error?: any;
+  /**
+   * Stable, machine-readable error code (e.g. 'CREDIT_LIMIT_EXCEEDED'). Unlike
+   * `error`, this is ALWAYS sent — never gated on NODE_ENV — so clients can
+   * branch on it in production without parsing the human `message`.
+   */
+  code?: string;
+  /**
+   * Public structured details that accompany an error code (e.g. credit limit,
+   * current balance, requiresOverride). Like `code`, this is never gated on
+   * NODE_ENV. Keep it free of internals/stack traces — those belong in `error`.
+   */
+  meta?: Record<string, any>;
   metadata?: {
     total?: number;
     page?: number;
@@ -35,12 +47,17 @@ export class ApiResponse {
     res: Response,
     message: string,
     statusCode: number = 500,
-    error?: any
+    error?: any,
+    options?: { code?: string; meta?: Record<string, any> }
   ): Response {
     const response: IApiResponse = {
       success: false,
       message,
       error: process.env.NODE_ENV === 'development' ? error : undefined,
+      // code/meta are the PUBLIC machine-readable contract — always sent so
+      // clients can branch on them in production (never gated on NODE_ENV).
+      code: options?.code,
+      meta: options?.meta,
     };
     return res.status(statusCode).json(response);
   }

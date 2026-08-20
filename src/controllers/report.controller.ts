@@ -51,6 +51,40 @@ export class ReportController {
   }
 
   /**
+   * Get a sales report for an arbitrary date range.
+   *
+   * Powers the POS Reports page "Today / This Week / This Month" views —
+   * the client passes the range it needs and renders the returned summary
+   * as the authoritative source of truth (rather than recomputing from a
+   * partially-synced local cache).
+   */
+  static async getSalesReport(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { error, value } = dateRangeSchema.validate({
+        startDate: req.query.startDate,
+        endDate: req.query.endDate,
+      });
+      if (error) {
+        ApiResponse.badRequest(res, error.details[0].message, error.details);
+        return;
+      }
+
+      const report = await ReportService.getSalesReport(req.user.shopId, {
+        startDate: new Date(value.startDate),
+        endDate: new Date(value.endDate),
+      });
+      ApiResponse.success(res, report);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
    * Get product performance report
    */
   static async getProductReport(req: AuthRequest, res: Response): Promise<void> {

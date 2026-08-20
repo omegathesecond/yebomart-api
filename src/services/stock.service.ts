@@ -20,6 +20,7 @@ interface ReceiveStockInput {
     productId: string;
     quantity: number;
     note?: string;
+    costPrice?: number; // New supplier cost — when set, updates Product.costPrice
   }[];
   reference?: string; // PO number, supplier name, etc.
 }
@@ -116,10 +117,19 @@ export class StockService {
         const product = productMap.get(item.productId)!;
         const newQty = product.quantity + item.quantity;
 
+        // Persist a new supplier cost when supplied so COGS/profit stay accurate
+        // after a price change. Without this, every margin figure computed from
+        // costPrice (Reports gross/net profit, stockValue) goes stale on restock.
+        const costChanged =
+          item.costPrice !== undefined && item.costPrice !== product.costPrice;
+
         const [updatedProduct, stockLog] = await Promise.all([
           tx.product.update({
             where: { id: item.productId },
-            data: { quantity: newQty },
+            data: {
+              quantity: newQty,
+              ...(item.costPrice !== undefined ? { costPrice: item.costPrice } : {}),
+            },
           }),
           tx.stockLog.create({
             data: {
@@ -130,7 +140,11 @@ export class StockService {
               quantity: item.quantity,
               previousQty: product.quantity,
               newQty,
-              note: item.note,
+              note: costChanged
+                ? [item.note, `Cost: ${product.costPrice} → ${item.costPrice}`]
+                    .filter(Boolean)
+                    .join(' — ')
+                : item.note,
               reference: input.reference,
               syncedAt: new Date(),
             },

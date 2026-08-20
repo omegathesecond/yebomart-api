@@ -141,6 +141,141 @@ export class ReportService {
   }
 
   /**
+   * Get a sales report for an arbitrary date range.
+   *
+   * Returns the same authoritative summary shape as the daily report
+   * (revenue net of VAT, COGS, gross/net profit, expenses, transactions,
+   * average basket) plus the top products and a current stock snapshot,
+   * so the POS Reports page can render a single source of truth for any
+   * "today / this week / this month" range instead of recomputing from a
+   * partially-synced local cache.
+   *
+   * `endDate` is treated inclusively of the whole day: the query upper
+   * bound is the start of the day AFTER endDate, matching the daily
+   * report's [startOfDay, nextDay) convention so a same-day range
+   * ([today, today]) returns the full day's sales.
+   */
+  static async getSalesReport(shopId: string, range: DateRange) {
+    const startOfRange = new Date(
+      range.startDate.getFullYear(),
+      range.startDate.getMonth(),
+      range.startDate.getDate(),
+    );
+    const endExclusive = new Date(
+      range.endDate.getFullYear(),
+      range.endDate.getMonth(),
+      range.endDate.getDate(),
+    );
+    endExclusive.setDate(endExclusive.getDate() + 1);
+
+    const sales = await prisma.sale.findMany({
+      where: {
+        shopId,
+        status: 'COMPLETED',
+        createdAt: { gte: startOfRange, lt: endExclusive },
+      },
+      include: { items: true },
+    });
+
+    let totalSales = 0;
+    let totalTax = 0;
+    let totalCost = 0;
+    let cashSales = 0;
+    let momoSales = 0;
+    let emaliSales = 0;
+    let cardSales = 0;
+
+    const productSales: Map<string, { name: string; quantity: number; revenue: number }> = new Map();
+
+    for (const sale of sales) {
+      totalSales += sale.totalAmount;
+      totalTax += sale.tax;
+
+      switch (sale.paymentMethod) {
+        case 'CASH':
+          cashSales += sale.totalAmount;
+          break;
+        case 'MOMO':
+          momoSales += sale.totalAmount;
+          break;
+        case 'EMALI':
+          emaliSales += sale.totalAmount;
+          break;
+        case 'CARD':
+          cardSales += sale.totalAmount;
+          break;
+      }
+
+      for (const item of sale.items) {
+        totalCost += item.costPrice * item.quantity;
+
+        const existing = productSales.get(item.productId) || { name: item.productName, quantity: 0, revenue: 0 };
+        existing.quantity += item.quantity;
+        existing.revenue += item.totalPrice;
+        productSales.set(item.productId, existing);
+      }
+    }
+
+    const expenses = await prisma.expense.aggregate({
+      where: {
+        shopId,
+        date: { gte: startOfRange, lt: endExclusive },
+      },
+      _sum: { amount: true },
+    });
+
+    const totalExpenses = expenses._sum.amount || 0;
+    // VAT collected is owed to the revenue authority, not income — revenue
+    // and profit are reckoned NET of tax (non-VAT shops have totalTax 0).
+    const netRevenue = totalSales - totalTax;
+    const grossProfit = netRevenue - totalCost;
+    const netProfit = grossProfit - totalExpenses;
+
+    const topProducts = Array.from(productSales.entries())
+      .map(([id, data]) => ({ id, ...data }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+    // Current stock snapshot (point-in-time, not range-scoped).
+    const stockProducts = await prisma.product.findMany({
+      where: { shopId, isActive: true },
+      select: { id: true, costPrice: true, quantity: true, reorderAt: true, trackStock: true },
+    });
+
+    const stockValue = stockProducts.reduce((sum, p) => sum + p.costPrice * p.quantity, 0);
+    const lowStockCount = stockProducts.filter(
+      p => p.trackStock && p.quantity <= p.reorderAt,
+    ).length;
+
+    return {
+      range: { startDate: startOfRange, endDate: range.endDate },
+      summary: {
+        totalSales,
+        totalTax,
+        netRevenue,
+        totalTransactions: sales.length,
+        averageBasket: sales.length > 0 ? totalSales / sales.length : 0,
+        totalCost,
+        grossProfit,
+        totalExpenses,
+        netProfit,
+      },
+      paymentBreakdown: {
+        cash: cashSales,
+        momo: momoSales,
+        emali: emaliSales,
+        card: cardSales,
+      },
+      topProducts,
+      stock: {
+        totalProducts: stockProducts.length,
+        stockValue,
+        lowStockCount,
+      },
+    };
+  }
+
+  /**
    * Get weekly report
    */
   static async getWeeklyReport(shopId: string, weekStart?: Date) {

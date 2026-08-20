@@ -3,6 +3,8 @@ import Joi from 'joi';
 import { SaleService } from '@services/sale.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { YeboLinkClient } from '@services/yebolink.client';
+import { CreditLimitExceededError } from '@services/customerCredit.service';
 
 export const createSaleSchema = Joi.object({
   items: Joi.array().items(
@@ -47,6 +49,92 @@ export const voidSaleSchema = Joi.object({
   reason: Joi.string().required().min(5).max(500),
 });
 
+/**
+ * SMS receipt request. Identify the sale by saleId (preferred) OR receiptNumber,
+ * and supply the customer phone to text it to. The phone is normalized
+ * (whitespace/dashes/parens stripped) and validated as a plausible E.164-ish
+ * number before it reaches YeboLink, which requires E.164.
+ */
+export const smsReceiptSchema = Joi.object({
+  saleId: Joi.string().optional(),
+  receiptNumber: Joi.string().optional(),
+  phone: Joi.string()
+    .required()
+    .custom((value: string, helpers) => {
+      const cleaned = String(value).replace(/[\s\-()]/g, '');
+      // Optional leading +, then 7–15 digits (E.164 caps at 15).
+      if (!/^\+?[1-9]\d{6,14}$/.test(cleaned)) {
+        return helpers.error('any.invalid');
+      }
+      return cleaned;
+    }, 'phone normalization')
+    .messages({ 'any.invalid': 'A valid phone number is required' }),
+}).or('saleId', 'receiptNumber');
+
+/** Format an amount with the shop's currency symbol, e.g. "E1,250.00". */
+function money(symbol: string, amount: number): string {
+  return `${symbol}${amount.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function receiptDate(date: Date): string {
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+const PAYMENT_LABEL: Record<string, string> = {
+  CASH: 'Cash',
+  MOMO: 'MoMo',
+  EMALI: 'eMali',
+  CARD: 'Card',
+  MIXED: 'Mixed',
+  CREDIT: 'Credit (pay later)',
+};
+
+interface SmsReceiptItem {
+  productName: string;
+  quantity: number;
+  totalPrice: number;
+}
+
+/**
+ * Build a concise SMS receipt. Kept short on purpose (it's an SMS): shop name,
+ * receipt #, date, a capped list of line items, the total, and how it was paid.
+ * Currency comes from the shop's configured symbol so it's locale-correct
+ * (SZL → "E", etc.).
+ */
+function buildSmsReceiptMessage(
+  shopName: string,
+  currencySymbol: string,
+  sale: {
+    id: string;
+    receiptNumber: string | null;
+    createdAt: Date;
+    totalAmount: number;
+    paymentMethod: string;
+    items: SmsReceiptItem[];
+  },
+): string {
+  const lines: string[] = [];
+  lines.push(shopName);
+  lines.push(`Receipt ${sale.receiptNumber ?? sale.id.slice(-8).toUpperCase()}`);
+  lines.push(receiptDate(sale.createdAt));
+
+  const MAX_ITEMS = 6;
+  sale.items.slice(0, MAX_ITEMS).forEach((it) => {
+    lines.push(`${it.quantity}x ${it.productName} ${money(currencySymbol, it.totalPrice)}`);
+  });
+  if (sale.items.length > MAX_ITEMS) {
+    lines.push(`…and ${sale.items.length - MAX_ITEMS} more item(s)`);
+  }
+
+  lines.push(`Total: ${money(currencySymbol, sale.totalAmount)}`);
+  lines.push(`Paid: ${PAYMENT_LABEL[sale.paymentMethod] ?? sale.paymentMethod}`);
+  lines.push('Thank you!');
+  return lines.join('\n');
+}
+
 export class SaleController {
   /**
    * Create a new sale
@@ -66,12 +154,28 @@ export class SaleController {
 
       ApiResponse.created(res, sale, 'Sale completed successfully');
     } catch (error: any) {
+      // Over the credit limit → same machine-readable contract POST
+      // /customers/:id/credit returns, so the POS can branch on the code in
+      // production instead of parsing the message. requiresOverride is false:
+      // unlike the manual ledger endpoint, a sale has no owner-override path.
+      if (error instanceof CreditLimitExceededError) {
+        ApiResponse.error(res, error.message, 422, undefined, {
+          code: 'CREDIT_LIMIT_EXCEEDED',
+          meta: {
+            requiresOverride: false,
+            creditLimit: error.creditLimit,
+            currentBalance: error.currentBalance,
+            attemptedBalance: error.attemptedBalance,
+          },
+        });
+        return;
+      }
+
       // Client-correctable sale rejections → 400 so the POS shows a clear toast:
-      // insufficient payment, over the credit limit, or a credit sale with no
-      // customer attached (no silent fallback — the cashier must see the reason).
+      // insufficient payment or a credit sale with no customer attached (no
+      // silent fallback — the cashier must see the reason).
       if (
         error.message.includes('Insufficient') ||
-        error.message.includes('Credit limit') ||
         error.message.includes('required for credit')
       ) {
         ApiResponse.badRequest(res, error.message);
@@ -161,10 +265,14 @@ export class SaleController {
       const { id } = req.params;
       const { reason } = req.body;
 
+      // StockLog.userId is a real User FK; only staff tokens carry a User id.
+      // A shop-owner token's `id` is the Shop id, so leave userId null for it.
+      const userId = req.user.type === 'user' ? req.user.id : undefined;
+
       const sale = await SaleService.voidSale(
         id,
         req.user.shopId,
-        req.user.id,
+        userId,
         reason
       );
 
@@ -321,6 +429,72 @@ export class SaleController {
       );
     } catch (error: any) {
       ApiResponse.serverError(res, error?.message ?? 'Failed to send receipt', error);
+    }
+  }
+
+  /**
+   * Text a concise receipt to a customer via the YeboLink SMS gateway. The
+   * counterpart to emailReceipt for the (common) case where the customer has a
+   * phone but no email. Identify the sale by saleId or receiptNumber; line
+   * items + totals are loaded from the Sale row (authoritative), not the body.
+   *   body: { saleId? , receiptNumber? , phone }   (validated by smsReceiptSchema)
+   *
+   * No silent fallback (CLAUDE.md): if YeboLink can't deliver the SMS the error
+   * propagates as a 5xx so the POS shows a real failure — we never report
+   * "sent" for a message that wasn't.
+   */
+  static async smsReceipt(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { saleId, receiptNumber, phone } = req.body as {
+        saleId?: string;
+        receiptNumber?: string;
+        phone: string;
+      };
+
+      const { prisma } = await import('@config/prisma');
+      const sale = await prisma.sale.findFirst({
+        where: saleId
+          ? { id: saleId, shopId: req.user.shopId }
+          : { receiptNumber: receiptNumber as string, shopId: req.user.shopId },
+        include: {
+          items: true,
+          shop: { select: { name: true, currencySymbol: true } },
+        },
+      });
+
+      if (!sale) {
+        ApiResponse.notFound(res, 'Sale not found for this shop');
+        return;
+      }
+
+      const message = buildSmsReceiptMessage(sale.shop.name, sale.shop.currencySymbol, {
+        id: sale.id,
+        receiptNumber: sale.receiptNumber,
+        createdAt: sale.createdAt,
+        totalAmount: sale.totalAmount,
+        paymentMethod: sale.paymentMethod,
+        items: sale.items.map((item: SmsReceiptItem) => ({
+          productName: item.productName,
+          quantity: item.quantity,
+          totalPrice: item.totalPrice,
+        })),
+      });
+
+      const result = await YeboLinkClient.sendSMS(phone, message);
+
+      ApiResponse.success(
+        res,
+        { success: true, messageId: result.messageId, status: result.status },
+        'Receipt sent via SMS',
+      );
+    } catch (error: any) {
+      // YeboLink send failed (or env misconfigured) — surface loudly, no fallback.
+      ApiResponse.serverError(res, `Failed to send SMS receipt: ${error?.message ?? 'YeboLink error'}`, error);
     }
   }
 }

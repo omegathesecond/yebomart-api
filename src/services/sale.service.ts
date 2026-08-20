@@ -4,6 +4,25 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
+import { evaluateCredit, CreditLimitExceededError } from './customerCredit.service';
+
+/**
+ * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
+ * involves `field`? Sale now has TWO unique constraints that can both raise
+ * P2002 from create() — @@unique([shopId, localId]) and
+ * @@unique([shopId, receiptNumber]) — so we must distinguish them by the
+ * offending column. `meta.target` is either the field-name array (Prisma's
+ * default) or the constraint name string (e.g. "Sale_shopId_receiptNumber_key"),
+ * both of which contain the field name, so a substring check is robust to either.
+ */
+function isUniqueViolationOn(err: unknown, field: string): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+    return false;
+  }
+  const target = (err.meta as { target?: unknown } | undefined)?.target;
+  if (Array.isArray(target)) return target.some((t) => String(t).includes(field));
+  return String(target ?? '').includes(field);
+}
 
 interface SaleItemInput {
   productId: string;
@@ -75,11 +94,12 @@ export class SaleService {
 
     for (const item of input.items) {
       const product = productMap.get(item.productId)!;
-      
-      // Check stock
-      if (product.trackStock && product.quantity < item.quantity) {
-        throw new Error(`Insufficient stock for ${product.name}. Available: ${product.quantity}`);
-      }
+
+      // NOTE: stock availability is NOT checked here. This read is outside the
+      // transaction and therefore stale — checking it here would be a
+      // check-then-act race (two concurrent sales both pass, both decrement).
+      // The authoritative, race-proof check is the atomic guarded decrement
+      // inside the $transaction below.
 
       const itemDiscount = item.discount || 0;
       const itemTotal = (product.sellPrice * item.quantity) - itemDiscount;
@@ -105,7 +125,9 @@ export class SaleService {
     // default to taxRate 0 → tax 0, total = subtotal - discount (unchanged).
     const shop = await prisma.shop.findUnique({
       where: { id: input.shopId },
-      select: { taxRate: true, taxInclusive: true },
+      // currencySymbol is only needed to format the credit-limit rejection
+      // message, but it's free to fetch alongside the tax config.
+      select: { taxRate: true, taxInclusive: true, currencySymbol: true },
     });
     if (!shop) {
       throw new Error('Shop not found');
@@ -114,49 +136,25 @@ export class SaleService {
       taxRate: shop.taxRate,
       taxInclusive: shop.taxInclusive,
     });
-
     // CREDIT ("on the book" / pay-later) sales: nothing is tendered now, so the
-    // amountPaid>=total guard below is intentionally skipped and amountPaid/
-    // change are forced to 0 regardless of what the client sent. The full total
-    // is instead added to the customer's running balance (the CustomerCredit
-    // PURCHASE entry + balance increment inside the transaction). A credit sale
-    // MUST be attached to a customer, and must not push them past their limit.
+    // amountPaid >= total guard is intentionally skipped and amountPaid/change
+    // are forced to 0 regardless of what the client sent. The full total is
+    // instead added to the customer's running balance via a CustomerCredit
+    // PURCHASE entry written inside the transaction below.
     const isCredit = input.paymentMethod === 'CREDIT';
-    let amountPaid: number;
-    let change: number;
-    let creditCustomer: { id: string; balance: number; creditLimit: number } | null = null;
 
-    if (isCredit) {
-      if (!input.customerId) {
-        throw new Error('A customer is required for credit (pay-later) sales');
-      }
+    // A pay-later sale has to land on someone's book. Reject up front (the Joi
+    // schema also enforces this) rather than silently posting an unattributable
+    // credit sale.
+    if (isCredit && !input.customerId) {
+      throw new Error('A customer is required for credit (pay-later) sales');
+    }
 
-      creditCustomer = await prisma.customer.findFirst({
-        where: { id: input.customerId, shopId: input.shopId },
-        select: { id: true, balance: true, creditLimit: true },
-      });
-      if (!creditCustomer) {
-        throw new Error('Customer not found for credit sale');
-      }
+    const amountPaid = isCredit ? 0 : input.amountPaid;
+    const change = isCredit ? 0 : amountPaid - totalAmount;
 
-      const newBalance = creditCustomer.balance + totalAmount;
-      // creditLimit 0 = no limit configured (matches the Customers UI, which
-      // only shows a limit badge when creditLimit > 0). Enforce only when set.
-      if (creditCustomer.creditLimit > 0 && newBalance > creditCustomer.creditLimit) {
-        throw new Error(
-          `Credit limit exceeded. Limit: ${creditCustomer.creditLimit}, current balance: ${creditCustomer.balance}, this sale: ${totalAmount}. New balance would be ${newBalance}.`,
-        );
-      }
-
-      amountPaid = 0;
-      change = 0;
-    } else {
-      amountPaid = input.amountPaid;
-      change = amountPaid - totalAmount;
-
-      if (change < 0) {
-        throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
-      }
+    if (change < 0) {
+      throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
     }
 
     // Cash-drawer attribution: tag CASH sales to the open till session so the
@@ -172,133 +170,226 @@ export class SaleService {
       }
     }
 
-    // Create sale and update stock in a transaction
+    // Create sale and decrement stock in a transaction.
+    //
+    // The whole transaction is wrapped in a retry loop for ONE reason: receipt
+    // numbers are minted from a per-shop daily count, and two concurrent sales
+    // can compute the same number. The @@unique([shopId, receiptNumber])
+    // constraint turns that collision into a P2002 on insert; we catch it,
+    // re-run the transaction (which recomputes the count — now including the
+    // winner — and so advances to the next number), and try again. A failed
+    // statement aborts the whole Postgres transaction, so the retry MUST be at
+    // the transaction boundary, not inside it.
+    const MAX_RECEIPT_RETRIES = 5;
     let sale;
-    try {
-      sale = await prisma.$transaction(async (tx) => {
-      // Generate receipt number (e.g., RCP-240212-0001)
-      const today = new Date();
-      const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
-      
-      // Get count of sales today for this shop
-      const startOfDay = new Date(today);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(today);
-      endOfDay.setHours(23, 59, 59, 999);
-      
-      const todaySalesCount = await tx.sale.count({
-        where: {
-          shopId: input.shopId,
-          createdAt: {
-            gte: startOfDay,
-            lte: endOfDay,
-          },
-        },
-      });
-      
-      const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        sale = await prisma.$transaction(async (tx) => {
+          // Generate receipt number (e.g., RCP-240212-0001)
+          const today = new Date();
+          const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
 
-      // Create sale
-      const sale = await tx.sale.create({
-        data: {
-          shopId: input.shopId,
-          userId: input.userId,
-          customerId: input.customerId || undefined,
-          cashSessionId: cashSessionId || undefined,
-          receiptNumber,
-          subtotal,
-          discount,
-          tax,
-          totalAmount,
-          paymentMethod: input.paymentMethod,
-          amountPaid,
-          change,
-          status: 'COMPLETED',
-          localId: input.localId,
-          offlineAt: input.offlineAt,
-          syncedAt: new Date(),
-          items: {
-            create: saleItems,
-          },
-        },
-        include: {
-          items: true,
-        },
-      });
+          // Get count of sales today for this shop
+          const startOfDay = new Date(today);
+          startOfDay.setHours(0, 0, 0, 0);
+          const endOfDay = new Date(today);
+          endOfDay.setHours(23, 59, 59, 999);
 
-      // Update stock and create stock logs
-      for (const item of input.items) {
-        const product = productMap.get(item.productId)!;
-
-        if (product.trackStock) {
-          const newQty = product.quantity - item.quantity;
-
-          await tx.product.update({
-            where: { id: item.productId },
-            data: { quantity: newQty },
+          const todaySalesCount = await tx.sale.count({
+            where: {
+              shopId: input.shopId,
+              createdAt: {
+                gte: startOfDay,
+                lte: endOfDay,
+              },
+            },
           });
 
-          await tx.stockLog.create({
-            data: {
+          const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
+
+          // Credit check BEFORE any write. Read the customer inside the
+          // transaction so the balance we evaluate is the committed one (the
+          // same reason the stock guard below lives in here), and so a rejection
+          // rolls back cleanly having touched nothing. Reuses evaluateCredit —
+          // the single source of truth for the PURCHASE sign and the
+          // "creditLimit <= 0 means unlimited" rule — so the POS and the manual
+          // ledger endpoint can never disagree about what "over the limit" means.
+          let creditCustomer: { id: string; name: string; balance: number; creditLimit: number } | null =
+            null;
+          let creditEvaluation: ReturnType<typeof evaluateCredit> | null = null;
+
+          if (isCredit) {
+            creditCustomer = await tx.customer.findFirst({
+              where: { id: input.customerId!, shopId: input.shopId },
+              select: { id: true, name: true, balance: true, creditLimit: true },
+            });
+            if (!creditCustomer) {
+              throw new Error('Customer not found for credit sale');
+            }
+
+            creditEvaluation = evaluateCredit({
+              type: 'PURCHASE',
+              amount: totalAmount,
+              currentBalance: creditCustomer.balance,
+              creditLimit: creditCustomer.creditLimit,
+            });
+
+            // Over the limit → refuse the sale loudly. There is deliberately no
+            // override at the till: the cashier must take a payment or an owner
+            // must raise the limit first.
+            if (creditEvaluation.exceedsLimit) {
+              throw new CreditLimitExceededError({
+                customerName: creditCustomer.name,
+                currencySymbol: shop.currencySymbol,
+                amount: totalAmount,
+                creditLimit: creditCustomer.creditLimit,
+                currentBalance: creditCustomer.balance,
+                attemptedBalance: creditEvaluation.newBalance,
+              });
+            }
+          }
+
+          // Decrement stock FIRST with an atomic, guarded write so an oversell
+          // can never even create the sale. Doing this before tx.sale.create
+          // means a stock shortfall throws before any Sale/SaleItem rows exist,
+          // and the transaction rolls back cleanly.
+          const stockLogData: Prisma.StockLogCreateManyInput[] = [];
+          for (const item of input.items) {
+            const product = productMap.get(item.productId)!;
+            if (!product.trackStock) continue;
+
+            // Atomic conditional decrement: updateMany lets us put the
+            // `quantity >= qty` guard in the WHERE (update() only accepts unique
+            // fields) and tells us how many rows it touched. count === 0 means
+            // another concurrent sale already took the stock — fail loudly, NO
+            // silent partial sale. There is no stale read here: the guard is
+            // evaluated against the row's CURRENT committed value.
+            const res = await tx.product.updateMany({
+              where: {
+                id: item.productId,
+                shopId: input.shopId,
+                trackStock: true,
+                quantity: { gte: item.quantity },
+              },
+              data: { quantity: { decrement: item.quantity } },
+            });
+
+            if (res.count === 0) {
+              // Re-read the live quantity purely for an accurate error message.
+              const live = await tx.product.findUnique({
+                where: { id: item.productId },
+                select: { quantity: true },
+              });
+              throw new Error(
+                `Insufficient stock for ${product.name}. Available: ${live?.quantity ?? 0}`
+              );
+            }
+
+            // Re-read the post-decrement quantity for the stock-log snapshot.
+            const updated = await tx.product.findUnique({
+              where: { id: item.productId },
+              select: { quantity: true },
+            });
+            const newQty = updated!.quantity;
+
+            stockLogData.push({
               shopId: input.shopId,
               productId: item.productId,
               userId: input.userId,
               type: 'SALE',
               quantity: -item.quantity,
-              previousQty: product.quantity,
+              previousQty: newQty + item.quantity,
               newQty,
-              reference: sale.id,
+              // reference (sale.id) is filled in after the sale is created.
+              reference: '',
+            });
+          }
+
+          // Create sale (stock already reserved atomically above).
+          const sale = await tx.sale.create({
+            data: {
+              shopId: input.shopId,
+              userId: input.userId,
+              customerId: input.customerId || undefined,
+              cashSessionId: cashSessionId || undefined,
+              receiptNumber,
+              subtotal,
+              discount,
+              tax,
+              totalAmount,
+              paymentMethod: input.paymentMethod,
+              amountPaid,
+              change,
+              status: 'COMPLETED',
+              localId: input.localId,
+              offlineAt: input.offlineAt,
+              syncedAt: new Date(),
+              items: {
+                create: saleItems,
+              },
+            },
+            include: {
+              items: true,
             },
           });
+
+          // Now that we have the sale id, write the stock logs.
+          for (const log of stockLogData) {
+            await tx.stockLog.create({ data: { ...log, reference: sale.id } });
+          }
+
+          // Credit sale: book it to the customer's ledger. Same effect as
+          // CustomerController.addCredit, but committed atomically with the sale
+          // so stock, the sale row, the ledger entry and the balance can never
+          // drift apart. Stock was still decremented above — a credit sale draws
+          // down inventory exactly like a paid one.
+          let customerBalance: number | undefined;
+          if (isCredit && creditCustomer && creditEvaluation) {
+            await tx.customerCredit.create({
+              data: {
+                shopId: input.shopId,
+                customerId: creditCustomer.id,
+                type: 'PURCHASE',
+                amount: totalAmount,
+                saleId: sale.id,
+                userId: input.userId,
+                note: `Credit sale ${sale.receiptNumber}`,
+              },
+            });
+            const updatedCustomer = await tx.customer.update({
+              where: { id: creditCustomer.id },
+              data: { balance: { increment: creditEvaluation.balanceChange } },
+            });
+            customerBalance = updatedCustomer.balance;
+          }
+
+          // customerBalance rides along on the sale so the POS receipt can print
+          // the customer's new outstanding balance. undefined for non-credit.
+          return { ...sale, customerBalance };
+        });
+        break; // committed successfully
+      } catch (err) {
+        // Race-proof idempotency backstop: two in-flight replays of the same
+        // localId — the loser hits the @@unique([shopId, localId]) constraint.
+        // Return the winner's committed sale instead of surfacing a 500.
+        if (input.localId && isUniqueViolationOn(err, 'localId')) {
+          const existing = await prisma.sale.findFirst({
+            where: { shopId: input.shopId, localId: input.localId },
+            include: { items: true },
+          });
+          if (existing) return existing;
         }
-      }
 
-      // Credit ("on the book") sale: record the PURCHASE in the customer ledger
-      // and increase their outstanding balance — same effect as
-      // CustomerController.addCredit, but committed atomically with the sale so
-      // stock + ledger + balance can never drift apart. amountPaid/change are
-      // already 0 (set above). Stock is still decremented in the loop above, so
-      // credit sales draw down inventory like any other sale.
-      let customerBalance: number | undefined;
-      if (isCredit) {
-        await tx.customerCredit.create({
-          data: {
-            shopId: input.shopId,
-            customerId: input.customerId!,
-            type: 'PURCHASE',
-            amount: totalAmount,
-            saleId: sale.id,
-            userId: input.userId,
-            note: `Credit sale ${sale.receiptNumber ?? sale.id}`,
-          },
-        });
-        const updatedCustomer = await tx.customer.update({
-          where: { id: input.customerId! },
-          data: { balance: { increment: totalAmount } },
-        });
-        customerBalance = updatedCustomer.balance;
-      }
+        // Receipt-number collision under concurrency: the @@unique([shopId,
+        // receiptNumber]) constraint fired. Retry the whole transaction — the
+        // recomputed count now includes the winner, so we advance to the next
+        // number. Bounded so a genuine, persistent fault can't spin forever.
+        if (isUniqueViolationOn(err, 'receiptNumber') && attempt < MAX_RECEIPT_RETRIES) {
+          continue;
+        }
 
-      // Expose the customer's new outstanding balance on the sale so the POS
-      // receipt can print it for credit sales (undefined for non-credit).
-      return { ...sale, customerBalance };
-      });
-    } catch (err) {
-      // Race-proof idempotency backstop: two in-flight replays of the same
-      // localId — the loser hits the @@unique([shopId, localId]) constraint.
-      // Return the winner's committed sale instead of surfacing a 500.
-      if (
-        input.localId &&
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === 'P2002'
-      ) {
-        const existing = await prisma.sale.findFirst({
-          where: { shopId: input.shopId, localId: input.localId },
-          include: { items: true },
-        });
-        if (existing) return existing;
+        throw err;
       }
-      throw err;
     }
 
     // Increment usage counter
@@ -436,7 +527,7 @@ export class SaleService {
   /**
    * Void a sale
    */
-  static async voidSale(saleId: string, shopId: string, userId: string, reason: string) {
+  static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
     const sale = await prisma.sale.findFirst({
       where: {
         id: saleId,
