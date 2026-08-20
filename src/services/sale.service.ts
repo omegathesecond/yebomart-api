@@ -4,6 +4,7 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
+import { evaluateCredit, CreditLimitExceededError } from './customerCredit.service';
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -124,7 +125,9 @@ export class SaleService {
     // default to taxRate 0 → tax 0, total = subtotal - discount (unchanged).
     const shop = await prisma.shop.findUnique({
       where: { id: input.shopId },
-      select: { taxRate: true, taxInclusive: true },
+      // currencySymbol is only needed to format the credit-limit rejection
+      // message, but it's free to fetch alongside the tax config.
+      select: { taxRate: true, taxInclusive: true, currencySymbol: true },
     });
     if (!shop) {
       throw new Error('Shop not found');
@@ -133,7 +136,22 @@ export class SaleService {
       taxRate: shop.taxRate,
       taxInclusive: shop.taxInclusive,
     });
-    const change = input.amountPaid - totalAmount;
+    // CREDIT ("on the book" / pay-later) sales: nothing is tendered now, so the
+    // amountPaid >= total guard is intentionally skipped and amountPaid/change
+    // are forced to 0 regardless of what the client sent. The full total is
+    // instead added to the customer's running balance via a CustomerCredit
+    // PURCHASE entry written inside the transaction below.
+    const isCredit = input.paymentMethod === 'CREDIT';
+
+    // A pay-later sale has to land on someone's book. Reject up front (the Joi
+    // schema also enforces this) rather than silently posting an unattributable
+    // credit sale.
+    if (isCredit && !input.customerId) {
+      throw new Error('A customer is required for credit (pay-later) sales');
+    }
+
+    const amountPaid = isCredit ? 0 : input.amountPaid;
+    const change = isCredit ? 0 : amountPaid - totalAmount;
 
     if (change < 0) {
       throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
@@ -188,6 +206,48 @@ export class SaleService {
           });
 
           const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
+
+          // Credit check BEFORE any write. Read the customer inside the
+          // transaction so the balance we evaluate is the committed one (the
+          // same reason the stock guard below lives in here), and so a rejection
+          // rolls back cleanly having touched nothing. Reuses evaluateCredit —
+          // the single source of truth for the PURCHASE sign and the
+          // "creditLimit <= 0 means unlimited" rule — so the POS and the manual
+          // ledger endpoint can never disagree about what "over the limit" means.
+          let creditCustomer: { id: string; name: string; balance: number; creditLimit: number } | null =
+            null;
+          let creditEvaluation: ReturnType<typeof evaluateCredit> | null = null;
+
+          if (isCredit) {
+            creditCustomer = await tx.customer.findFirst({
+              where: { id: input.customerId!, shopId: input.shopId },
+              select: { id: true, name: true, balance: true, creditLimit: true },
+            });
+            if (!creditCustomer) {
+              throw new Error('Customer not found for credit sale');
+            }
+
+            creditEvaluation = evaluateCredit({
+              type: 'PURCHASE',
+              amount: totalAmount,
+              currentBalance: creditCustomer.balance,
+              creditLimit: creditCustomer.creditLimit,
+            });
+
+            // Over the limit → refuse the sale loudly. There is deliberately no
+            // override at the till: the cashier must take a payment or an owner
+            // must raise the limit first.
+            if (creditEvaluation.exceedsLimit) {
+              throw new CreditLimitExceededError({
+                customerName: creditCustomer.name,
+                currencySymbol: shop.currencySymbol,
+                amount: totalAmount,
+                creditLimit: creditCustomer.creditLimit,
+                currentBalance: creditCustomer.balance,
+                attemptedBalance: creditEvaluation.newBalance,
+              });
+            }
+          }
 
           // Decrement stock FIRST with an atomic, guarded write so an oversell
           // can never even create the sale. Doing this before tx.sale.create
@@ -258,7 +318,7 @@ export class SaleService {
               tax,
               totalAmount,
               paymentMethod: input.paymentMethod,
-              amountPaid: input.amountPaid,
+              amountPaid,
               change,
               status: 'COMPLETED',
               localId: input.localId,
@@ -278,7 +338,34 @@ export class SaleService {
             await tx.stockLog.create({ data: { ...log, reference: sale.id } });
           }
 
-          return sale;
+          // Credit sale: book it to the customer's ledger. Same effect as
+          // CustomerController.addCredit, but committed atomically with the sale
+          // so stock, the sale row, the ledger entry and the balance can never
+          // drift apart. Stock was still decremented above — a credit sale draws
+          // down inventory exactly like a paid one.
+          let customerBalance: number | undefined;
+          if (isCredit && creditCustomer && creditEvaluation) {
+            await tx.customerCredit.create({
+              data: {
+                shopId: input.shopId,
+                customerId: creditCustomer.id,
+                type: 'PURCHASE',
+                amount: totalAmount,
+                saleId: sale.id,
+                userId: input.userId,
+                note: `Credit sale ${sale.receiptNumber}`,
+              },
+            });
+            const updatedCustomer = await tx.customer.update({
+              where: { id: creditCustomer.id },
+              data: { balance: { increment: creditEvaluation.balanceChange } },
+            });
+            customerBalance = updatedCustomer.balance;
+          }
+
+          // customerBalance rides along on the sale so the POS receipt can print
+          // the customer's new outstanding balance. undefined for non-credit.
+          return { ...sale, customerBalance };
         });
         break; // committed successfully
       } catch (err) {

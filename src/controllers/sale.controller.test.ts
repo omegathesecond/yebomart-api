@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { SaleController, smsReceiptSchema } from './sale.controller';
-import { resetDb, seedShop, seedSale } from '../test/prismaFake';
+import { SaleController, smsReceiptSchema, createSaleSchema } from './sale.controller';
+import { resetDb, seedShop, seedSale, seedProduct, seedCustomer, table } from '../test/prismaFake';
 
 // emailReceipt dynamically imports @services/yebopay.client — vi.mock still
 // hoists and intercepts that resolution regardless of the static/dynamic
@@ -307,5 +307,119 @@ describe('smsReceiptSchema — phone validation + normalization', () => {
     const { error, value } = smsReceiptSchema.validate({ saleId: 's1', phone: '+268 7842-2613' });
     expect(error).toBeUndefined();
     expect(value.phone).toBe('+26878422613');
+  });
+});
+
+describe('createSaleSchema — a credit sale must name a customer', () => {
+  const base = {
+    items: [{ productId: 'prod_1', quantity: 1 }],
+    amountPaid: 0,
+  };
+
+  it('rejects CREDIT with no customerId', () => {
+    const { error } = createSaleSchema.validate({ ...base, paymentMethod: 'CREDIT' });
+    expect(error?.message).toMatch(/customer is required for credit/i);
+  });
+
+  it('rejects CREDIT with an empty customerId', () => {
+    const { error } = createSaleSchema.validate({
+      ...base,
+      paymentMethod: 'CREDIT',
+      customerId: '',
+    });
+    expect(error?.message).toMatch(/customer is required for credit/i);
+  });
+
+  it('accepts CREDIT with a customerId', () => {
+    const { error } = createSaleSchema.validate({
+      ...base,
+      paymentMethod: 'CREDIT',
+      customerId: 'cust_1',
+    });
+    expect(error).toBeUndefined();
+  });
+
+  it('still allows CASH with no customerId (attaching a buyer stays optional)', () => {
+    const { error } = createSaleSchema.validate({
+      ...base,
+      paymentMethod: 'CASH',
+      amountPaid: 50,
+    });
+    expect(error).toBeUndefined();
+  });
+});
+
+describe('SaleController.create — credit ("on the book") sales', () => {
+  it('books the sale to the customer ledger and returns the new balance for the receipt', async () => {
+    seedShop({ id: 'shop_1' });
+    const product = seedProduct({ shopId: 'shop_1', sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId: 'shop_1', balance: 20, creditLimit: 0 });
+    const res = mockRes();
+
+    await SaleController.create(
+      reqFor({
+        items: [{ productId: product.id, quantity: 3 }],
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        customerId: customer.id,
+      }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data.amountPaid).toBe(0);
+    expect(res.body.data.customerBalance).toBe(50);
+  });
+
+  it('returns 422 CREDIT_LIMIT_EXCEEDED with the numbers, not a silent success', async () => {
+    seedShop({ id: 'shop_1', currencySymbol: 'E' });
+    const product = seedProduct({ shopId: 'shop_1', sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId: 'shop_1', balance: 80, creditLimit: 100 });
+    const res = mockRes();
+
+    await SaleController.create(
+      reqFor({
+        items: [{ productId: product.id, quantity: 3 }], // 30 → would be 110 > 100
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        customerId: customer.id,
+      }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body.success).toBe(false);
+    expect(res.body.code).toBe('CREDIT_LIMIT_EXCEEDED');
+    expect(res.body.message).toMatch(/Credit limit exceeded/);
+    expect(res.body.meta).toMatchObject({
+      requiresOverride: false,
+      creditLimit: 100,
+      currentBalance: 80,
+      attemptedBalance: 110,
+    });
+
+    // Nothing committed: no sale, no ledger entry, stock untouched.
+    expect(table('sale')).toHaveLength(0);
+    expect(table('customerCredit')).toHaveLength(0);
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(100);
+  });
+
+  it('returns 400 (not 500) when a credit sale reaches the service with no customer', async () => {
+    seedShop({ id: 'shop_1' });
+    const product = seedProduct({ shopId: 'shop_1', sellPrice: 10, quantity: 100 });
+    const res = mockRes();
+
+    await SaleController.create(
+      reqFor({
+        items: [{ productId: product.id, quantity: 1 }],
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+      }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/customer is required for credit/i);
+    expect(table('sale')).toHaveLength(0);
   });
 });
