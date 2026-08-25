@@ -5,6 +5,7 @@ import {
   updateSupplierSchema,
   listSuppliersSchema,
   supplierProductSchema,
+  listSupplierLedgerSchema,
 } from '@controllers/supplier.controller';
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
@@ -17,6 +18,9 @@ router.use(authMiddleware);
 // List and get
 router.get('/', validateQuery(listSuppliersSchema), SupplierController.list);
 router.get('/:id', SupplierController.getById);
+
+// Accounts-payable ledger (BILL/PAYMENT/ADJUSTMENT entries), newest first
+router.get('/:id/ledger', validateQuery(listSupplierLedgerSchema), SupplierController.getLedger);
 
 // Create supplier (managers only)
 router.post('/', managerAuth, validateRequest(createSupplierSchema), SupplierController.create);

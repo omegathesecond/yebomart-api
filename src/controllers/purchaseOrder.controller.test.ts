@@ -177,3 +177,24 @@ describe('PurchaseOrderController.recordPayment — partial payments against a P
     expect(table('supplierLedger').some((l) => l.type === 'PAYMENT')).toBe(false);
   });
 });
+
+describe('PurchaseOrderController.getPayments — payment history for a PO', () => {
+  it('returns the BILL + PAYMENT entries for this PO, newest first', async () => {
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    await PurchaseOrderController.recordPayment(req(poId, { amount: 30 }), mockRes());
+
+    const res = mockRes();
+    await PurchaseOrderController.getPayments(req(poId), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0]).toMatchObject({ type: 'PAYMENT', amount: 30, poId });
+    expect(res.body.data[1]).toMatchObject({ type: 'BILL', amount: 50, poId });
+  });
+
+  it('404s for a purchase order outside the caller shop', async () => {
+    const res = mockRes();
+    await PurchaseOrderController.getPayments(req('does-not-exist'), res);
+    expect(res.statusCode).toBe(404);
+  });
+});

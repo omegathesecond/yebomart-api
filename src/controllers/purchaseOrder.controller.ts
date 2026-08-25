@@ -472,4 +472,35 @@ export class PurchaseOrderController {
       ApiResponse.serverError(res, error.message, error);
     }
   }
+
+  /**
+   * Get the accounts-payable history for a purchase order — the BILL entry
+   * booked on receive plus every PAYMENT recorded against it — newest first.
+   */
+  static async getPayments(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const poId = req.params.id;
+      const po = await prisma.purchaseOrder.findFirst({
+        where: { id: poId, shopId: req.user.shopId },
+      });
+      if (!po) {
+        ApiResponse.notFound(res, 'Purchase order not found');
+        return;
+      }
+
+      const entries = await prisma.supplierLedger.findMany({
+        where: { poId },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      ApiResponse.success(res, entries);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
 }

@@ -245,10 +245,37 @@ class FakeDb {
   }
 
   findMany(model: ModelName, args: Row = {}): Row[] {
-    let out = this.tables[model].filter((r) => matchesWhere(r, args.where));
-    if (typeof args.skip === 'number') out = out.slice(args.skip);
-    if (typeof args.take === 'number') out = out.slice(0, args.take);
-    return out.map((r) =>
+    // Pair each row with its insertion index so ties (e.g. identical
+    // createdAt millisecond in fast synchronous tests) break deterministically
+    // in the direction of the primary sort clause, instead of an arbitrary
+    // stable-sort fallback to insertion order.
+    let out = this.tables[model]
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => matchesWhere(r, args.where));
+    if (args.orderBy) {
+      const clauses = Object.entries(args.orderBy as Row);
+      const primaryDir = clauses[0]?.[1];
+      out = [...out].sort((a, b) => {
+        for (const [field, dir] of clauses) {
+          const av = a.r[field];
+          const bv = b.r[field];
+          const cmp = av instanceof Date || bv instanceof Date
+            ? new Date(av).getTime() - new Date(bv).getTime()
+            : av > bv
+              ? 1
+              : av < bv
+                ? -1
+                : 0;
+          if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
+        }
+        const idxCmp = a.i - b.i;
+        return primaryDir === 'desc' ? -idxCmp : idxCmp;
+      });
+    }
+    let rows = out.map(({ r }) => r);
+    if (typeof args.skip === 'number') rows = rows.slice(args.skip);
+    if (typeof args.take === 'number') rows = rows.slice(0, args.take);
+    return rows.map((r) =>
       args.select ? project(r, args.select) : this.includeOn(model, r, args.include)
     );
   }
