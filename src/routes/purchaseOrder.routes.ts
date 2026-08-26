@@ -38,4 +38,7 @@ router.post(
   PurchaseOrderController.recordPayment
 );
 
+// Payment/billing history for this PO (BILL + PAYMENT ledger entries)
+router.get('/:id/payments', PurchaseOrderController.getPayments);
+
 export default router;
