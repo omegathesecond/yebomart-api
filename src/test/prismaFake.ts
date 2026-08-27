@@ -79,6 +79,7 @@ const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
 const PARENT_RELATIONS: Partial<Record<ModelName, Record<string, [ModelName, string]>>> = {
   sale: { shop: ['shop', 'shopId'], customer: ['customer', 'customerId'] },
   purchaseOrder: { shop: ['shop', 'shopId'], supplier: ['supplier', 'supplierId'] },
+  user: { shop: ['shop', 'shopId'] },
 };
 
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
@@ -462,6 +463,7 @@ export function seedUser(partial: Partial<Row> = {}): Row {
     email: null,
     phone: partial.phone ?? `+2687${Math.floor(Math.random() * 1e7)}`,
     role: 'CASHIER',
+    isActive: true,
     ...partial,
   });
 }
