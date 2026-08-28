@@ -41,7 +41,8 @@ type ModelName =
   | 'supplierLedger'
   | 'return'
   | 'returnItem'
-  | 'returnExchangeItem';
+  | 'returnExchangeItem'
+  | 'cashSession';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -63,6 +64,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   return: [],
   returnItem: [],
   returnExchangeItem: [],
+  cashSession: [],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -80,6 +82,22 @@ const PARENT_RELATIONS: Partial<Record<ModelName, Record<string, [ModelName, str
   sale: { shop: ['shop', 'shopId'], customer: ['customer', 'customerId'] },
   purchaseOrder: { shop: ['shop', 'shopId'], supplier: ['supplier', 'supplierId'] },
   user: { shop: ['shop', 'shopId'] },
+  cashSession: { shop: ['shop', 'shopId'], user: ['user', 'userId'] },
+};
+
+// Column defaults from the schema (`@default(...)`), applied on create when the
+// caller leaves the field undefined — exactly as Postgres would. These are load-
+// bearing, not a convenience: CashSessionService.open() inserts a row carrying
+// only shopId/userId/openingFloat and then relies on the DB to stamp
+// `status = OPEN` (@default(OPEN)) and `openedAt = now()` (@default(now())).
+// Those two columns are precisely what the "one open till per shop" conflict
+// check and the cash-sales time window key off, so a fake that left them
+// undefined would make both code paths silently untestable.
+const MODEL_DEFAULTS: Partial<Record<ModelName, Record<string, () => any>>> = {
+  cashSession: {
+    openedAt: () => new Date(),
+    status: () => 'OPEN',
+  },
 };
 
 function matchesWhere(rec: Row, where: Row | undefined): boolean {
@@ -131,6 +149,7 @@ class FakeDb {
     return: [],
     returnItem: [],
     returnExchangeItem: [],
+    cashSession: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -217,6 +236,9 @@ class FakeDb {
     }
     if (rec.id === undefined) rec.id = `${model}_${++this.idCounter}`;
     if (rec.createdAt === undefined) rec.createdAt = new Date();
+    for (const [field, make] of Object.entries(MODEL_DEFAULTS[model] ?? {})) {
+      if (rec[field] === undefined) rec[field] = make();
+    }
 
     this.enforceUnique(model, rec);
     this.tables[model].push(rec);
@@ -333,6 +355,59 @@ class FakeDb {
     return { count: hits.length };
   }
 
+  // --- aggregation ---
+  // Postgres semantics, faithfully: SUM over an empty (or all-NULL) set is NULL,
+  // which Prisma surfaces as `null`. The services under test lean on that with
+  // `agg._sum.totalAmount ?? 0`, so returning a helpful 0 here would hide the
+  // very branch those `??`s exist for.
+  private aggregateRows(rows: Row[], args: Row): Row {
+    const out: Row = {};
+    if (args._sum) {
+      out._sum = {};
+      for (const field of Object.keys(args._sum)) {
+        const vals = rows.map((r) => r[field]).filter((v) => typeof v === 'number');
+        out._sum[field] = vals.length ? vals.reduce((a, b) => a + b, 0) : null;
+      }
+    }
+    if (args._count !== undefined) {
+      // `_count: true` -> a plain number; `_count: { field: true }` -> an object
+      // of per-field non-null counts. Same discrimination Prisma makes.
+      if (args._count === true) {
+        out._count = rows.length;
+      } else {
+        out._count = {};
+        for (const field of Object.keys(args._count)) {
+          out._count[field] =
+            field === '_all' ? rows.length : rows.filter((r) => r[field] != null).length;
+        }
+      }
+    }
+    return out;
+  }
+
+  aggregate(model: ModelName, args: Row = {}): Row {
+    return this.aggregateRows(
+      this.tables[model].filter((r) => matchesWhere(r, args.where)),
+      args
+    );
+  }
+
+  groupBy(model: ModelName, args: Row = {}): Row[] {
+    const by: string[] = Array.isArray(args.by) ? args.by : [args.by];
+    const groups = new Map<string, Row[]>();
+    for (const r of this.tables[model].filter((rec) => matchesWhere(rec, args.where))) {
+      const key = JSON.stringify(by.map((f) => r[f] ?? null));
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(r);
+      else groups.set(key, [r]);
+    }
+    return [...groups.values()].map((bucket) => {
+      const out: Row = {};
+      for (const f of by) out[f] = bucket[0][f] ?? null;
+      return { ...out, ...this.aggregateRows(bucket, args) };
+    });
+  }
+
   async transaction(arg: any): Promise<any> {
     if (typeof arg === 'function') {
       // Serialize interactive transactions. A real DB gives each transaction
@@ -375,6 +450,8 @@ function model(name: ModelName) {
       db.includeOn(name, db.createOne(name, args.data), args.include),
     update: async (args: Row) => db.update(name, args),
     updateMany: async (args: Row) => db.updateMany(name, args),
+    aggregate: async (args?: Row) => db.aggregate(name, args),
+    groupBy: async (args?: Row) => db.groupBy(name, args),
   };
 }
 
@@ -399,6 +476,7 @@ export const prismaFake: any = {
   return: model('return'),
   returnItem: model('returnItem'),
   returnExchangeItem: model('returnExchangeItem'),
+  cashSession: model('cashSession'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 
@@ -538,5 +616,24 @@ export function seedSale(partial: Partial<Row> = {}): Row {
     receiptNumber: 'RCP-260626-0001',
     ...(items ? { items: { create: items } } : {}),
     ...rest,
+  });
+}
+
+// Seed a CashSession (till). Defaults to an OPEN drawer for shop_1 with a float
+// of 100. Pass `status: 'CLOSED'` plus closedAt/countedCash/expectedCash/variance
+// to stage an already-cashed-up shift, and an explicit `openedAt` when the test
+// needs a deterministic window for the cash-sales tally.
+export function seedCashSession(partial: Partial<Row> = {}): Row {
+  return db.createOne('cashSession', {
+    shopId: 'shop_1',
+    userId: null,
+    openingFloat: 100,
+    closedAt: null,
+    countedCash: null,
+    expectedCash: null,
+    variance: null,
+    notes: null,
+    updatedAt: new Date(),
+    ...partial,
   });
 }
