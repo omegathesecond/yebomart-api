@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   ExpenseController,
   createExpenseSchema,
+  updateExpenseSchema,
   listExpensesSchema,
 } from '@controllers/expense.controller';
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
@@ -17,6 +18,7 @@ router.get('/summary', ExpenseController.getSummary);
 
 // CRUD
 router.post('/', managerAuth, validateRequest(createExpenseSchema), ExpenseController.create);
+router.put('/:id', managerAuth, validateRequest(updateExpenseSchema), ExpenseController.update);
 router.delete('/:id', managerAuth, ExpenseController.delete);
 
 export default router;

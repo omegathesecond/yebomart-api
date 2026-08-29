@@ -33,6 +33,7 @@ type ModelName =
   | 'stockLog'
   | 'customer'
   | 'customerCredit'
+  | 'expense'
   | 'user'
   | 'admin'
   | 'supplier'
@@ -55,6 +56,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   stockLog: [],
   customer: [['shopId', 'phone']],
   customerCredit: [],
+  expense: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
   supplier: [['shopId', 'phone']],
@@ -140,6 +142,7 @@ class FakeDb {
     stockLog: [],
     customer: [],
     customerCredit: [],
+    expense: [],
     user: [],
     admin: [],
     supplier: [],
@@ -467,6 +470,7 @@ export const prismaFake: any = {
   stockLog: model('stockLog'),
   customer: model('customer'),
   customerCredit: model('customerCredit'),
+  expense: model('expense'),
   user: model('user'),
   admin: model('admin'),
   supplier: model('supplier'),
@@ -530,6 +534,18 @@ export function seedCustomer(partial: Partial<Row> = {}): Row {
     creditLimit: 0,
     balance: 0,
     isActive: true,
+    ...partial,
+  });
+}
+
+export function seedExpense(partial: Partial<Row> = {}): Row {
+  return db.createOne('expense', {
+    shopId: 'shop_1',
+    category: 'SUPPLIES',
+    amount: 100,
+    description: 'Packaging',
+    date: new Date('2026-08-01T00:00:00.000Z'),
+    receiptUrl: null,
     ...partial,
   });
 }
