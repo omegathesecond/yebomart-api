@@ -7,6 +7,7 @@
     "dev": "nodemon --exec ts-node -r tsconfig-paths/register src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json",
     "build": "tsc && tsc-alias",
     "start": "node dist/server.js",
     "lint": "eslint . --ext .ts",

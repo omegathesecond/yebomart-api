@@ -34,6 +34,27 @@ function reqAuth(user: any, body: Record<string, any> = {}): any {
   return { user, body };
 }
 
+// prismaFake is typed `any` (it's a structural stand-in for PrismaClient), so
+// spying directly on `prismaFake.shop`/`prismaFake.user` leaves TS unable to
+// infer the mock's call-argument type (it comes back `unknown`). Casting to
+// this narrow interface before spying gives `findMany`/`count` spies a real
+// `QueryArgs` parameter type, so `mock.calls[0][0].where` etc. type-check.
+type QueryArgs = {
+  where: Record<string, any>;
+  select?: Record<string, any>;
+  orderBy?: Record<string, any>;
+  skip?: number;
+  take?: number;
+};
+
+interface QueryableModel {
+  findMany(args: QueryArgs): Promise<any[]>;
+  count(args: QueryArgs): Promise<number>;
+}
+
+const shopModel = prismaFake.shop as QueryableModel;
+const userModel = prismaFake.user as QueryableModel;
+
 beforeEach(() => {
   resetDb();
   vi.restoreAllMocks();
@@ -41,8 +62,8 @@ beforeEach(() => {
 
 describe('AdminController.getShops — server-side filtering', () => {
   it('search builds the expected OR where and feeds the SAME where to count', async () => {
-    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
-    const count = vi.spyOn(prismaFake.shop, 'count');
+    const findMany = vi.spyOn(shopModel, 'findMany');
+    const count = vi.spyOn(shopModel, 'count');
 
     await AdminController.getShops(reqWith({ search: 'acme' }), mockRes());
 
@@ -74,8 +95,8 @@ describe('AdminController.getShops — server-side filtering', () => {
   });
 
   it('an invalid status short-circuits to an empty page WITHOUT querying', async () => {
-    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
-    const count = vi.spyOn(prismaFake.shop, 'count');
+    const findMany = vi.spyOn(shopModel, 'findMany');
+    const count = vi.spyOn(shopModel, 'count');
 
     const res = mockRes();
     await AdminController.getShops(reqWith({ status: 'GALAXY' }), res);
@@ -88,7 +109,7 @@ describe('AdminController.getShops — server-side filtering', () => {
   });
 
   it("treats status 'all' and an absent status as no filter", async () => {
-    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+    const findMany = vi.spyOn(shopModel, 'findMany');
 
     await AdminController.getShops(reqWith({ status: 'all' }), mockRes());
     expect(findMany.mock.calls[0][0].where).toEqual({});
@@ -102,8 +123,8 @@ describe('AdminController.getShops — server-side filtering', () => {
 
 describe('AdminController.getUsers — server-side filtering', () => {
   it('search builds the expected OR where (incl. shop name) and feeds the SAME where to count', async () => {
-    const findMany = vi.spyOn(prismaFake.user, 'findMany');
-    const count = vi.spyOn(prismaFake.user, 'count');
+    const findMany = vi.spyOn(userModel, 'findMany');
+    const count = vi.spyOn(userModel, 'count');
 
     await AdminController.getUsers(reqWith({ search: 'jane' }), mockRes());
 
@@ -134,8 +155,8 @@ describe('AdminController.getUsers — server-side filtering', () => {
   });
 
   it('an invalid role short-circuits to an empty page WITHOUT querying', async () => {
-    const findMany = vi.spyOn(prismaFake.user, 'findMany');
-    const count = vi.spyOn(prismaFake.user, 'count');
+    const findMany = vi.spyOn(userModel, 'findMany');
+    const count = vi.spyOn(userModel, 'count');
 
     const res = mockRes();
     await AdminController.getUsers(reqWith({ role: 'WIZARD' }), res);
@@ -147,7 +168,7 @@ describe('AdminController.getUsers — server-side filtering', () => {
   });
 
   it("treats role 'all' and an absent role as no filter", async () => {
-    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+    const findMany = vi.spyOn(userModel, 'findMany');
 
     await AdminController.getUsers(reqWith({ role: 'all' }), mockRes());
     expect(findMany.mock.calls[0][0].where).toEqual({});
@@ -167,7 +188,7 @@ describe('AdminController.getUsers — server-side filtering', () => {
 
 describe('AdminController.getShops — pagination', () => {
   it('translates page/limit into skip=(page-1)*limit and take=limit on findMany', async () => {
-    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+    const findMany = vi.spyOn(shopModel, 'findMany');
 
     await AdminController.getShops(reqWith({ page: '3', limit: '10' }), mockRes());
 
@@ -178,7 +199,7 @@ describe('AdminController.getShops — pagination', () => {
   });
 
   it('orders by createdAt desc (newest first)', async () => {
-    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+    const findMany = vi.spyOn(shopModel, 'findMany');
 
     await AdminController.getShops(reqWith({}), mockRes());
 
@@ -186,7 +207,7 @@ describe('AdminController.getShops — pagination', () => {
   });
 
   it('defaults to page 1 / limit 20 (skip 0, take 20) when params are absent', async () => {
-    const findMany = vi.spyOn(prismaFake.shop, 'findMany');
+    const findMany = vi.spyOn(shopModel, 'findMany');
 
     const res = mockRes();
     await AdminController.getShops(reqWith({}), res);
@@ -208,7 +229,7 @@ describe('AdminController.getShops — pagination', () => {
 
 describe('AdminController.getUsers — pagination', () => {
   it('translates page/limit into skip=(page-1)*limit and take=limit on findMany', async () => {
-    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+    const findMany = vi.spyOn(userModel, 'findMany');
 
     await AdminController.getUsers(reqWith({ page: '3', limit: '10' }), mockRes());
 
@@ -219,7 +240,7 @@ describe('AdminController.getUsers — pagination', () => {
   });
 
   it('orders by createdAt desc (newest first)', async () => {
-    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+    const findMany = vi.spyOn(userModel, 'findMany');
 
     await AdminController.getUsers(reqWith({}), mockRes());
 
@@ -227,7 +248,7 @@ describe('AdminController.getUsers — pagination', () => {
   });
 
   it('defaults to page 1 / limit 20 (skip 0, take 20) when params are absent', async () => {
-    const findMany = vi.spyOn(prismaFake.user, 'findMany');
+    const findMany = vi.spyOn(userModel, 'findMany');
 
     const res = mockRes();
     await AdminController.getUsers(reqWith({}), res);
