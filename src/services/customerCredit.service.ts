@@ -76,3 +76,47 @@ export function evaluateCredit(params: {
 
   return { balanceChange, newBalance, exceedsLimit };
 }
+
+/** Format an amount with the shop's currency symbol, e.g. "E1,250.00". */
+function money(symbol: string, amount: number): string {
+  return `${symbol}${amount.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/**
+ * Thrown when a ledger entry would push a customer past their credit limit.
+ *
+ * Carries the numbers so the HTTP layer can emit the same machine-readable
+ * `CREDIT_LIMIT_EXCEEDED` contract that POST /customers/:id/credit already
+ * returns (code + meta), instead of the caller string-matching a message.
+ * Used by the POS credit-sale path, where — unlike the manual ledger endpoint —
+ * there is no owner override: an over-limit sale is simply refused.
+ */
+export class CreditLimitExceededError extends Error {
+  readonly creditLimit: number;
+  readonly currentBalance: number;
+  readonly attemptedBalance: number;
+
+  constructor(params: {
+    customerName: string;
+    currencySymbol: string;
+    amount: number;
+    creditLimit: number;
+    currentBalance: number;
+    attemptedBalance: number;
+  }) {
+    super(
+      `Credit limit exceeded: this sale of ${money(params.currencySymbol, params.amount)} ` +
+        `would raise ${params.customerName}'s balance to ` +
+        `${money(params.currencySymbol, params.attemptedBalance)}, over their ` +
+        `${money(params.currencySymbol, params.creditLimit)} limit. ` +
+        `Take a payment towards their account or raise their limit first.`,
+    );
+    this.name = 'CreditLimitExceededError';
+    this.creditLimit = params.creditLimit;
+    this.currentBalance = params.currentBalance;
+    this.attemptedBalance = params.attemptedBalance;
+  }
+}

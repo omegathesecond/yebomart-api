@@ -1,10 +1,8 @@
 import { Response } from 'express';
 import Joi from 'joi';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
-
-const prisma = new PrismaClient();
 
 export const createSupplierSchema = Joi.object({
   name: Joi.string().required().min(2).max(200),
@@ -55,6 +53,11 @@ export const supplierProductSchema = Joi.object({
   leadDays: Joi.number().optional().integer().min(0),
   sku: Joi.string().optional().max(50),
   isPreferred: Joi.boolean().optional().default(false),
+});
+
+export const listSupplierLedgerSchema = Joi.object({
+  page: Joi.number().optional().integer().min(1).default(1),
+  limit: Joi.number().optional().integer().min(1).max(100).default(50),
 });
 
 export class SupplierController {
@@ -169,6 +172,51 @@ export class SupplierController {
       }
 
       ApiResponse.success(res, supplier);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * Get a supplier's accounts-payable ledger (BILL/PAYMENT/ADJUSTMENT entries),
+   * newest first. Mirrors PurchaseOrderController.recordPayment's writes and
+   * PurchaseOrderController.receive's BILL postings.
+   */
+  static async getLedger(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const supplier = await prisma.supplier.findFirst({
+        where: { id: req.params.id, shopId: req.user.shopId },
+      });
+      if (!supplier) {
+        ApiResponse.notFound(res, 'Supplier not found');
+        return;
+      }
+
+      const { page = 1, limit = 50 } = req.query as any;
+      const skip = (page - 1) * limit;
+
+      const [entries, total] = await Promise.all([
+        prisma.supplierLedger.findMany({
+          where: { supplierId: req.params.id },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: parseInt(limit),
+        }),
+        prisma.supplierLedger.count({ where: { supplierId: req.params.id } }),
+      ]);
+
+      ApiResponse.success(res, entries, undefined, 200, {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        hasNext: skip + entries.length < total,
+        hasPrev: page > 1,
+      });
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }

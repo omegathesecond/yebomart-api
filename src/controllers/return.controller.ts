@@ -1,10 +1,8 @@
 import { Response } from 'express';
 import Joi from 'joi';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
-
-const prisma = new PrismaClient();
 
 export const createReturnSchema = Joi.object({
   saleId: Joi.string().optional(),
@@ -28,6 +26,8 @@ export const createReturnSchema = Joi.object({
       unitPrice: Joi.number().required().min(0),
     })
   ).optional(),
+  // Accepted for backward compatibility but IGNORED — the server always derives
+  // the refund from the (sale-validated) line items. See ReturnController.create.
   refundAmount: Joi.number().optional().min(0),
   notes: Joi.string().optional().max(1000),
 });
@@ -57,12 +57,117 @@ export class ReturnController {
         return;
       }
 
-      const { saleId, customerId, reason, type, items, exchangeItems, refundAmount, notes } = req.body;
+      // NOTE: refundAmount is deliberately NOT read from the body — it is always
+      // derived server-side below. saleId/customerId from the body are treated as
+      // untrusted references and validated against the caller's shop before use.
+      const { saleId, customerId, reason, type, items, exchangeItems, notes } = req.body;
       const shopId = req.user.shopId;
 
-      // Calculate total refund if not provided
-      const calculatedRefund = refundAmount ?? items.reduce(
-        (sum: number, item: any) => sum + (item.quantity * item.unitPrice),
+      // A customer reference must belong to the caller's shop — never trust a
+      // customerId that points at another shop's customer.
+      if (customerId) {
+        const customer = await prisma.customer.findFirst({
+          where: { id: customerId, shopId },
+        });
+        if (!customer) {
+          ApiResponse.badRequest(res, 'Customer not found in this shop');
+          return;
+        }
+      }
+
+      // Build the return line items. When a sale is referenced, the sale must
+      // belong to the caller's shop and every returned item must be a line on
+      // that sale; quantities are capped at what was sold and prices are taken
+      // from the sale snapshot (NOT the request) so a cashier cannot inflate the
+      // refund or reference another shop's sale.
+      let returnLines: Array<{
+        productId: string;
+        productName: string;
+        quantity: number;
+        unitPrice: number;
+        restockable: boolean;
+      }>;
+
+      if (saleId) {
+        const sale = await prisma.sale.findFirst({
+          where: { id: saleId, shopId },
+          include: { items: true },
+        });
+        if (!sale) {
+          ApiResponse.badRequest(res, 'Sale not found in this shop');
+          return;
+        }
+
+        // Aggregate what was sold, per product (a product may span multiple lines).
+        const soldByProduct = new Map<
+          string,
+          { quantity: number; unitPrice: number; productName: string }
+        >();
+        for (const line of sale.items) {
+          const existing = soldByProduct.get(line.productId);
+          if (existing) {
+            existing.quantity += line.quantity;
+          } else {
+            soldByProduct.set(line.productId, {
+              quantity: line.quantity,
+              unitPrice: line.unitPrice,
+              productName: line.productName,
+            });
+          }
+        }
+
+        // Tally the requested return quantities per product so that duplicate
+        // lines for the same product can't collectively exceed what was sold.
+        const requestedByProduct = new Map<string, number>();
+        for (const item of items) {
+          requestedByProduct.set(
+            item.productId,
+            (requestedByProduct.get(item.productId) ?? 0) + item.quantity
+          );
+        }
+
+        for (const [productId, requestedQty] of requestedByProduct) {
+          const sold = soldByProduct.get(productId);
+          if (!sold) {
+            ApiResponse.badRequest(res, `Item ${productId} was not part of sale ${saleId}`);
+            return;
+          }
+          if (requestedQty > sold.quantity) {
+            ApiResponse.badRequest(
+              res,
+              `Cannot return ${requestedQty} of "${sold.productName}"; only ${sold.quantity} were sold`
+            );
+            return;
+          }
+        }
+
+        returnLines = items.map((item: any) => {
+          const sold = soldByProduct.get(item.productId)!;
+          return {
+            productId: item.productId,
+            productName: sold.productName, // snapshot from the sale, not the request
+            quantity: item.quantity,
+            unitPrice: sold.unitPrice, // server-side price, not the request
+            restockable: item.restockable ?? true,
+          };
+        });
+      } else {
+        // Receiptless return (no sale reference): there is no server-side price
+        // to validate against, so keep the supplied lines as-is. The refund is
+        // still derived from these lines below (never an arbitrary body value).
+        returnLines = items.map((item: any) => ({
+          productId: item.productId,
+          productName: item.productName,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          restockable: item.restockable ?? true,
+        }));
+      }
+
+      // Refund is ALWAYS computed from the validated lines — never trusted from
+      // the request body.
+      const calculatedRefund = returnLines.reduce(
+        (sum, item) => sum + item.quantity * item.unitPrice,
         0
       );
 
@@ -70,8 +175,8 @@ export class ReturnController {
       const returnRecord = await prisma.return.create({
         data: {
           shopId,
-          saleId,
-          customerId,
+          saleId: saleId ?? undefined,
+          customerId: customerId ?? undefined,
           userId: req.user.type === 'user' ? req.user.id : undefined,
           reason,
           type,
@@ -79,12 +184,12 @@ export class ReturnController {
           status: 'PENDING',
           notes,
           items: {
-            create: items.map((item: any) => ({
+            create: returnLines.map((item) => ({
               productId: item.productId,
               productName: item.productName,
               quantity: item.quantity,
               unitPrice: item.unitPrice,
-              restockable: item.restockable ?? true,
+              restockable: item.restockable,
             })),
           },
           exchangeItems: exchangeItems ? {

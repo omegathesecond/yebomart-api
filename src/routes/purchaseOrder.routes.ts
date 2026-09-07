@@ -4,6 +4,7 @@ import {
   createPurchaseOrderSchema,
   listPurchaseOrdersSchema,
   receivePurchaseOrderSchema,
+  recordPaymentSchema,
 } from '@controllers/purchaseOrder.controller';
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
@@ -27,5 +28,17 @@ router.post(
   validateRequest(receivePurchaseOrderSchema),
   PurchaseOrderController.receive
 );
+
+// Record a payment to the supplier against a PO (managers only). Supports
+// partial payments until the PO's balance due is settled.
+router.post(
+  '/:id/payments',
+  managerAuth,
+  validateRequest(recordPaymentSchema),
+  PurchaseOrderController.recordPayment
+);
+
+// Payment/billing history for this PO (BILL + PAYMENT ledger entries)
+router.get('/:id/payments', PurchaseOrderController.getPayments);
 
 export default router;

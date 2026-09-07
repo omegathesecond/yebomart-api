@@ -12,6 +12,20 @@ export const createExpenseSchema = Joi.object({
   receiptUrl: Joi.string().optional().uri(),
 });
 
+/**
+ * PUT /api/expenses/:id — every field optional (partial update).
+ * `receiptUrl` allows '' so removing an attached receipt actually clears the
+ * stored url (mirrors updateProductSchema's imageUrl); the create schema has
+ * no allow('') because Joi's .uri() would reject an empty string there.
+ */
+export const updateExpenseSchema = Joi.object({
+  category: Joi.string().optional().valid('RENT', 'UTILITIES', 'SUPPLIES', 'WAGES', 'TRANSPORT', 'MARKETING', 'REPAIRS', 'OTHER'),
+  amount: Joi.number().optional().min(0),
+  description: Joi.string().optional().max(500).allow(''),
+  date: Joi.date().optional(),
+  receiptUrl: Joi.string().optional().uri().allow(''),
+}).min(1);
+
 export const listExpensesSchema = Joi.object({
   page: Joi.number().optional().integer().min(1).default(1),
   limit: Joi.number().optional().integer().min(1).max(100).default(20),
@@ -141,6 +155,42 @@ export class ExpenseController {
       });
     } catch (error: any) {
       ApiResponse.serverError(res, error.message);
+    }
+  }
+
+  /**
+   * Update expense (partial). Scoped to the caller's shop so one shop can
+   * never edit another's row.
+   */
+  static async update(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const { id } = req.params;
+      const existing = await prisma.expense.findFirst({
+        where: { id, shopId: req.user.shopId },
+      });
+
+      if (!existing) {
+        ApiResponse.notFound(res, 'Expense not found');
+        return;
+      }
+
+      // An explicit '' means "detach the receipt" — store NULL, not ''.
+      const data = { ...req.body };
+      if (data.receiptUrl === '') data.receiptUrl = null;
+
+      const expense = await prisma.expense.update({
+        where: { id },
+        data,
+      });
+
+      ApiResponse.success(res, expense, 'Expense updated');
+    } catch (error: any) {
+      ApiResponse.badRequest(res, error.message);
     }
   }
 

@@ -18,6 +18,11 @@ export const receiveStockSchema = Joi.object({
       productId: Joi.string().required(),
       quantity: Joi.number().required().integer().min(1),
       note: Joi.string().optional(),
+      // Optional new supplier cost. When present, the product's costPrice is
+      // updated to this value so COGS/profit/margin reflect the latest purchase
+      // price (mirrors the PO "update cost" receive flow). Omit it for receives
+      // that don't change cost.
+      costPrice: Joi.number().optional().min(0),
     })
   ).required().min(1),
   reference: Joi.string().optional(), // PO number, supplier, etc.

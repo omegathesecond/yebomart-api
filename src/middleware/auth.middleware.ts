@@ -14,7 +14,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { JWTUtil, IDecodedToken } from '@utils/jwt';
 import { ApiResponse } from '@utils/ApiResponse';
-import { UserRole } from '@prisma/client';
+import { UserRole, AdminRole } from '@prisma/client';
 import { JwksValidator, extractBearerToken } from '@yebo/mcp-server';
 import { prisma } from '@config/prisma';
 
@@ -180,3 +180,52 @@ export const authenticateAdmin = (req: AuthRequest, res: Response, next: NextFun
     ApiResponse.unauthorized(res, 'Authentication failed');
   }
 };
+
+/**
+ * Require the authenticated admin to hold one of the given AdminRoles.
+ * MUST be chained AFTER `authenticateAdmin` (which sets `req.user.id` from the
+ * verified admin token).
+ *
+ * The role is re-read from the Admin record on every call rather than trusted
+ * from the JWT. Admin tokens live 24h (admin.controller.ts), so a token minted
+ * before a demotion or deactivation would otherwise keep its stale privileges
+ * until expiry. Reading from the DB also enforces `isActive` — a deactivated
+ * admin's still-valid token is rejected immediately.
+ */
+export const requireAdminRole = (...roles: AdminRole[]) => {
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const adminId = req.user?.id;
+      if (!adminId || req.user?.type !== 'admin') {
+        ApiResponse.unauthorized(res, 'Admin access required');
+        return;
+      }
+
+      const admin = await prisma.admin.findUnique({
+        where: { id: adminId },
+        select: { role: true, isActive: true },
+      });
+
+      if (!admin || !admin.isActive) {
+        ApiResponse.unauthorized(res, 'Admin account not found or inactive');
+        return;
+      }
+
+      if (!roles.includes(admin.role)) {
+        ApiResponse.forbidden(res, `Required admin role: ${roles.join(' or ')}`);
+        return;
+      }
+
+      next();
+    } catch (error) {
+      console.error('Admin role check error:', error);
+      ApiResponse.error(res, 'Authorization check failed');
+    }
+  };
+};
+
+/** Only SUPER_ADMIN — for destructive cross-tenant actions (delete/suspend). */
+export const requireSuperAdmin = requireAdminRole('SUPER_ADMIN');
+
+/** ADMIN or SUPER_ADMIN — for non-destructive write actions (SUPPORT excluded). */
+export const requireAdminWrite = requireAdminRole('SUPER_ADMIN', 'ADMIN');

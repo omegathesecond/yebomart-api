@@ -26,7 +26,14 @@ vi.mock('./shop.service', () => ({
 }));
 
 import { SaleService } from './sale.service';
-import { prismaFake, resetDb, seedShop, seedProduct, table } from '../test/prismaFake';
+import {
+  prismaFake,
+  resetDb,
+  seedShop,
+  seedProduct,
+  seedCustomer,
+  table,
+} from '../test/prismaFake';
 
 let shopId: string;
 
@@ -175,6 +182,102 @@ describe('SaleService.create — offline idempotency', () => {
   });
 });
 
+describe('SaleService.create — credit ("on the book") sales', () => {
+  it('books the full total to the customer ledger, sets amountPaid/change 0, and still decrements stock', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId, balance: 20, creditLimit: 0 });
+
+    const sale = await SaleService.create(
+      saleInput({
+        items: [{ productId: product.id, quantity: 3 }], // total 30
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        customerId: customer.id,
+      })
+    );
+
+    // Pay-later: nothing tendered, no change.
+    expect(sale.amountPaid).toBe(0);
+    expect(sale.change).toBe(0);
+    expect(sale.totalAmount).toBe(30);
+
+    // A PURCHASE ledger entry linked to the sale.
+    const credits = table('customerCredit');
+    expect(credits).toHaveLength(1);
+    expect(credits[0]).toMatchObject({
+      type: 'PURCHASE',
+      amount: 30,
+      saleId: sale.id,
+      customerId: customer.id,
+      shopId,
+    });
+
+    // Balance increased by the total; new balance exposed on the sale for the receipt.
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(50); // 20 + 30
+    expect((sale as any).customerBalance).toBe(50);
+
+    // Stock still drawn down.
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(97);
+  });
+
+  it('rejects a credit sale with no customer and writes nothing', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+
+    await expect(
+      SaleService.create(
+        saleInput({
+          items: [{ productId: product.id, quantity: 1 }],
+          paymentMethod: 'CREDIT',
+          amountPaid: 0,
+        })
+      )
+    ).rejects.toThrow(/customer is required for credit/i);
+
+    expect(table('sale')).toHaveLength(0);
+    expect(table('customerCredit')).toHaveLength(0);
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(100);
+  });
+
+  it('rejects when the new balance would exceed the credit limit (and rolls back everything)', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId, balance: 80, creditLimit: 100 });
+
+    // 3 × 10 = 30 → new balance 110 > limit 100.
+    await expect(
+      SaleService.create(
+        saleInput({
+          items: [{ productId: product.id, quantity: 3 }],
+          paymentMethod: 'CREDIT',
+          amountPaid: 0,
+          customerId: customer.id,
+        })
+      )
+    ).rejects.toThrow(/Credit limit exceeded/);
+
+    expect(table('sale')).toHaveLength(0);
+    expect(table('customerCredit')).toHaveLength(0);
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(80); // untouched
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(100); // untouched
+  });
+
+  it('treats creditLimit 0 as "no limit" — allows the credit sale', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    const customer = seedCustomer({ shopId, balance: 500, creditLimit: 0 });
+
+    const sale = await SaleService.create(
+      saleInput({
+        items: [{ productId: product.id, quantity: 5 }], // total 50
+        paymentMethod: 'CREDIT',
+        amountPaid: 0,
+        customerId: customer.id,
+      })
+    );
+
+    expect(sale.totalAmount).toBe(50);
+    expect(table('customer').find((c) => c.id === customer.id)!.balance).toBe(550);
+  });
+});
+
 describe('SaleService.create — rejection paths write nothing', () => {
   it('rejects when amountPaid is less than the total and writes nothing', async () => {
     const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
@@ -214,5 +317,60 @@ describe('SaleService.create — rejection paths write nothing', () => {
     ).rejects.toThrow(/not found/);
 
     expect(table('sale')).toHaveLength(0);
+  });
+});
+
+describe('SaleService.create — concurrency hardening', () => {
+  // Regression for the lost-update / oversell race: two cashiers (or online +
+  // offline-sync) ring up the last unit at the same time. The atomic guarded
+  // decrement (updateMany WHERE quantity >= qty) must let EXACTLY ONE through.
+  // (The fake serializes $transaction callbacks, so this asserts the
+  // serializable OUTCOME — never two sales, never negative stock.)
+  it('two concurrent sales of a stock-1 product: exactly one succeeds, no oversell', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 1 });
+    const ring = () =>
+      SaleService.create(
+        saleInput({ items: [{ productId: product.id, quantity: 1 }], amountPaid: 10 })
+      );
+
+    const results = await Promise.allSettled([ring(), ring()]);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    expect(fulfilled).toHaveLength(1); // exactly one sale goes through
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(/Insufficient stock/);
+
+    // No oversell: stock floored at 0 (never negative), one Sale, one stock log.
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(0);
+    expect(table('sale')).toHaveLength(1);
+    expect(table('stockLog')).toHaveLength(1);
+  });
+
+  // Regression for duplicate receipt numbers: receiptNumber is minted from a
+  // per-shop daily count, so two concurrent sales can compute the same value.
+  // We force that collision (both transactions' first count() returns 0 -> both
+  // try RCP-...-0001); the @@unique([shopId, receiptNumber]) constraint turns
+  // the loser's insert into a P2002, and the retry recomputes the count and
+  // advances to 0002. Result: two sales, two DISTINCT receipt numbers.
+  it('concurrent sales never mint duplicate receipt numbers (unique + retry)', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 10 });
+
+    const countSpy = vi.spyOn(prismaFake.sale, 'count');
+    countSpy.mockResolvedValueOnce(0).mockResolvedValueOnce(0); // both base off 0
+
+    const ring = () =>
+      SaleService.create(
+        saleInput({ items: [{ productId: product.id, quantity: 1 }], amountPaid: 10 })
+      );
+
+    const [a, b] = await Promise.all([ring(), ring()]);
+
+    expect(table('sale')).toHaveLength(2); // both committed
+    const receipts = table('sale').map((s) => s.receiptNumber);
+    expect(new Set(receipts).size).toBe(2); // no duplicates
+    expect(a.receiptNumber).not.toBe(b.receiptNumber);
+    // Both units sold from stock of 10, no double-decrement from the retry.
+    expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(8);
   });
 });

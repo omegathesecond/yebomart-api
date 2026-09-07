@@ -40,6 +40,26 @@ export const updateUserSchema = Joi.object({
   canManageStock: Joi.boolean().optional(),
 });
 
+/**
+ * Fields on a user that grant or change authority. Only a shop OWNER may set
+ * these — touching any of them is a privilege change, never a profile edit.
+ * Exported so the route layer can gate the same set (defense in depth).
+ */
+export const PRIVILEGED_USER_FIELDS = [
+  'role',
+  'isActive',
+  'canDiscount',
+  'canVoid',
+  'canViewReports',
+  'canManageStock',
+] as const;
+
+/** True if `body` attempts to set any authority-granting field. */
+export function hasPrivilegedFields(body: Record<string, unknown> | undefined): boolean {
+  if (!body) return false;
+  return PRIVILEGED_USER_FIELDS.some((f) => f in body);
+}
+
 export class UserController {
   /**
    * Create a new user
@@ -122,9 +142,22 @@ export class UserController {
         return;
       }
 
-      // Only owners can update users (except self)
+      // Only owners can update OTHER users.
       if (req.user.role !== 'OWNER' && req.params.id !== req.user.id) {
         ApiResponse.forbidden(res, 'Only owners can update other users');
+        return;
+      }
+
+      // Privilege-escalation guard: only an OWNER may change role / active
+      // status / permission flags — even on one's own record. A non-owner is
+      // allowed a narrow self-edit of profile fields only (name/phone/email/
+      // PIN/password). We reject (rather than silently strip) so the caller
+      // sees the denial instead of a quietly-ignored change.
+      if (req.user.role !== 'OWNER' && hasPrivilegedFields(req.body)) {
+        ApiResponse.forbidden(
+          res,
+          'Only owners can change role, active status, or permission flags',
+        );
         return;
       }
 
