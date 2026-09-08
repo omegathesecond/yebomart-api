@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { SaleService } from '@services/sale.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { settlePendingCharge } from '@middleware/billing.middleware';
 import { YeboLinkClient } from '@services/yebolink.client';
 import { CreditLimitExceededError } from '@services/customerCredit.service';
 
@@ -518,6 +519,8 @@ export class SaleController {
       );
 
       const result = await YeboLinkClient.sendSMS(phone, message);
+      // Charge only once the carrier accepted it — a failed send is free.
+      await settlePendingCharge(req);
 
       ApiResponse.success(
         res,

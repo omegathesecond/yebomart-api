@@ -91,24 +91,15 @@ export const YeboLinkClient = {
     return send({ to, channel: 'email', content: { subject, html, from_name: fromName } });
   },
 
-  /**
-   * Send a text message preferring WhatsApp, falling back to SMS only when the
-   * WhatsApp send itself fails. If BOTH channels fail the error propagates —
-   * there is no silent fallback to "pretend it sent" (CLAUDE.md).
+  /*
+   * REMOVED: sendTextWithFallback (WhatsApp, then SMS on failure).
+   *
+   * The fallback was silent in cost, not in logging: one Eswatini SMS segment
+   * costs 8 YeboLink credits (~E10) against 1 for a WhatsApp message, and the
+   * daily report runs to three segments. A shop whose WhatsApp was unreachable
+   * quietly cost ~E30 a night, charged to nobody.
+   *
+   * Callers now pick a channel explicitly and are charged that channel's rate.
+   * If WhatsApp fails, fail loudly rather than spending 8x without being asked.
    */
-  async sendTextWithFallback(
-    to: string,
-    text: string,
-    fromName: string = FROM_NAME
-  ): Promise<YeboLinkSendResult & { channel: YeboLinkChannel }> {
-    try {
-      const r = await this.sendWhatsApp(to, text, fromName);
-      return { ...r, channel: 'whatsapp' };
-    } catch {
-      // WhatsApp unavailable for this number / send failed — try SMS once.
-      // If SMS also throws, the error propagates (no silent fallback).
-      const r = await this.sendSMS(to, text, fromName);
-      return { ...r, channel: 'sms' };
-    }
-  },
 };

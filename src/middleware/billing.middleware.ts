@@ -36,7 +36,7 @@ export interface PendingCharge {
  * Usage:
  *   router.get('/ai/insights',
  *     authMiddleware,
- *     requireCreditBalance(CREDIT_COSTS.AI_FLASH, 'AI assistant (Flash)'),
+ *     requireCreditBalance(CREDIT_COSTS.AI_QUESTION, 'AI assistant'),
  *     handler);   // handler must `await settlePendingCharge(req)` on success
  */
 export const requireCreditBalance = (amount: number, description: string) => {

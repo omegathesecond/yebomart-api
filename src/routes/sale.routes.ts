@@ -9,7 +9,8 @@ import {
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
 import { posLimiter } from '@middleware/rateLimit.middleware';
-import { trackUsage } from '@middleware/billing.middleware';
+import { trackUsage, requireCreditBalance } from '@middleware/billing.middleware';
+import { CREDIT_COSTS } from '@config/creditPacks';
 
 const router = Router();
 
@@ -21,7 +22,13 @@ router.get('/', validateQuery(listSalesSchema), SaleController.list);
 router.get('/daily-summary', SaleController.getDailySummary);
 router.get('/search/receipt', SaleController.searchByReceipt);
 router.post('/email-receipt', SaleController.emailReceipt);
-router.post('/sms-receipt', validateRequest(smsReceiptSchema), SaleController.smsReceipt);
+// An SMS costs us ~E10/segment to the home market, so it must be charged.
+router.post(
+  '/sms-receipt',
+  requireCreditBalance(CREDIT_COSTS.SMS, 'SMS receipt'),
+  validateRequest(smsReceiptSchema),
+  SaleController.smsReceipt,
+);
 router.get('/:id', SaleController.getById);
 
 // Create sale (with POS rate limiting and usage tracking)

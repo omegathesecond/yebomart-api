@@ -7,6 +7,8 @@ import {
 } from '@controllers/customer.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
+import { requireCreditBalance } from '@middleware/billing.middleware';
+import { CREDIT_COSTS } from '@config/creditPacks';
 
 const router = Router();
 
@@ -27,6 +29,7 @@ router.post('/:id/credit', validateRequest(addCreditSchema), CustomerController.
 router.post(
   '/:id/send-statement',
   managerAuth,
+  requireCreditBalance(CREDIT_COSTS.WHATSAPP, 'Customer statement'),
   validateRequest(sendStatementSchema),
   CustomerController.sendStatement,
 );
