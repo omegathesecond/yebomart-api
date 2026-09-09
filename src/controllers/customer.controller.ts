@@ -3,6 +3,7 @@ import Joi from 'joi';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { settlePendingCharge } from '@middleware/billing.middleware';
 import { YeboLinkClient } from '@services/yebolink.client';
 import { evaluateCredit } from '@services/customerCredit.service';
 
@@ -394,14 +395,17 @@ export class CustomerController {
     );
 
     try {
-      const result = await YeboLinkClient.sendTextWithFallback(phone, message);
+      // WhatsApp only: an SMS fallback here costs ~8x and the caller was
+      // charged the WhatsApp rate. If WhatsApp is unavailable we fail loudly.
+      const result = await YeboLinkClient.sendWhatsApp(phone, message);
+      await settlePendingCharge(req);
       ApiResponse.success(
         res,
-        { channel: result.channel, messageId: result.messageId, balance: customer.balance },
-        `${reminder ? 'Reminder' : 'Statement'} sent via ${result.channel === 'whatsapp' ? 'WhatsApp' : 'SMS'}`,
+        { channel: 'whatsapp', messageId: result.messageId, balance: customer.balance },
+        `${reminder ? 'Reminder' : 'Statement'} sent via WhatsApp`,
       );
     } catch (error: any) {
-      // YeboLink failed on both WhatsApp and SMS — surface loudly (no fallback).
+      // WhatsApp send failed — surface loudly; we do not silently spend 8x on SMS.
       ApiResponse.serverError(res, `Failed to send ${reminder ? 'reminder' : 'statement'}: ${error?.message ?? 'YeboLink error'}`);
     }
   }

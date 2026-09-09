@@ -171,7 +171,7 @@ export class NotificationService {
             cashSales: report.cashSales,
             topProducts,
           });
-          await YeboLinkClient.sendTextWithFallback(recipient, text);
+          await YeboLinkClient.sendWhatsApp(recipient, text);
           await prisma.dailyReport.update({
             where: { id: report.id },
             data: { sentViaWhatsApp: true, sentAt: new Date() },
@@ -187,7 +187,7 @@ export class NotificationService {
       if (shop.notifyLowStock && lowStock.length > 0) {
         try {
           const text = buildLowStockMessage(shop.name, lowStock);
-          await YeboLinkClient.sendTextWithFallback(recipient, text);
+          await YeboLinkClient.sendWhatsApp(recipient, text);
           summary.lowStockAlertsSent++;
         } catch (err: any) {
           console.error(`[notifications] low-stock alert send FAILED for shop ${shop.id} (${shop.name}): ${err?.message ?? err}`);

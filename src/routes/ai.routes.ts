@@ -23,37 +23,38 @@ router.use(authMiddleware);
 // call it didn't get. The wallet has no refund endpoint, hence charge-on-success
 // rather than charge-then-refund.
 //
-// chat + voice = "Pro" workload (multi-turn reasoning + context) → 1 credit
-// insights / slow-movers / summary = "Flash" workload (single-pass) → 0.5
+// Both tiers serve gemini-2.0-flash. The split is interactive vs background,
+// NOT model tier: a question the shop typed costs 1 credit, a read it never
+// asked for costs 0.5. There is no Pro model behind a Pro price.
 router.post(
   '/chat',
-  requireCreditBalance(CREDIT_COSTS.AI_PRO, 'AI assistant: chat'),
+  requireCreditBalance(CREDIT_COSTS.AI_QUESTION, 'AI assistant: chat'),
   aiLimiter,
   validateRequest(chatSchema),
   AIController.chat,
 );
 router.post(
   '/voice',
-  requireCreditBalance(CREDIT_COSTS.AI_PRO, 'AI assistant: voice'),
+  requireCreditBalance(CREDIT_COSTS.AI_QUESTION, 'AI assistant: voice'),
   aiLimiter,
   validateRequest(voiceSchema),
   AIController.voice,
 );
 router.get(
   '/insights',
-  requireCreditBalance(CREDIT_COSTS.AI_FLASH, 'AI assistant: insights'),
+  requireCreditBalance(CREDIT_COSTS.AI_INSIGHT, 'AI assistant: insights'),
   aiLimiter,
   AIController.getInsights,
 );
 router.get(
   '/slow-movers',
-  requireCreditBalance(CREDIT_COSTS.AI_FLASH, 'AI assistant: slow-movers'),
+  requireCreditBalance(CREDIT_COSTS.AI_INSIGHT, 'AI assistant: slow-movers'),
   aiLimiter,
   AIController.getSlowMovers,
 );
 router.get(
   '/summary',
-  requireCreditBalance(CREDIT_COSTS.AI_FLASH, 'AI assistant: summary'),
+  requireCreditBalance(CREDIT_COSTS.AI_INSIGHT, 'AI assistant: summary'),
   aiLimiter,
   AIController.getSummary,
 );

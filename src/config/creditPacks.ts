@@ -52,11 +52,36 @@ export function findPack(id: string): CreditPack | undefined {
   return CREDIT_PACKS.find((p) => p.id === id);
 }
 
-// Per-action credit costs. Tweak as cost-recovery dictates.
+/**
+ * Per-action credit costs, priced off LANDED COST, not guesswork.
+ *
+ * Cost basis (see yebolink/api/src/config/pricing.ts, the source of truth):
+ *   - YeboLink sells credits at $0.070 (its deepest pack) to $0.080 (list).
+ *   - 1 YeboMart credit = E1 = ~$0.055 (SZL is pegged 1:1 to ZAR).
+ *
+ * | Action        | YeboLink cost        | = SZL   | We charge | Margin |
+ * |---------------|----------------------|---------|-----------|--------|
+ * | WhatsApp      | 1 credit    ($0.070) | E1.27   | 3 credits | 58%    |
+ * | Email         | 0.1 credit  ($0.007) | E0.13   | 1 credit  | 87%    |
+ * | SMS (SZ)      | 8 cr/segment ($0.56) | E10.18  | 20 credits| 49%    |
+ * | AI question   | Gemini Flash <$0.001 | E0.02   | 1 credit  | 98%    |
+ *
+ * SMS is deliberately expensive because it IS expensive: one Eswatini segment
+ * costs 8x a WhatsApp message. Pricing it at parity (the old `SMS: 1`) lost
+ * roughly E9 on every send. The price steers traffic to WhatsApp, which is
+ * both cheaper for us and a better experience for the customer.
+ *
+ * SMS is also billed per SEGMENT by carriers (160 GSM-7 chars), and this flat
+ * rate covers one segment to the home market. Long or international messages
+ * still cost us more than we charge — see the destination-aware TODO in
+ * docs before enabling SMS as a routine channel.
+ */
 export const CREDIT_COSTS = {
-  AI_FLASH: 0.5,        // Gemini 2.0 Flash query
-  AI_PRO: 1,            // Gemini 2.0 Pro query
-  SMS: 1,
-  WHATSAPP: 2,
+  /** Interactive question to the assistant (chat + voice). Serves Flash. */
+  AI_QUESTION: 1,
+  /** Background read the shop did not explicitly ask for (insights, summary). */
+  AI_INSIGHT: 0.5,
+  SMS: 20,
+  WHATSAPP: 3,
   EMAIL: 1,
 } as const;
