@@ -13,32 +13,33 @@ datasource db {
 // ==================== SHOP & AUTH ====================
 
 model Shop {
-  id            String    @id @default(cuid())
-  name          String
+  id             String            @id @default(cuid())
+  subscription   ShopSubscription?
+  name           String
   // Owner identity = YeboID. Required. Populated at signup from the validated
   // OAuth access_token's `sub`. Profile (ownerName/Phone/Email) is fetched
   // once from /oauth/userinfo and cached here for display + comms.
-  ownerYeboidSub String   @unique @db.Uuid
-  ownerName     String
-  ownerPhone    String    @unique // E.164; mirrored from YeboID profile
-  ownerEmail    String?
+  ownerYeboidSub String            @unique @db.Uuid
+  ownerName      String
+  ownerPhone     String            @unique // E.164; mirrored from YeboID profile
+  ownerEmail     String?
 
   // Business Type (generic for any shop)
-  businessType  String    @default("general") // general, tuckshop, tyre, hardware, grocery, pharmacy, salon, etc.
-  
+  businessType String @default("general") // general, tuckshop, tyre, hardware, grocery, pharmacy, salon, etc.
+
   // AI Assistant
-  assistantName String    @default("Yebo")
-  
+  assistantName String @default("Yebo")
+
   // Country & Localization (multi-country support)
-  countryCode       String    @default("SZ")   // ISO country code (e.g., SZ, ZA, KE)
-  phoneCountryCode  String    @default("+268") // Phone prefix for the country
-  currencySymbol    String    @default("E")    // Currency symbol (e.g., E, R, KSh)
-  
+  countryCode      String @default("SZ") // ISO country code (e.g., SZ, ZA, KE)
+  phoneCountryCode String @default("+268") // Phone prefix for the country
+  currencySymbol   String @default("E") // Currency symbol (e.g., E, R, KSh)
+
   // Business Settings
-  currency      String    @default("SZL")
-  timezone      String    @default("Africa/Mbabane")
-  address       String?
-  logoUrl       String?
+  currency String  @default("SZL")
+  timezone String  @default("Africa/Mbabane")
+  address  String?
+  logoUrl  String?
 
   // Tax / VAT — per-shop config for compliant receipts. Additive with safe
   // defaults: existing shops stay at 0% so sale totals are unchanged.
@@ -46,10 +47,10 @@ model Shop {
   // taxInclusive=true   → sell prices already include VAT; the tax portion is
   //                       extracted from the price (total stays the same).
   // taxNumber prints on the receipt when the shop is VAT-registered.
-  taxRate       Float     @default(0)     // percent, e.g. 15 for 15% VAT
-  taxInclusive  Boolean   @default(false)
-  taxNumber     String?                   // VAT registration number
-  
+  taxRate      Float   @default(0) // percent, e.g. 15 for 15% VAT
+  taxInclusive Boolean @default(false)
+  taxNumber    String? // VAT registration number
+
   // Notifications — owner-controlled comms prefs. Delivered via YeboLink
   // (WhatsApp, SMS fallback) by the daily notification run. Default OFF so we
   // never burn comms credits / message owners who never opted in; the POS
@@ -61,33 +62,33 @@ model Shop {
 
   // Status — ACTIVE | SUSPENDED. Tier + license columns are gone (yebomart
   // is pay-as-you-go credits via yebopay; no per-shop billing state here).
-  status        ShopStatus @default(ACTIVE)
+  status ShopStatus @default(ACTIVE)
 
   // Usage analytics — counts of activity per month, used for dashboards.
   // monthlyAiQueries was dropped along with tier limits; AI usage now lives
   // in yebopay's CreditTransaction ledger under refType=MERCHANT_CHARGE.
-  monthlyTransactions Int  @default(0)
-  monthlyStockMoves   Int  @default(0)
+  monthlyTransactions Int      @default(0)
+  monthlyStockMoves   Int      @default(0)
   lastBillingReset    DateTime @default(now())
-  
-  // Relationships
-  users         User[]
-  products      Product[]
-  sales         Sale[]
-  expenses      Expense[]
-  stockLogs     StockLog[]
-  dailyReports  DailyReport[]
-  syncQueue     SyncQueue[]
-  aiConversations AIConversation[]
-  auditLogs     AuditLog[]
-  customers     Customer[]
-  returns       Return[]
-  suppliers     Supplier[]
-  purchaseOrders PurchaseOrder[]
-  cashSessions  CashSession[]
 
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  // Relationships
+  users           User[]
+  products        Product[]
+  sales           Sale[]
+  expenses        Expense[]
+  stockLogs       StockLog[]
+  dailyReports    DailyReport[]
+  syncQueue       SyncQueue[]
+  aiConversations AIConversation[]
+  auditLogs       AuditLog[]
+  customers       Customer[]
+  returns         Return[]
+  suppliers       Supplier[]
+  purchaseOrders  PurchaseOrder[]
+  cashSessions    CashSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum ShopStatus {
@@ -98,36 +99,36 @@ enum ShopStatus {
 // ==================== USERS & STAFF ====================
 
 model User {
-  id            String    @id @default(cuid())
-  shopId        String
-  name          String
-  phone         String
-  email         String?
+  id       String   @id @default(cuid())
+  shopId   String
+  name     String
+  phone    String
+  email    String?
   // Staff (cashier/manager) auth = PIN-on-device, yebomart-internal. The
   // shop OWNER's identity lives on Shop.ownerYeboidSub (YeboID). Staff users
   // share devices in POS context; per-staff YeboID accounts are overkill.
-  pin           String?   // 4-digit PIN for quick auth
-  role          UserRole  @default(CASHIER)
-  isActive      Boolean   @default(true)
+  pin      String? // 4-digit PIN for quick auth
+  role     UserRole @default(CASHIER)
+  isActive Boolean  @default(true)
 
   // Permissions
-  canDiscount   Boolean   @default(false)
-  canVoid       Boolean   @default(false)
-  canViewReports Boolean  @default(false)
-  canManageStock Boolean  @default(false)
+  canDiscount    Boolean @default(false)
+  canVoid        Boolean @default(false)
+  canViewReports Boolean @default(false)
+  canManageStock Boolean @default(false)
 
   // Session — last PIN login (analytics only).
-  lastLoginAt   DateTime?
-  
-  // Relationships
-  shop          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  sales         Sale[]
-  stockLogs     StockLog[]
-  auditLogs     AuditLog[]
-  cashSessions  CashSession[]
+  lastLoginAt DateTime?
 
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  // Relationships
+  shop         Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sales        Sale[]
+  stockLogs    StockLog[]
+  auditLogs    AuditLog[]
+  cashSessions CashSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([shopId, phone])
 }
@@ -141,48 +142,48 @@ enum UserRole {
 // ==================== PRODUCTS & INVENTORY ====================
 
 model Product {
-  id          String   @id @default(cuid())
+  id          String  @id @default(cuid())
   shopId      String
   barcode     String?
-  sku         String?  // Internal SKU
+  sku         String? // Internal SKU
   name        String
   description String?
   category    String?
-  attributes  Json?    // Dynamic product attributes (size, brand, specs, etc.)
-  
+  attributes  Json? // Dynamic product attributes (size, brand, specs, etc.)
+
   // Pricing
   costPrice       Float
-  sellPrice       Float    // Retail price (single item)
-  wholesalePrice  Float?   // Wholesale price (bulk buying)
-  wholesaleMinQty Int?     // Minimum qty for wholesale price
-  packPrice       Float?   // Pack price (discount when buying whole pack)
-  packSize        Int?     // Number of units per pack (e.g., 6 for 6-pack)
-  
+  sellPrice       Float // Retail price (single item)
+  wholesalePrice  Float? // Wholesale price (bulk buying)
+  wholesaleMinQty Int? // Minimum qty for wholesale price
+  packPrice       Float? // Pack price (discount when buying whole pack)
+  packSize        Int? // Number of units per pack (e.g., 6 for 6-pack)
+
   // Stock (always in single units)
-  quantity    Int      @default(0)
-  reorderAt   Int      @default(10)  // Low stock threshold
-  unit        String   @default("each") // each, kg, litre, pack
-  
+  quantity  Int    @default(0)
+  reorderAt Int    @default(10) // Low stock threshold
+  unit      String @default("each") // each, kg, litre, pack
+
   // Flags
-  isActive    Boolean  @default(true)
-  trackStock  Boolean  @default(true)
-  
+  isActive   Boolean @default(true)
+  trackStock Boolean @default(true)
+
   // Image
-  imageUrl    String?
-  
+  imageUrl String?
+
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  saleItems   SaleItem[]
-  stockLogs   StockLog[]
-  suppliers   SupplierProduct[]
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  shop      Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  saleItems SaleItem[]
+  stockLogs StockLog[]
+  suppliers SupplierProduct[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   // Offline sync
-  localId     String?  // Client-side ID for sync
-  syncedAt    DateTime?
-  
+  localId  String? // Client-side ID for sync
+  syncedAt DateTime?
+
   @@unique([shopId, barcode])
   @@index([shopId, name])
   @@index([shopId, category])
@@ -191,47 +192,47 @@ model Product {
 // ==================== SALES & TRANSACTIONS ====================
 
 model Sale {
-  id            String   @id @default(cuid())
+  id            String  @id @default(cuid())
   shopId        String
-  userId        String?  // Cashier who made the sale
-  customerId    String?  // Customer if credit sale
+  userId        String? // Cashier who made the sale
+  customerId    String? // Customer if credit sale
   // Cash-drawer attribution. Set on cash sales when a till session is OPEN so
   // the end-of-day cash-up can reconcile against exactly the sales rung up
   // during the shift. Null for non-cash sales or when no session is open.
   cashSessionId String?
 
   // Totals
-  subtotal      Float
-  discount      Float    @default(0)
-  tax           Float    @default(0)
-  totalAmount   Float
-  
+  subtotal    Float
+  discount    Float @default(0)
+  tax         Float @default(0)
+  totalAmount Float
+
   // Payment
   paymentMethod PaymentMethod
   amountPaid    Float
-  change        Float    @default(0)
-  
+  change        Float         @default(0)
+
   // Status
-  status        SaleStatus @default(COMPLETED)
-  voidReason    String?
-  
+  status     SaleStatus @default(COMPLETED)
+  voidReason String?
+
   // Receipt
   receiptNumber String?
-  
+
   // Relationships
-  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user          User?    @relation(fields: [userId], references: [id])
-  customer      Customer? @relation("CustomerSales", fields: [customerId], references: [id])
-  cashSession   CashSession? @relation(fields: [cashSessionId], references: [id])
+  shop          Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user          User?            @relation(fields: [userId], references: [id])
+  customer      Customer?        @relation("CustomerSales", fields: [customerId], references: [id])
+  cashSession   CashSession?     @relation(fields: [cashSessionId], references: [id])
   items         SaleItem[]
   creditEntries CustomerCredit[]
 
-  createdAt     DateTime @default(now())
+  createdAt DateTime @default(now())
 
   // Offline sync
-  localId       String?  // Client-side ID for sync
-  offlineAt     DateTime? // When created offline
-  syncedAt      DateTime?
+  localId   String? // Client-side ID for sync
+  offlineAt DateTime? // When created offline
+  syncedAt  DateTime?
 
   @@unique([shopId, localId])
   // Receipt numbers are generated per-shop (RCP-YYMMDD-NNNN). This guarantees
@@ -248,11 +249,11 @@ model Sale {
 
 enum PaymentMethod {
   CASH
-  MOMO       // MTN Mobile Money
-  EMALI      // Eswatini Mobile Money
+  MOMO // MTN Mobile Money
+  EMALI // Eswatini Mobile Money
   CARD
   MIXED
-  CREDIT     // Store credit / pay later
+  CREDIT // Store credit / pay later
 }
 
 enum SaleStatus {
@@ -263,22 +264,22 @@ enum SaleStatus {
 }
 
 model SaleItem {
-  id          String   @id @default(cuid())
-  saleId      String
-  productId   String
-  
+  id        String @id @default(cuid())
+  saleId    String
+  productId String
+
   // At time of sale (snapshot)
   productName String
   quantity    Int
   unitPrice   Float
-  costPrice   Float    // For profit calculation
-  discount    Float    @default(0)
+  costPrice   Float // For profit calculation
+  discount    Float  @default(0)
   totalPrice  Float
-  
+
   // Relationships
-  sale        Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  product     Product  @relation(fields: [productId], references: [id])
-  
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
   @@index([saleId])
 }
 
@@ -289,33 +290,33 @@ model SaleItem {
 // against expectedCash (openingFloat + cash sales rung up during the session),
 // recording any variance (shortage/overage) for loss prevention.
 model CashSession {
-  id           String   @id @default(cuid())
-  shopId       String
+  id     String  @id @default(cuid())
+  shopId String
   // The cashier who opened the till. Nullable for the same reason as
   // StockLog.userId: shop OWNERS authenticate via YeboID and have no User row
   // (their token's id is the Shop id, not a User id). Staff (PIN) tokens carry
   // a real User id which we record here.
-  userId       String?
+  userId String?
 
-  openingFloat Float    // Starting cash placed in the drawer
+  openingFloat Float // Starting cash placed in the drawer
   openedAt     DateTime @default(now())
 
   // Populated at cash-up (close):
   closedAt     DateTime?
-  countedCash  Float?   // Physical cash counted in the drawer
-  expectedCash Float?   // openingFloat + Σ cash sales during the session
-  variance     Float?   // countedCash - expectedCash (negative = short)
+  countedCash  Float? // Physical cash counted in the drawer
+  expectedCash Float? // openingFloat + Σ cash sales during the session
+  variance     Float? // countedCash - expectedCash (negative = short)
 
-  status       CashSessionStatus @default(OPEN)
-  notes        String?
+  status CashSessionStatus @default(OPEN)
+  notes  String?
 
   // Relationships
-  shop         Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user         User?    @relation(fields: [userId], references: [id])
-  sales        Sale[]
+  shop  Shop   @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user  User?  @relation(fields: [userId], references: [id])
+  sales Sale[]
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([shopId, status])
 }
@@ -328,68 +329,68 @@ enum CashSessionStatus {
 // ==================== STOCK MANAGEMENT ====================
 
 model StockLog {
-  id          String    @id @default(cuid())
-  shopId      String
-  productId   String
-  userId      String?   // Who made the change
-  
-  type        StockLogType
-  quantity    Int       // positive = add, negative = remove
-  
+  id        String  @id @default(cuid())
+  shopId    String
+  productId String
+  userId    String? // Who made the change
+
+  type     StockLogType
+  quantity Int // positive = add, negative = remove
+
   // Previous values (for audit)
   previousQty Int
   newQty      Int
-  
-  note        String?
-  reference   String?   // e.g., sale ID, PO number
-  
+
+  note      String?
+  reference String? // e.g., sale ID, PO number
+
   // Relationships
-  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
-  user        User?     @relation(fields: [userId], references: [id])
-  
-  createdAt   DateTime  @default(now())
-  
+  shop    Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
   // Offline sync
-  localId     String?
-  syncedAt    DateTime?
-  
+  localId  String?
+  syncedAt DateTime?
+
   @@index([shopId, createdAt])
   @@index([productId, createdAt])
 }
 
 enum StockLogType {
-  SALE        // Sold
-  RESTOCK     // Received new stock
-  ADJUSTMENT  // Manual adjustment
-  DAMAGED     // Written off
-  EXPIRED     // Expired goods
-  TRANSFER    // Moved between locations
-  RETURN      // Customer return
-  INITIAL     // Initial stock count
+  SALE // Sold
+  RESTOCK // Received new stock
+  ADJUSTMENT // Manual adjustment
+  DAMAGED // Written off
+  EXPIRED // Expired goods
+  TRANSFER // Moved between locations
+  RETURN // Customer return
+  INITIAL // Initial stock count
 }
 
 // ==================== EXPENSES ====================
 
 model Expense {
-  id          String   @id @default(cuid())
-  shopId      String
-  userId      String?  // Who logged it
-  
+  id     String  @id @default(cuid())
+  shopId String
+  userId String? // Who logged it
+
   category    ExpenseCategory
   amount      Float
   description String?
   date        DateTime
-  
+
   // Receipt
-  receiptUrl  String?
-  
+  receiptUrl String?
+
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   @@index([shopId, date])
 }
 
@@ -407,45 +408,45 @@ enum ExpenseCategory {
 // ==================== REPORTS ====================
 
 model DailyReport {
-  id              String   @id @default(cuid())
-  shopId          String
-  date            DateTime @db.Date
-  
+  id     String   @id @default(cuid())
+  shopId String
+  date   DateTime @db.Date
+
   // Sales Summary
-  totalSales      Float
+  totalSales        Float
   totalTransactions Int
-  averageBasket   Float
-  
+  averageBasket     Float
+
   // Costs & Profit
-  totalCost       Float
-  grossProfit     Float
-  totalExpenses   Float
-  netProfit       Float
-  
+  totalCost     Float
+  grossProfit   Float
+  totalExpenses Float
+  netProfit     Float
+
   // Payment Breakdown
-  cashSales       Float    @default(0)
-  momoSales       Float    @default(0)
-  emaliSales      Float    @default(0)
-  cardSales       Float    @default(0)
-  
+  cashSales  Float @default(0)
+  momoSales  Float @default(0)
+  emaliSales Float @default(0)
+  cardSales  Float @default(0)
+
   // Top Products (JSON array)
-  topProducts     Json     // [{id, name, quantity, revenue}]
-  
+  topProducts Json // [{id, name, quantity, revenue}]
+
   // Stock Alerts (JSON array)
-  lowStock        Json     // [{id, name, quantity, reorderAt}]
-  
+  lowStock Json // [{id, name, quantity, reorderAt}]
+
   // AI Generated
-  aiInsight       String?
-  
+  aiInsight String?
+
   // WhatsApp
-  sentViaWhatsApp Boolean  @default(false)
+  sentViaWhatsApp Boolean   @default(false)
   sentAt          DateTime?
-  
+
   // Relationships
-  shop            Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  
-  createdAt       DateTime @default(now())
-  
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
   @@unique([shopId, date])
   @@index([shopId, date])
 }
@@ -453,27 +454,27 @@ model DailyReport {
 // ==================== AI ASSISTANT ====================
 
 model AIConversation {
-  id          String   @id @default(cuid())
-  shopId      String
-  
+  id     String @id @default(cuid())
+  shopId String
+
   // Conversation
   userMessage String
   aiResponse  String
-  
+
   // Type
-  type        AIQueryType @default(TEXT)
-  
+  type AIQueryType @default(TEXT)
+
   // For voice
-  audioUrl    String?
-  
+  audioUrl String?
+
   // Context used
-  context     Json?    // Products, sales data used
-  
+  context Json? // Products, sales data used
+
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  
-  createdAt   DateTime @default(now())
-  
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
   @@index([shopId, createdAt])
 }
 
@@ -486,27 +487,27 @@ enum AIQueryType {
 // ==================== OFFLINE SYNC ====================
 
 model SyncQueue {
-  id          String   @id @default(cuid())
-  shopId      String
-  
+  id     String @id @default(cuid())
+  shopId String
+
   // Operation
-  entityType  String   // product, sale, stockLog
-  entityId    String   // Local ID
-  operation   SyncOperation
-  data        Json     // Full entity data
-  
+  entityType String // product, sale, stockLog
+  entityId   String // Local ID
+  operation  SyncOperation
+  data       Json // Full entity data
+
   // Status
-  status      SyncStatus @default(PENDING)
-  attempts    Int      @default(0)
-  error       String?
-  
+  status   SyncStatus @default(PENDING)
+  attempts Int        @default(0)
+  error    String?
+
   // Timestamps
-  queuedAt    DateTime @default(now())
+  queuedAt    DateTime  @default(now())
   processedAt DateTime?
-  
+
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
   @@index([shopId, status])
 }
 
@@ -527,22 +528,22 @@ enum SyncStatus {
 // ==================== AUDIT LOG ====================
 
 model AuditLog {
-  id          String   @id @default(cuid())
-  shopId      String
-  userId      String
-  
-  action      String   // LOGIN, PRODUCT_CREATE, SALE_VOID, etc.
-  entityType  String   // product, sale, user, etc.
-  entityId    String?
-  details     Json?    // Additional context
-  ipAddress   String?
-  
+  id     String @id @default(cuid())
+  shopId String
+  userId String
+
+  action     String // LOGIN, PRODUCT_CREATE, SALE_VOID, etc.
+  entityType String // product, sale, user, etc.
+  entityId   String?
+  details    Json? // Additional context
+  ipAddress  String?
+
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  createdAt   DateTime @default(now())
-  
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
   @@index([shopId, createdAt])
   @@index([userId, createdAt])
   @@index([action])
@@ -551,77 +552,77 @@ model AuditLog {
 // ==================== RETURNS ====================
 
 model Return {
-  id            String       @id @default(cuid())
-  shopId        String
-  saleId        String?      // Original sale (if known)
-  customerId    String?
-  userId        String?      // Staff processing return
-  
+  id         String  @id @default(cuid())
+  shopId     String
+  saleId     String? // Original sale (if known)
+  customerId String?
+  userId     String? // Staff processing return
+
   // Return details
-  returnNumber  String?
-  reason        String       // Defective, Wrong item, Change of mind, etc.
-  
+  returnNumber String?
+  reason       String // Defective, Wrong item, Change of mind, etc.
+
   // Resolution
-  type          ReturnType
-  refundAmount  Float        @default(0)  // For REFUND type
-  
+  type         ReturnType
+  refundAmount Float      @default(0) // For REFUND type
+
   // Status
-  status        ReturnStatus @default(PENDING)
-  notes         String?
-  
+  status ReturnStatus @default(PENDING)
+  notes  String?
+
   // Timestamps
-  createdAt     DateTime     @default(now())
-  processedAt   DateTime?
-  
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+
   // Relationships
-  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop          Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
   items         ReturnItem[]
-  exchangeItems ReturnExchangeItem[]  // Items given in exchange
-  
+  exchangeItems ReturnExchangeItem[] // Items given in exchange
+
   @@index([shopId, createdAt])
   @@index([saleId])
 }
 
 model ReturnItem {
-  id          String   @id @default(cuid())
-  returnId    String
-  productId   String
-  
+  id        String @id @default(cuid())
+  returnId  String
+  productId String
+
   // At time of return
   productName String
   quantity    Int
-  unitPrice   Float    // Price at which it was sold
-  
+  unitPrice   Float // Price at which it was sold
+
   // Stock handling
-  restockable Boolean  @default(true)  // Can be put back in stock?
-  restocked   Boolean  @default(false)
-  
+  restockable Boolean @default(true) // Can be put back in stock?
+  restocked   Boolean @default(false)
+
   // Relationships
-  return      Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
-  
+  return Return @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
   @@index([returnId])
 }
 
 model ReturnExchangeItem {
-  id          String   @id @default(cuid())
-  returnId    String
-  productId   String
-  
+  id        String @id @default(cuid())
+  returnId  String
+  productId String
+
   // Exchange item details
   productName String
   quantity    Int
   unitPrice   Float
-  
+
   // Relationships
-  return      Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
-  
+  return Return @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
   @@index([returnId])
 }
 
 enum ReturnType {
-  REFUND        // Money back
-  EXCHANGE      // Swap for another product
-  STORE_CREDIT  // Credit to customer account
+  REFUND // Money back
+  EXCHANGE // Swap for another product
+  STORE_CREDIT // Credit to customer account
 }
 
 enum ReturnStatus {
@@ -634,85 +635,85 @@ enum ReturnStatus {
 // ==================== SUPPLIERS ====================
 
 model Supplier {
-  id          String   @id @default(cuid())
-  shopId      String
-  
+  id     String @id @default(cuid())
+  shopId String
+
   name        String
   contactName String?
-  phone       String?   // International format: +1234567890
+  phone       String? // International format: +1234567890
   email       String?
-  website     String?   // Supplier website
-  
+  website     String? // Supplier website
+
   // Address (international)
-  address     String?
-  city        String?
-  country     String?   // e.g., "South Africa", "China", "USA"
-  postalCode  String?
-  
+  address    String?
+  city       String?
+  country    String? // e.g., "South Africa", "China", "USA"
+  postalCode String?
+
   // Business details
-  taxId       String?
-  currency    String?   // Supplier's currency (e.g., "USD", "ZAR", "CNY")
-  paymentTerms String?  // e.g., "Net 30", "COD", "LC"
-  leadTimeDays Int?     // Typical delivery time in days
-  notes       String?
-  
+  taxId        String?
+  currency     String? // Supplier's currency (e.g., "USD", "ZAR", "CNY")
+  paymentTerms String? // e.g., "Net 30", "COD", "LC"
+  leadTimeDays Int? // Typical delivery time in days
+  notes        String?
+
   // Accounts payable — running balance of what THIS SHOP owes the supplier.
   // Positive = we owe them (mirror of Customer.balance, where positive = they
   // owe us). Increased when goods are received on a PO (a BILL ledger entry);
   // decreased when we pay the supplier (a PAYMENT ledger entry). Kept in sync
   // with the SupplierLedger inside the same transaction so the running balance
   // and its audit trail never drift apart.
-  balance     Float    @default(0)
+  balance Float @default(0)
 
-  isActive    Boolean  @default(true)
+  isActive Boolean @default(true)
 
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  products    SupplierProduct[]
-  orders      PurchaseOrder[]
-  ledger      SupplierLedger[]
+  shop     Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  products SupplierProduct[]
+  orders   PurchaseOrder[]
+  ledger   SupplierLedger[]
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([shopId, phone])
   @@index([shopId, name])
 }
 
 model SupplierProduct {
-  id          String   @id @default(cuid())
-  supplierId  String
-  productId   String
-  
+  id         String @id @default(cuid())
+  supplierId String
+  productId  String
+
   // Supplier's pricing
-  costPrice   Float
-  minOrder    Int      @default(1)
-  leadDays    Int?     // Delivery time in days
-  sku         String?  // Supplier's SKU
-  
-  isPreferred Boolean  @default(false)  // Preferred supplier for this product
-  
+  costPrice Float
+  minOrder  Int     @default(1)
+  leadDays  Int? // Delivery time in days
+  sku       String? // Supplier's SKU
+
+  isPreferred Boolean @default(false) // Preferred supplier for this product
+
   // Relationships
-  supplier    Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   @@unique([supplierId, productId])
 }
 
 model PurchaseOrder {
-  id          String   @id @default(cuid())
-  shopId      String
-  supplierId  String
-  
+  id         String @id @default(cuid())
+  shopId     String
+  supplierId String
+
   orderNumber String?
   status      POStatus @default(DRAFT)
-  
+
   // Totals
   subtotal    Float
-  tax         Float    @default(0)
+  tax         Float @default(0)
   totalAmount Float
 
   // Accounts payable for this PO.
@@ -726,48 +727,48 @@ model PurchaseOrder {
   amountPaid     Float @default(0)
 
   // Dates
-  orderDate   DateTime @default(now())
+  orderDate    DateTime  @default(now())
   expectedDate DateTime?
   receivedDate DateTime?
 
-  notes       String?
+  notes String?
 
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  supplier    Supplier @relation(fields: [supplierId], references: [id])
-  items       POItem[]
-  ledger      SupplierLedger[]
+  shop     Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  supplier Supplier         @relation(fields: [supplierId], references: [id])
+  items    POItem[]
+  ledger   SupplierLedger[]
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([shopId, createdAt])
   @@index([supplierId])
 }
 
 model POItem {
-  id          String   @id @default(cuid())
-  poId        String
-  productId   String
-  
+  id        String @id @default(cuid())
+  poId      String
+  productId String
+
   productName String
   quantity    Int
   unitCost    Float
   totalCost   Float
-  
+
   // Receiving
-  receivedQty Int      @default(0)
-  
+  receivedQty Int @default(0)
+
   // Relationships
-  po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
-  
+  po PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+
   @@index([poId])
 }
 
 enum POStatus {
   DRAFT
   SENT
-  PARTIAL     // Partially received
+  PARTIAL // Partially received
   RECEIVED
   CANCELLED
 }
@@ -781,25 +782,25 @@ enum POStatus {
 // how partial payments are represented. The Supplier.balance running total is
 // updated in lock-step inside the same transaction.
 model SupplierLedger {
-  id          String   @id @default(cuid())
-  shopId      String
-  supplierId  String
+  id         String @id @default(cuid())
+  shopId     String
+  supplierId String
 
-  type        SupplierLedgerType
+  type   SupplierLedgerType
   // Always the positive magnitude of the transaction. Its effect on the
   // balance is determined by `type` (BILL/+ , PAYMENT/- , ADJUSTMENT/signed).
-  amount      Float
-  poId        String?  // Set when the entry came from receiving a purchase order
-  note        String?
+  amount Float
+  poId   String? // Set when the entry came from receiving a purchase order
+  note   String?
 
   // Who processed it (staff User id; null for shop-owner tokens / system)
-  userId      String?
+  userId String?
 
   // Relationships
-  supplier    Supplier       @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  po          PurchaseOrder? @relation(fields: [poId], references: [id], onDelete: SetNull)
+  supplier Supplier       @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  po       PurchaseOrder? @relation(fields: [poId], references: [id], onDelete: SetNull)
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([supplierId, createdAt])
   @@index([shopId, createdAt])
@@ -807,84 +808,162 @@ model SupplierLedger {
 }
 
 enum SupplierLedgerType {
-  BILL        // Goods received on a PO -> we owe more (balance +)
-  PAYMENT     // We paid the supplier -> we owe less (balance -)
-  ADJUSTMENT  // Manual signed adjustment (e.g. credit note, write-off)
+  BILL // Goods received on a PO -> we owe more (balance +)
+  PAYMENT // We paid the supplier -> we owe less (balance -)
+  ADJUSTMENT // Manual signed adjustment (e.g. credit note, write-off)
 }
 
 // ==================== CUSTOMER CREDIT ====================
 
 model Customer {
-  id          String   @id @default(cuid())
-  shopId      String
-  
-  name        String
-  phone       String?
-  email       String?
-  address     String?
-  
+  id     String @id @default(cuid())
+  shopId String
+
+  name    String
+  phone   String?
+  email   String?
+  address String?
+
   // Credit
-  creditLimit Float    @default(0)
-  balance     Float    @default(0)  // Positive = they owe us
-  
-  isActive    Boolean  @default(true)
-  
+  creditLimit Float @default(0)
+  balance     Float @default(0) // Positive = they owe us
+
+  isActive Boolean @default(true)
+
   // Relationships
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  credits     CustomerCredit[]
-  sales       Sale[]   @relation("CustomerSales")
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
+  shop    Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  credits CustomerCredit[]
+  sales   Sale[]           @relation("CustomerSales")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   @@unique([shopId, phone])
   @@index([shopId, name])
 }
 
 model CustomerCredit {
-  id          String   @id @default(cuid())
-  shopId      String
-  customerId  String
-  
-  type        CreditType
-  amount      Float
-  saleId      String?  // If credit was from a sale
-  note        String?
-  
+  id         String @id @default(cuid())
+  shopId     String
+  customerId String
+
+  type   CreditType
+  amount Float
+  saleId String? // If credit was from a sale
+  note   String?
+
   // Who processed it
-  userId      String?
-  
+  userId String?
+
   // Relationships
-  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  sale        Sale?    @relation(fields: [saleId], references: [id])
-  
-  createdAt   DateTime @default(now())
-  
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sale     Sale?    @relation(fields: [saleId], references: [id])
+
+  createdAt DateTime @default(now())
+
   @@index([customerId, createdAt])
   @@index([shopId, createdAt])
 }
 
 enum CreditType {
-  PURCHASE    // Customer bought on credit
-  PAYMENT     // Customer paid down balance
-  ADJUSTMENT  // Manual adjustment
-  REFUND      // Refund added to credit
+  PURCHASE // Customer bought on credit
+  PAYMENT // Customer paid down balance
+  ADJUSTMENT // Manual adjustment
+  REFUND // Refund added to credit
 }
 
 // Admin users for the admin dashboard
 model Admin {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String   // Hashed
+  id        String    @id @default(cuid())
+  email     String    @unique
+  password  String // Hashed
   name      String
   role      AdminRole @default(ADMIN)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 }
 
 enum AdminRole {
   SUPER_ADMIN
   ADMIN
   SUPPORT
+}
+
+/// Which YeboMart plan a shop is on. TILL (free) is the absence of an ACTIVE
+/// row — there is no free-plan row to create, expire or reconcile.
+enum PlanCode {
+  SHOP
+  BUSY
+}
+
+/// PENDING  — first invoice issued, not yet paid. Free-tier entitlements apply.
+/// ACTIVE   — cycle paid; the plan's allowances are live.
+/// PAST_DUE — the cycle's invoice went unpaid past its due date. Drops to
+///            free-tier entitlements but the row is kept so paying the
+///            outstanding invoice restores the plan without re-subscribing.
+/// CANCELED — ended. Entitlements are free-tier.
+enum ShopSubscriptionStatus {
+  PENDING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+/// A shop's paid plan.
+///
+/// YeboMart owns the recurrence rather than YeboPay's Subscription object,
+/// because YeboPay's /v1 subscription route hard-requires a vaulted
+/// `payment_method_id` and `createSubscription` rejects MOBILE_MONEY
+/// instruments outright — which excludes most of this market. So each cycle
+/// YeboMart issues a YeboPay *invoice* instead: YeboPay still renders the PDF,
+/// delivers it via YeboLink, hosts the pay page (any rail the owner likes),
+/// runs the overdue sweep and fires `invoice.paid` back to us.
+model ShopSubscription {
+  id       String                 @id @default(cuid())
+  shopId   String                 @unique
+  shop     Shop                   @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  planCode PlanCode
+  status   ShopSubscriptionStatus @default(PENDING)
+
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  /// Set when the owner cancels: the plan runs to currentPeriodEnd, then stops
+  /// rather than issuing another invoice.
+  cancelAtPeriodEnd  Boolean   @default(false)
+  canceledAt         DateTime?
+
+  /// The YeboPay invoice funding the CURRENT cycle. Persisted BEFORE /send is
+  /// called, so an invoice that reaches the customer can always be resolved
+  /// when `invoice.paid` arrives (the failure mode the yebopay skill documents).
+  invoiceId       String?   @unique
+  invoiceNumber   String?
+  invoicePayUrl   String?
+  invoiceIssuedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The renewal cron scans on these two together.
+  @@index([status, currentPeriodEnd])
+}
+
+/// One row per (shop, billing period, metered action). Incremented as a plan's
+/// monthly allowance is consumed; once an action's allowance is spent the
+/// caller falls through to the pay-as-you-go credit wallet.
+///
+/// Keyed by periodStart rather than reset in place so a cycle's usage stays
+/// auditable after it rolls, and so a late-arriving charge can never decrement
+/// the wrong period.
+model UsageCounter {
+  id          String   @id @default(cuid())
+  shopId      String
+  periodStart DateTime
+  action      String
+  used        Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shopId, periodStart, action])
+  @@index([shopId, periodStart])
 }

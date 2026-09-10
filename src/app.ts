@@ -52,7 +52,17 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Body parsing — JSON for everything. No raw-body carve-outs (yebopay owns
 // payment-processor webhooks).
-app.use(express.json({ limit: '10mb' }));
+// Keep the exact bytes of the request body around for signature verification.
+// YeboPay signs the RAW JSON it sent; re-serializing a parsed object changes
+// key order and whitespace and would fail every HMAC check.
+app.use(
+  express.json({
+    limit: '10mb',
+    verify: (req, _res, buf) => {
+      (req as unknown as { rawBody?: Buffer }).rawBody = buf;
+    },
+  }),
+);
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Rate limiting (applied to all API routes)

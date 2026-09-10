@@ -1,8 +1,11 @@
 import { Router, Response } from 'express';
 import { BillingService } from '@services/billing.service';
-import { authMiddleware, AuthRequest } from '@middleware/auth.middleware';
+import { authMiddleware, managerAuth, AuthRequest } from '@middleware/auth.middleware';
 import { ApiResponse } from '@utils/ApiResponse';
 import { prisma } from '@config/prisma';
+import { PLANS, PAID_PLAN_CODES, planToDto, type PlanCode } from '@config/plans';
+import { usageSummary } from '@services/entitlement.service';
+import { subscribe, cancel, SubscriptionError } from '@services/subscription.service';
 
 const router = Router();
 
@@ -80,15 +83,93 @@ router.post('/checkout/confirm', authMiddleware, async (req: AuthRequest, res: R
   }
 });
 
-// Legacy /plans endpoint kept for backwards-compatibility — surface a "moved"
-// pointer so any cached frontend doesn't 404. New callers should hit
-// /credit-packs.
+// GET /api/billing/plans — public. The three plans and what each includes.
+// Credits still exist for overage; the plan covers what it covers first.
 router.get('/plans', async (_req, res: Response) => {
   return ApiResponse.success(res, {
-    deprecated: true,
-    message: 'Subscription tiers are deprecated. YeboMart is now pay-as-you-go credits. See GET /api/billing/credit-packs.',
-    packs: BillingService.getCreditPacks(),
+    plans: (Object.keys(PLANS) as PlanCode[]).map((c) => planToDto(PLANS[c])),
   });
+});
+
+// GET /api/billing/subscription — authenticated. The shop's plan, the current
+// period, and how much of each allowance it has used.
+router.get('/subscription', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const shopId = req.user!.shopId;
+    const [sub, usage] = await Promise.all([
+      prisma.shopSubscription.findUnique({ where: { shopId } }),
+      usageSummary(shopId),
+    ]);
+
+    return ApiResponse.success(res, {
+      subscription: sub
+        ? {
+            plan_code: sub.planCode,
+            status: sub.status,
+            current_period_start: sub.currentPeriodStart.toISOString(),
+            current_period_end: sub.currentPeriodEnd.toISOString(),
+            cancel_at_period_end: sub.cancelAtPeriodEnd,
+            // Present while a cycle is unpaid so the UI can show "Pay now".
+            invoice_number: sub.status === 'ACTIVE' ? null : sub.invoiceNumber,
+            pay_url: sub.status === 'ACTIVE' ? null : sub.invoicePayUrl,
+          }
+        : null,
+      // What the shop is ENTITLED to right now, which is Till unless a cycle
+      // has actually been paid for.
+      usage,
+    });
+  } catch (error: any) {
+    console.error('[Billing] subscription lookup failed:', error?.message || error);
+    return ApiResponse.serverError(res, 'Failed to fetch subscription');
+  }
+});
+
+// POST /api/billing/subscribe — owner-only. Raises the first cycle's invoice
+// and returns its pay link. The plan does NOT take effect until it is paid.
+router.post('/subscribe', authMiddleware, managerAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const planCode = String(req.body?.plan_code ?? '').toUpperCase();
+    if (!PAID_PLAN_CODES.includes(planCode as (typeof PAID_PLAN_CODES)[number])) {
+      return ApiResponse.badRequest(res, `plan_code must be one of ${PAID_PLAN_CODES.join(', ')}`);
+    }
+
+    const { payUrl, subscription } = await subscribe(req.user!.shopId, planCode as PlanCode);
+    return ApiResponse.success(
+      res,
+      {
+        pay_url: payUrl,
+        plan_code: planCode,
+        status: subscription?.status,
+        invoice_number: subscription?.invoiceNumber,
+      },
+      'Invoice sent. The plan starts once it is paid.',
+    );
+  } catch (error: any) {
+    if (error instanceof SubscriptionError) {
+      return ApiResponse.badRequest(res, error.message);
+    }
+    console.error('[Billing] subscribe failed:', error?.message || error);
+    return ApiResponse.serverError(res, error?.message || 'Failed to start the plan');
+  }
+});
+
+// POST /api/billing/subscription/cancel — owner-only. Runs to the end of the
+// paid period, then stops. No mid-cycle downgrade, no refund maths.
+router.post('/subscription/cancel', authMiddleware, managerAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const sub = await cancel(req.user!.shopId);
+    return ApiResponse.success(
+      res,
+      { plan_code: sub.planCode, ends_at: sub.currentPeriodEnd.toISOString() },
+      'Your plan will run until the end of the period you have paid for.',
+    );
+  } catch (error: any) {
+    if (error instanceof SubscriptionError) {
+      return ApiResponse.badRequest(res, error.message);
+    }
+    console.error('[Billing] cancel failed:', error?.message || error);
+    return ApiResponse.serverError(res, 'Failed to cancel the plan');
+  }
 });
 
 export default router;

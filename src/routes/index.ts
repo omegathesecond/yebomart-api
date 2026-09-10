@@ -18,6 +18,7 @@ import purchaseOrderRoutes from '@routes/purchaseOrder.routes';
 import cashSessionRoutes from '@routes/cashSession.routes';
 import billingRoutes from '@routes/billing.routes';
 import internalRoutes from '@routes/internal.routes';
+import webhookRoutes from '@routes/webhooks.routes';
 
 const router = Router();
 
@@ -79,5 +80,8 @@ router.use('/billing', billingRoutes);
 // Internal machine-only routes (Cloud Scheduler → daily notification run).
 // Shared-secret gated, not user-auth.
 router.use('/internal', internalRoutes);
+
+// Provider webhooks. Signature-verified per provider, no user auth.
+router.use('/webhooks', webhookRoutes);
 
 export default router;

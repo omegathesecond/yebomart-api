@@ -13,6 +13,7 @@
 import { prisma } from '@config/prisma';
 import { ReportService } from '@services/report.service';
 import { YeboLinkClient } from '@services/yebolink.client';
+import { consumeAllowance } from '@services/entitlement.service';
 
 interface TopProduct {
   id: string;
@@ -34,6 +35,9 @@ export interface NotificationRunSummary {
   reportsSent: number;
   lowStockAlertsSent: number;
   skipped: number;
+  /** Shops whose plan does not include automated messages, or whose monthly
+   *  allowance for them is spent. Not a failure — the correct outcome. */
+  notEntitled: number;
   failures: Array<{ shopId: string; kind: 'report' | 'lowStock'; error: string }>;
 }
 
@@ -127,6 +131,7 @@ export class NotificationService {
       reportsSent: 0,
       lowStockAlertsSent: 0,
       skipped: 0,
+      notEntitled: 0,
       failures: [],
     };
 
@@ -162,7 +167,14 @@ export class NotificationService {
       const topProducts = (report.topProducts as unknown as TopProduct[]) ?? [];
       const lowStock = (report.lowStock as unknown as LowStockItem[]) ?? [];
 
-      if (shop.notifyWhatsAppReports) {
+      // A WhatsApp costs real money, so an automated send has to be covered by
+      // the shop's plan. The free Till plan includes none, which is what keeps
+      // an unpaid shop from costing ~E38/month in reports it never bought.
+      const reportEntitled =
+        shop.notifyWhatsAppReports && (await consumeAllowance(shop.id, 'DAILY_REPORT'));
+      if (shop.notifyWhatsAppReports && !reportEntitled) summary.notEntitled++;
+
+      if (reportEntitled) {
         try {
           const text = buildDailyReportMessage(shop.name, shop.currencySymbol, date, {
             totalSales: report.totalSales,
@@ -184,7 +196,11 @@ export class NotificationService {
         }
       }
 
-      if (shop.notifyLowStock && lowStock.length > 0) {
+      const lowStockEntitled =
+        shop.notifyLowStock && lowStock.length > 0 && (await consumeAllowance(shop.id, 'LOW_STOCK_ALERT'));
+      if (shop.notifyLowStock && lowStock.length > 0 && !lowStockEntitled) summary.notEntitled++;
+
+      if (lowStockEntitled) {
         try {
           const text = buildLowStockMessage(shop.name, lowStock);
           await YeboLinkClient.sendWhatsApp(recipient, text);
@@ -197,7 +213,7 @@ export class NotificationService {
     }
 
     console.log(
-      `[notifications] run complete (${summary.date}): considered=${summary.shopsConsidered} reports=${summary.reportsSent} lowStock=${summary.lowStockAlertsSent} skipped=${summary.skipped} failures=${summary.failures.length}`,
+      `[notifications] run complete (${summary.date}): considered=${summary.shopsConsidered} reports=${summary.reportsSent} lowStock=${summary.lowStockAlertsSent} skipped=${summary.skipped} notEntitled=${summary.notEntitled} failures=${summary.failures.length}`,
     );
 
     return summary;
