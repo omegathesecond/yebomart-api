@@ -59,6 +59,21 @@ export interface YeboPayInvoiceDto {
   charge_id: string | null;
 }
 
+/**
+ * `POST /v1/invoices/:id/send` returns the invoice under `data` and the
+ * delivery artefacts under a SIBLING `delivery` key — NOT nested inside
+ * `data`. Reading `data.payUrl` yields undefined and strands the customer
+ * with an invoice they cannot pay (this exact shape took down Eneza's
+ * payments in 2026-08). Typed explicitly so that cannot recur.
+ */
+export interface YeboPaySendInvoiceResult {
+  invoice: YeboPayInvoiceDto;
+  pdfUrl: string | null;
+  payUrl: string;
+  emailQueued: boolean;
+  messageId: string | null;
+}
+
 export interface YeboPayBalanceDto {
   available: number;
   frozen: number;
@@ -170,16 +185,33 @@ export class YeboPayClient {
     return body.data;
   }
 
-  static async sendInvoice(id: string): Promise<YeboPayInvoiceDto> {
+  static async sendInvoice(id: string): Promise<YeboPaySendInvoiceResult> {
     const res = await fetch(`${BASE_URL}/v1/invoices/${encodeURIComponent(id)}/send`, {
       method: 'POST',
       headers: { 'X-API-Key': getApiKey() },
     });
-    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayInvoiceDto>;
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayInvoiceDto> & {
+      delivery?: { pdfRendered?: boolean; emailQueued?: boolean; pdfUrl?: string; payUrl?: string; messageId?: string };
+    };
     if (!res.ok || !body.success || !body.data) {
       throw new Error(`YeboPay POST /v1/invoices/${id}/send ${res.status}: ${body.error ?? 'unknown error'}`);
     }
-    return body.data;
+
+    const payUrl = body.delivery?.payUrl;
+    if (!payUrl) {
+      // The invoice HAS been created and emailed by this point; refusing to
+      // return a half-answer is deliberate. Callers persist the invoice id
+      // before calling send, so the row is recoverable.
+      throw new Error(`YeboPay POST /v1/invoices/${id}/send returned no delivery.payUrl`);
+    }
+
+    return {
+      invoice: body.data,
+      pdfUrl: body.delivery?.pdfUrl ?? null,
+      payUrl,
+      emailQueued: Boolean(body.delivery?.emailQueued),
+      messageId: body.delivery?.messageId ?? null,
+    };
   }
 
   // Get the wallet balance for a yeboid_sub (synthetic or real).

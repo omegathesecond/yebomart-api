@@ -39,6 +39,24 @@ function internalSecretAuth(req: Request, res: Response, next: NextFunction): vo
 
 router.use(internalSecretAuth);
 
+/**
+ * POST /api/internal/billing/run — one subscription renewal pass.
+ *
+ * Rolls paid cycles forward and invoices them, lapses cycles that were never
+ * paid, and ends cancelled plans. Safe to run more than once a day: a period
+ * that has already rolled is no longer due.
+ */
+router.post('/billing/run', async (_req: Request, res: Response) => {
+  try {
+    const { runRenewals } = await import('@services/subscription.service');
+    const summary = await runRenewals();
+    return ApiResponse.success(res, summary, 'Renewal pass complete');
+  } catch (err: any) {
+    console.error('[internal] renewal pass FAILED:', err?.message ?? err);
+    return ApiResponse.serverError(res, err?.message ?? 'Renewal pass failed');
+  }
+});
+
 router.post(
   '/notifications/run',
   validateRequest(runNotificationsSchema),

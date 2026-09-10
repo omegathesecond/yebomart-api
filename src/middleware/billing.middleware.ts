@@ -1,3 +1,4 @@
+import type { MeteredAction } from '@config/plans';
 /**
  * Billing middleware — pay-as-you-go credits.
  *
@@ -18,6 +19,12 @@ import { prisma } from '@config/prisma';
 export interface PendingCharge {
   amount: number;
   description: string;
+}
+
+/** An allowance draw stashed by `requireEntitlement`, consumed on success. */
+export interface PendingAllowance {
+  action: MeteredAction;
+  qty: number;
 }
 
 /**
@@ -71,6 +78,50 @@ export const requireCreditBalance = (amount: number, description: string) => {
 };
 
 /**
+ * Gate a metered action on the shop's PLAN first, falling through to credits.
+ *
+ * The order is the business model in one function: an action included in the
+ * plan the shop already pays for should not also cost credits, and a shop on
+ * the free Till plan should hit the credit wallet almost immediately.
+ *
+ * Like `requireCreditBalance`, nothing is consumed here — the allowance draw is
+ * stashed and only applied by `settlePendingCharge` once the handler has
+ * produced a result, so a failed send never eats an allowance either.
+ */
+export const requireEntitlement = (
+  action: MeteredAction,
+  creditCost: number,
+  description: string,
+) => {
+  const creditGate = requireCreditBalance(creditCost, description);
+
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Authentication required');
+        return;
+      }
+
+      const { checkAllowance } = await import('@services/entitlement.service');
+      const check = await checkAllowance(req.user.shopId, action);
+
+      if (check.covered) {
+        const pending: PendingAllowance = { action, qty: 1 };
+        (req as any).pendingAllowance = pending;
+        next();
+        return;
+      }
+
+      // Allowance spent (or the plan never included this) — bill credits.
+      await creditGate(req, res, next);
+    } catch (err) {
+      console.error('[Billing] requireEntitlement failed:', err instanceof Error ? err.message : err);
+      ApiResponse.serverError(res, 'Failed to verify plan entitlement');
+    }
+  };
+};
+
+/**
  * Settle the PendingCharge stashed by `requireCreditBalance` — call this ONLY
  * after the handler has successfully produced its result. This is the actual
  * wallet debit, deferred to post-success so the shop is never billed for work
@@ -84,6 +135,23 @@ export const requireCreditBalance = (amount: number, description: string) => {
  * route, ~10s) key means a client retry can't double-charge.
  */
 export async function settlePendingCharge(req: AuthRequest): Promise<void> {
+  // An allowance draw and a credit charge are mutually exclusive: the gate
+  // stashes exactly one of them.
+  const allowance = (req as any).pendingAllowance as PendingAllowance | undefined;
+  if (allowance && req.user) {
+    (req as any).pendingAllowance = undefined;
+    try {
+      const { consumeAllowance } = await import('@services/entitlement.service');
+      await consumeAllowance(req.user.shopId, allowance.action, allowance.qty);
+    } catch (err) {
+      console.error(
+        '[Billing] consumeAllowance failed AFTER a successful response (allowance NOT drawn):',
+        err instanceof Error ? err.message : err,
+      );
+    }
+    return;
+  }
+
   const pending = (req as any).pendingCharge as PendingCharge | undefined;
   if (!pending || !req.user) return;
   // Guard against an accidental second settle on the same request.

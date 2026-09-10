@@ -450,7 +450,7 @@ export class SaleController {
           success: true,
           invoiceId: invoice.id,
           invoiceNumber: invoice.number,
-          pdfUrl: sent.pdf_url,
+          pdfUrl: sent.pdfUrl,
         },
         'Receipt emailed successfully'
       );
