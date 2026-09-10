@@ -941,6 +941,16 @@ model ShopSubscription {
   invoicePayUrl   String?
   invoiceIssuedAt DateTime?
 
+  /// When the owner was told the plan had paused. Set on the transition into
+  /// PAST_DUE and cleared when a payment revives the plan.
+  ///
+  /// This exists because a lapsed subscription stays selected by the renewal
+  /// query every night (its period end is still in the past), so keying the
+  /// message off status alone would re-send it daily. A nullable timestamp
+  /// rather than a boolean, so a send that failed retries on the next pass
+  /// instead of being lost.
+  lapsedNotifiedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
