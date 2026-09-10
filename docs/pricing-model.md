@@ -97,8 +97,14 @@ API deploy, with no second edit.
 1. **Destination-aware SMS pricing.** The flat 20 credits covers one Eswatini
    segment; Kenya, Nigeria and multi-segment messages still cost more than we
    charge. Deferred deliberately — a cheaper SMS rate is being negotiated.
-2. **Dunning copy of our own.** YeboPay chases the invoice; YeboMart says
-   nothing when a plan lapses.
+2. ~~Dunning copy of our own.~~ **Done 2026-09-10.** On the transition into
+   PAST_DUE the owner gets a WhatsApp naming the plan and the unpaid invoice,
+   stating that the till, stock and staff keep working, and listing what
+   stopped. `lapsedNotifiedAt` keeps it once per lapse rather than once per
+   night. `invoice.paid` on a lapsed plan sends the counterpart and clears the
+   marker. Both bypass the allowance and the wallet — billing a shop to tell it
+   its billing failed is absurd, and the allowance the lapse just revoked could
+   not pay for it.
 
 ## Open, and not a code decision
 
