@@ -19,6 +19,9 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || [
   'https://app.yebomart.com',
   'https://admin.yebomart.com',
   'https://yebomart.pages.dev',
+  // The landing's own Pages hostname. It reads GET /api/billing/plans, so
+  // without this the pricing section breaks on the fallback URL.
+  'https://yebomart-landing.pages.dev',
   'https://yebomart-app.pages.dev',
   'https://yebomart-admin.pages.dev',
 ];
