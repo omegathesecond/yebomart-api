@@ -84,13 +84,14 @@ at 18:00 and `yebomart-billing-renewals` at 02:00.
 
 ## Still to build
 
-1. **The app's billing screens** (`yebomart-app`). The API can sell a plan;
-   nothing in the product surfaces it yet, so a shop cannot self-serve. Until
-   that ships, the landing page should not advertise the tiers.
-2. **Destination-aware SMS pricing.** The flat 20 credits covers one Eswatini
+The app's plan screens shipped 2026-09-10: Billing leads with the plan, shows a
+bar per metered allowance, and surfaces a Pay now link while a cycle is unpaid.
+The landing page can now advertise the tiers.
+
+1. **Destination-aware SMS pricing.** The flat 20 credits covers one Eswatini
    segment; Kenya, Nigeria and multi-segment messages still cost more than we
    charge. Deferred deliberately — a cheaper SMS rate is being negotiated.
-3. **Dunning copy of our own.** YeboPay chases the invoice; YeboMart says
+2. **Dunning copy of our own.** YeboPay chases the invoice; YeboMart says
    nothing when a plan lapses.
 
 ## Open, and not a code decision
