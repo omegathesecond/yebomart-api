@@ -1,6 +1,6 @@
 # YeboMart pricing — cost basis and the plan model
 
-Status: cost fixes shipped on `pricing/stop-the-bleed`. Subscription tier below is designed, not built.
+Status: **shipped**. Cost fixes and the plan tiers are both live in production.
 
 ## Cost basis
 
@@ -38,7 +38,7 @@ still charges nothing: about E1.27 a day, roughly **E38 per shop per month**.
 Down from ~E900 on the SMS path, but it is the largest remaining hole and it
 scales linearly with shops.
 
-## The plan model (designed, not built)
+## The plan model (live)
 
 The strategic error is that we meter the thing that costs nothing (AI) and give
 away the thing that costs the most (messages). Invert it: make the assistant
@@ -57,16 +57,41 @@ Why the daily report is the product: it is the one paid thing a shop uses every
 single day without deciding to. That is a subscription in all but name, and it
 is far more predictable than ad-hoc questions.
 
-## To build
+## How it works
 
-1. `Plan` + `ShopSubscription` models; entitlement checks in place of raw
-   balance checks for included actions.
-2. Monthly allowance metering with reset, and overage falling through to credits.
-3. Recurring billing through YeboPay (today `createCheckout` is one-shot,
-   hardcoded `currency: 'SZL'`).
-4. Charge or entitle the notification cron, which currently does neither.
-5. Destination-aware SMS pricing. The flat 20 credits covers one Eswatini
-   segment; Kenya, Nigeria and long messages still cost more than we charge.
+YeboMart owns the recurrence; YeboPay does the invoicing. That split is forced,
+not chosen: `POST /v1/subscriptions` hard-requires a vaulted `payment_method_id`
+and YeboPay's `createSubscription` rejects MOBILE_MONEY instruments for
+recurring billing, which would exclude most shop owners in this market. Raising
+an invoice per cycle keeps everything YeboPay is good at — PDF, YeboLink
+delivery, a hosted pay page that takes any rail, the hourly overdue sweep and
+dunning, and an `invoice.paid` webhook — while the billing period and
+allowances live next to the shop they govern.
+
+- `ShopSubscription` + `UsageCounter`. Till is the *absence* of an ACTIVE row,
+  so there is no free-plan row to create, expire or reconcile.
+- Entitlements gate before credits: `requireEntitlement(action, cost, label)`
+  draws the plan allowance, and only falls through to `requireCreditBalance`
+  once it is spent. Both defer settlement until the work succeeded, so a failed
+  send consumes neither an allowance nor a credit.
+- Automated reports and low-stock alerts are plan-gated. Till includes none.
+- Entitlements follow the money: a cycle is PENDING until its invoice is paid,
+  and PAST_DUE once it lapses. Both fall back to Till, and the row is kept so
+  paying the outstanding invoice restores the plan without re-subscribing.
+
+Scheduler jobs (europe-west1, Africa/Mbabane): `yebomart-daily-notifications`
+at 18:00 and `yebomart-billing-renewals` at 02:00.
+
+## Still to build
+
+1. **The app's billing screens** (`yebomart-app`). The API can sell a plan;
+   nothing in the product surfaces it yet, so a shop cannot self-serve. Until
+   that ships, the landing page should not advertise the tiers.
+2. **Destination-aware SMS pricing.** The flat 20 credits covers one Eswatini
+   segment; Kenya, Nigeria and multi-segment messages still cost more than we
+   charge. Deferred deliberately — a cheaper SMS rate is being negotiated.
+3. **Dunning copy of our own.** YeboPay chases the invoice; YeboMart says
+   nothing when a plan lapses.
 
 ## Open, and not a code decision
 
