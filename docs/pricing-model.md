@@ -87,9 +87,12 @@ at 18:00 and `yebomart-billing-renewals` at 02:00.
 Shipped 2026-09-10: the app's Billing page leads with the plan, shows a bar per
 metered allowance and surfaces a Pay now link while a cycle is unpaid; the
 landing page's pricing section leads with the three tiers and frames credits as
-overage. The landing mirrors `src/config/plans.ts` in
-`yebomart-landing/src/data/copy.ts` (`TIERS`) — this file stays the authority
-because it raises the invoice, so change both together.
+overage. The landing reads `GET /api/billing/plans` live, so `src/config/plans.ts` is the
+only place a plan is defined and the site cannot drift from what the invoice
+charges. There is no hardcoded fallback on the landing: if the endpoint is
+unreachable it shows no price at all rather than quoting one we might not
+honour. Changing a price here therefore changes the public site on the next
+API deploy, with no second edit.
 
 1. **Destination-aware SMS pricing.** The flat 20 credits covers one Eswatini
    segment; Kenya, Nigeria and multi-segment messages still cost more than we
