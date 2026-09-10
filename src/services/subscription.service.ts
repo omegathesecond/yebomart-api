@@ -1,6 +1,7 @@
 import { prisma } from '@config/prisma';
 import { PLANS, type PlanCode } from '@config/plans';
 import { YeboPayClient } from '@services/yebopay.client';
+import { YeboLinkClient } from '@services/yebolink.client';
 
 /**
  * YeboMart plan subscriptions, billed by invoice.
@@ -174,10 +175,24 @@ export async function markInvoicePaid(invoiceId: string): Promise<boolean> {
   if (!sub) return false;
   if (sub.status === 'ACTIVE') return true;
 
+  const wasLapsed = Boolean(sub.lapsedNotifiedAt) || sub.status === 'PAST_DUE';
+
   await prisma.shopSubscription.update({
     where: { id: sub.id },
-    data: { status: 'ACTIVE' },
+    // Cleared so a future lapse notifies again rather than being suppressed
+    // by a marker from the last one.
+    data: { status: 'ACTIVE', lapsedNotifiedAt: null },
   });
+
+  // Only worth saying when something had actually stopped. A first-cycle
+  // activation needs no announcement — they just bought it.
+  if (wasLapsed) {
+    const shop = await prisma.shop.findUnique({ where: { id: sub.shopId }, select: { name: true } });
+    await notifyOwner(
+      sub.shopId,
+      buildResumedMessage(shop?.name ?? 'Your shop', PLANS[sub.planCode as PlanCode].name),
+    );
+  }
   return true;
 }
 
@@ -197,11 +212,73 @@ export async function cancel(shopId: string) {
   });
 }
 
+/**
+ * What the owner is told when the plan pauses.
+ *
+ * Deliberately not a demand for money — YeboPay is already chasing the
+ * invoice. This says the one thing only YeboMart knows: which parts of their
+ * shop just went quiet, and which did not. A shop owner who stops receiving
+ * the evening report with no explanation assumes the product broke.
+ */
+export function buildLapseMessage(shopName: string, planName: string, invoiceNumber: string | null, payUrl: string | null): string {
+  const lines = [
+    `${shopName}: your ${planName} plan is paused${invoiceNumber ? ` — invoice ${invoiceNumber} is unpaid` : ''}.`,
+    '',
+    'Your till, stock, staff and reports all keep working exactly as they are. Nothing is locked.',
+    '',
+    'What stops until it is settled:',
+    '• The evening WhatsApp report',
+    '• Low-stock alerts',
+    '• Unlimited assistant questions (you keep 20 a month)',
+  ];
+  if (payUrl) lines.push('', `Settle it here: ${payUrl}`);
+  return lines.join('\n');
+}
+
+/** The other half of the loop: tell them it is working again. */
+export function buildResumedMessage(shopName: string, planName: string): string {
+  return [
+    `${shopName}: payment received — your ${planName} plan is active again.`,
+    '',
+    'Your evening report is back tonight, and low-stock alerts and unlimited assistant questions are on now.',
+  ].join('\n');
+}
+
+/**
+ * Send a plan message and report whether it went.
+ *
+ * These bypass the plan allowance and the credit wallet on purpose. Billing a
+ * shop to be told its billing has failed is absurd, and charging an allowance
+ * the lapse has just revoked could not work anyway. The cost (about E1.27 a
+ * message) is ours, and it is far cheaper than a silent churn.
+ */
+async function notifyOwner(shopId: string, text: string): Promise<boolean> {
+  const shop = await prisma.shop.findUnique({
+    where: { id: shopId },
+    select: { name: true, ownerPhone: true, notifyPhone: true },
+  });
+  const recipient = shop?.notifyPhone ?? shop?.ownerPhone;
+  if (!recipient) {
+    console.warn(`[subscriptions] shop ${shopId} has no recipient phone; cannot send plan notice`);
+    return false;
+  }
+  try {
+    await YeboLinkClient.sendWhatsApp(recipient, text);
+    return true;
+  } catch (err: any) {
+    console.error(`[subscriptions] plan notice FAILED for shop ${shopId}: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
 export interface RenewalSummary {
   considered: number;
   invoiced: number;
   lapsed: number;
   ended: number;
+  /** Owners told their plan paused. Lower than `lapsed` when a send failed;
+   *  those retry on the next pass. */
+  lapseNoticesSent: number;
   failures: Array<{ shopId: string; error: string }>;
 }
 
@@ -221,7 +298,7 @@ export async function runRenewals(now = new Date()): Promise<RenewalSummary> {
     where: { currentPeriodEnd: { lte: now }, status: { in: ['ACTIVE', 'PENDING', 'PAST_DUE'] } },
   });
 
-  const summary: RenewalSummary = { considered: due.length, invoiced: 0, lapsed: 0, ended: 0, failures: [] };
+  const summary: RenewalSummary = { considered: due.length, invoiced: 0, lapsed: 0, ended: 0, lapseNoticesSent: 0, failures: [] };
 
   for (const sub of due) {
     try {
@@ -234,6 +311,29 @@ export async function runRenewals(now = new Date()): Promise<RenewalSummary> {
       if (sub.status !== 'ACTIVE') {
         await prisma.shopSubscription.update({ where: { id: sub.id }, data: { status: 'PAST_DUE' } });
         summary.lapsed++;
+
+        // Once per lapse, not once per night: a lapsed row stays due forever,
+        // so `lapsedNotifiedAt` is what stops this becoming a daily nag. A
+        // failed send leaves it null and is retried on the next pass.
+        if (!sub.lapsedNotifiedAt) {
+          const shop = await prisma.shop.findUnique({ where: { id: sub.shopId }, select: { name: true } });
+          const sent = await notifyOwner(
+            sub.shopId,
+            buildLapseMessage(
+              shop?.name ?? 'Your shop',
+              PLANS[sub.planCode as PlanCode].name,
+              sub.invoiceNumber,
+              sub.invoicePayUrl,
+            ),
+          );
+          if (sent) {
+            await prisma.shopSubscription.update({
+              where: { id: sub.id },
+              data: { lapsedNotifiedAt: new Date() },
+            });
+            summary.lapseNoticesSent++;
+          }
+        }
         continue;
       }
 
