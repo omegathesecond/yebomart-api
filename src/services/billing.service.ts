@@ -38,8 +38,8 @@ export class BillingService {
 
   /**
    * Charge the shop's wallet for a billable action (AI query, message send).
-   * Throws YeboPayChargeError with code='INSUFFICIENT_BALANCE' on 402 — route
-   * handlers map this to a 402 user-facing response with a "Top up" prompt.
+   * Throws YeboPayChargeError with code='INSUFFICIENT_BALANCE' — route handlers
+   * map this to a 402 user-facing response with a "Top up" prompt.
    */
   static async chargeShopCredits(opts: {
     shopId: string;
@@ -49,7 +49,7 @@ export class BillingService {
     metadata?: Record<string, unknown>;
   }) {
     const yeboidSub = await getShopOwnerYeboidSub(opts.shopId);
-    return YeboPayClient.chargeWallet({
+    return YeboPayClient.debitWallet({
       yeboidSub,
       amount: opts.amount,
       description: opts.description,

@@ -9,7 +9,16 @@
  * error through the app's normal error path.
  */
 
-const BASE_URL = process.env.YEBOPAY_BASE_URL ?? 'https://yebopay-api-prod-dysic27f5a-ew.a.run.app';
+/**
+ * The gateway's own domain, never the raw Cloud Run hostname it happens to sit
+ * behind today. `*.run.app` URLs are an implementation detail: they change if
+ * the service is renamed, re-regioned or re-projected, and nothing warns you.
+ * The domain is `.app` — `api.yebopay.com` is an unrelated third party.
+ *
+ * Dev overrides this to https://dev-api.yebopay.app; prod sets nothing and
+ * takes the default.
+ */
+const BASE_URL = process.env.YEBOPAY_BASE_URL ?? 'https://api.yebopay.app';
 
 function getApiKey(): string {
   const key = process.env.YEBOPAY_API_KEY;
@@ -85,18 +94,34 @@ export interface ChargeWalletInput {
   yeboidSub: string;
   amount: number;
   description: string;
+  /**
+   * Dedupe handle. Sent as `external_ref`, NOT as an `Idempotency-Key` header:
+   * /wallet/v1/adjustments dedupes on (yeboid_sub, external_ref, ref_type) and
+   * ignores the header entirely.
+   */
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
 }
 
-export interface YeboPayChargeDto {
+/** One row of the YeboPay wallet ledger. */
+export interface YeboPayLedgerEntryDto {
   id: string;
-  status: string;
-  amount: string;
-  currency: string;
-  payment_method: string;
-  processor: string;
+  type: 'CREDIT' | 'DEBIT';
+  ref_type: string;
+  amount: number;
+  balance_before: number;
+  balance_after: number;
+  description: string | null;
   external_ref: string | null;
+  merchant_app: string | null;
+  created_at: string;
+}
+
+export interface YeboPayWalletDebitResult {
+  /** True when YeboPay replayed an existing row rather than moving money again. */
+  replayed: boolean;
+  transaction: YeboPayLedgerEntryDto;
+  balance: YeboPayBalanceDto;
 }
 
 export interface YeboPayCheckoutDto {
@@ -185,6 +210,25 @@ export class YeboPayClient {
     return body.data;
   }
 
+  /**
+   * Fetch one invoice. This is the POLL half of the paid/not-paid question.
+   *
+   * YeboPay does not retry a failed webhook delivery, so `invoice.paid` is
+   * best-effort: a shop can pay and the event never arrive. Anything that
+   * would penalise a shop for not paying has to check here first rather than
+   * trusting the absence of a webhook.
+   */
+  static async getInvoice(id: string): Promise<YeboPayInvoiceDto> {
+    const res = await fetch(`${BASE_URL}/v1/invoices/${encodeURIComponent(id)}`, {
+      headers: { 'X-API-Key': getApiKey() },
+    });
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayInvoiceDto>;
+    if (!res.ok || !body.success || !body.data) {
+      throw new Error(`YeboPay GET /v1/invoices/${id} ${res.status}: ${body.error ?? 'unknown error'}`);
+    }
+    return body.data;
+  }
+
   static async sendInvoice(id: string): Promise<YeboPaySendInvoiceResult> {
     const res = await fetch(`${BASE_URL}/v1/invoices/${encodeURIComponent(id)}/send`, {
       method: 'POST',
@@ -226,35 +270,57 @@ export class YeboPayClient {
     return body.data;
   }
 
-  // Charge (debit) the wallet for a billable action — AI query, comms send, etc.
-  // Throws on insufficient balance (402). Callers should map to a user-facing
-  // "Top up to continue" prompt.
-  static async chargeWallet(input: ChargeWalletInput): Promise<YeboPayChargeDto> {
-    const headers: Record<string, string> = {
-      'X-API-Key': getApiKey(),
-      'Content-Type': 'application/json',
-    };
-    if (input.idempotencyKey) headers['Idempotency-Key'] = input.idempotencyKey;
-
-    const res = await fetch(`${BASE_URL}/v1/charges`, {
+  /**
+   * Debit the shop owner's YeboPay wallet for a billable action (AI question,
+   * SMS receipt, WhatsApp statement).
+   *
+   * This used to be `POST /v1/charges` with `payment_method: 'WALLET'`.
+   * YeboPay's Addendum 6 removed that legacy enum path — the route now demands
+   * a `payment_method_id` or a `country`+`provider_code` pair, neither of which
+   * describes "take it off the balance they already hold". Every YeboMart debit
+   * had been answering 400 ever since, and because `settlePendingCharge`
+   * deliberately does not fail a request whose work is already done, the shop
+   * silently stopped being billed at all.
+   *
+   * The wallet's supported mutation is now `POST /wallet/v1/adjustments`:
+   * a SIGNED amount, so a debit is a negative one. `ref_type: MERCHANT_CHARGE`
+   * keeps usage out of the operator-adjustment audit trail.
+   *
+   * Idempotency is `external_ref`, not a header — YeboPay looks for an existing
+   * row on (yeboid_sub, external_ref, ref_type) and replays it rather than
+   * debiting twice.
+   *
+   * Throws `YeboPayChargeError` with code='INSUFFICIENT_BALANCE' on 409 so
+   * callers can route to the top-up prompt.
+   */
+  static async debitWallet(input: ChargeWalletInput): Promise<YeboPayWalletDebitResult> {
+    const res = await fetch(`${BASE_URL}/wallet/v1/adjustments`, {
       method: 'POST',
-      headers,
+      headers: { 'X-API-Key': getApiKey(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         yeboid_sub: input.yeboidSub,
-        amount: input.amount,
-        currency: 'SZL',
-        payment_method: 'WALLET',
-        description: input.description,
+        // Negative = debit. Math.abs first so a caller that already passed a
+        // negative cost cannot accidentally CREDIT the wallet.
+        amount: -Math.abs(input.amount),
+        reason: input.description,
+        ref_type: 'MERCHANT_CHARGE',
+        external_ref: input.idempotencyKey,
         metadata: input.metadata,
       }),
     });
-    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayChargeDto>;
+
+    const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayWalletDebitResult> & {
+      code?: string;
+    };
     if (!res.ok || !body.success || !body.data) {
-      // 402 = insufficient balance; surface verbatim so caller can route to top-up UI.
       throw new YeboPayChargeError(
         res.status,
-        body.error ?? 'Charge failed',
-        res.status === 402 ? 'INSUFFICIENT_BALANCE' : 'CHARGE_FAILED'
+        body.error ?? 'Wallet debit failed',
+        body.code === 'INSUFFICIENT_BALANCE' || res.status === 409
+          ? 'INSUFFICIENT_BALANCE'
+          : body.code === 'WALLET_NOT_FOUND' || res.status === 404
+            ? 'WALLET_NOT_FOUND'
+            : 'CHARGE_FAILED',
       );
     }
     return body.data;
@@ -265,7 +331,7 @@ export class YeboPayChargeError extends Error {
   constructor(
     public readonly httpStatus: number,
     message: string,
-    public readonly code: 'INSUFFICIENT_BALANCE' | 'CHARGE_FAILED'
+    public readonly code: 'INSUFFICIENT_BALANCE' | 'WALLET_NOT_FOUND' | 'CHARGE_FAILED',
   ) {
     super(message);
     this.name = 'YeboPayChargeError';

@@ -197,6 +197,35 @@ export async function markInvoicePaid(invoiceId: string): Promise<boolean> {
 }
 
 /**
+ * Ask YeboPay whether an invoice has been paid, and activate the cycle if so.
+ *
+ * This is the POLL half of the paid/not-paid question — the half that does not
+ * depend on a webhook arriving. Returns true when the cycle was (or already
+ * is) funded and must NOT be lapsed.
+ *
+ * A lookup failure returns false rather than throwing: YeboPay being briefly
+ * unreachable should not abort a whole renewal pass. That errs toward lapsing
+ * a shop that may have paid, which is recoverable — the next pass, or the
+ * webhook, restores them — whereas throwing would strand every later
+ * subscription in the batch.
+ */
+async function reconcileInvoice(invoiceId: string): Promise<boolean> {
+  try {
+    const invoice = await YeboPayClient.getInvoice(invoiceId);
+    if (invoice.status !== 'PAID') return false;
+
+    console.warn(
+      `[subscriptions] invoice ${invoiceId} is PAID at YeboPay but we were never told — ` +
+        'activating on reconcile. Check webhook delivery.',
+    );
+    return await markInvoicePaid(invoiceId);
+  } catch (err: any) {
+    console.error(`[subscriptions] could not reconcile invoice ${invoiceId}: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/**
  * Stop at the end of the paid period. The shop keeps what it paid for and is
  * simply not invoiced again — no refund maths, no mid-cycle downgrade.
  */
@@ -276,6 +305,9 @@ export interface RenewalSummary {
   invoiced: number;
   lapsed: number;
   ended: number;
+  /** Cycles found already PAID at YeboPay whose webhook never reached us. A
+   *  number that is persistently non-zero means webhook delivery is degraded. */
+  reconciled: number;
   /** Owners told their plan paused. Lower than `lapsed` when a send failed;
    *  those retry on the next pass. */
   lapseNoticesSent: number;
@@ -298,7 +330,7 @@ export async function runRenewals(now = new Date()): Promise<RenewalSummary> {
     where: { currentPeriodEnd: { lte: now }, status: { in: ['ACTIVE', 'PENDING', 'PAST_DUE'] } },
   });
 
-  const summary: RenewalSummary = { considered: due.length, invoiced: 0, lapsed: 0, ended: 0, lapseNoticesSent: 0, failures: [] };
+  const summary: RenewalSummary = { considered: due.length, invoiced: 0, lapsed: 0, ended: 0, reconciled: 0, lapseNoticesSent: 0, failures: [] };
 
   for (const sub of due) {
     try {
@@ -309,6 +341,20 @@ export async function runRenewals(now = new Date()): Promise<RenewalSummary> {
       }
 
       if (sub.status !== 'ACTIVE') {
+        // Before penalising anyone, ASK. YeboPay does not retry a failed
+        // webhook delivery, so `invoice.paid` is best-effort — a shop can have
+        // paid days ago and the event simply never arrived. Lapsing on the
+        // absence of a webhook would take a paying shop's features away and
+        // then tell them their plan had paused, which is the worst message we
+        // could send to someone who just paid us.
+        if (sub.invoiceId) {
+          const reconciled = await reconcileInvoice(sub.invoiceId);
+          if (reconciled) {
+            summary.reconciled++;
+            continue;
+          }
+        }
+
         await prisma.shopSubscription.update({ where: { id: sub.id }, data: { status: 'PAST_DUE' } });
         summary.lapsed++;
 

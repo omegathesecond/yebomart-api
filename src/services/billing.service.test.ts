@@ -24,7 +24,7 @@ vi.mock('./yebopay.client', async (importOriginal) => {
     ...actual,
     YeboPayClient: {
       getBalance: vi.fn(),
-      chargeWallet: vi.fn(),
+      debitWallet: vi.fn(),
       createCheckout: vi.fn(),
       getCheckout: vi.fn(),
     },
@@ -68,14 +68,21 @@ describe('BillingService.getShopBalance', () => {
 
 describe('BillingService.chargeShopCredits', () => {
   it('forwards the charge with idempotencyKey and merges shopId into metadata', async () => {
-    (YeboPayClient.chargeWallet as any).mockResolvedValue({
-      id: 'ch_1',
-      status: 'SUCCEEDED',
-      amount: '1',
-      currency: 'SZL',
-      payment_method: 'WALLET',
-      processor: 'wallet',
-      external_ref: null,
+    (YeboPayClient.debitWallet as any).mockResolvedValue({
+      replayed: false,
+      transaction: {
+        id: 'ctx_1',
+        type: 'DEBIT',
+        ref_type: 'MERCHANT_CHARGE',
+        amount: 1,
+        balance_before: 500,
+        balance_after: 499,
+        description: 'AI query',
+        external_ref: 'idem-key-1',
+        merchant_app: 'yebomart',
+        created_at: '2026-09-12T00:00:00.000Z',
+      },
+      balance: { available: 499, frozen: 0, total: 499, currency: 'SZL' },
     });
 
     await BillingService.chargeShopCredits({
@@ -86,7 +93,7 @@ describe('BillingService.chargeShopCredits', () => {
       metadata: { feature: 'ai_flash' },
     });
 
-    expect(YeboPayClient.chargeWallet).toHaveBeenCalledWith({
+    expect(YeboPayClient.debitWallet).toHaveBeenCalledWith({
       yeboidSub: OWNER_SUB,
       amount: 1,
       description: 'AI query',
@@ -96,13 +103,13 @@ describe('BillingService.chargeShopCredits', () => {
   });
 
   it('propagates INSUFFICIENT_BALANCE loudly instead of silently succeeding', async () => {
-    (YeboPayClient.chargeWallet as any).mockRejectedValue(
-      new YeboPayChargeError(402, 'Insufficient balance', 'INSUFFICIENT_BALANCE')
+    (YeboPayClient.debitWallet as any).mockRejectedValue(
+      new YeboPayChargeError(409, 'Insufficient balance', 'INSUFFICIENT_BALANCE')
     );
 
     await expect(
       BillingService.chargeShopCredits({ shopId, amount: 999, description: 'AI query' })
-    ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE', httpStatus: 402 });
+    ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE', httpStatus: 409 });
   });
 });
 

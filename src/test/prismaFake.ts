@@ -43,7 +43,8 @@ type ModelName =
   | 'return'
   | 'returnItem'
   | 'returnExchangeItem'
-  | 'cashSession';
+  | 'cashSession'
+  | 'shopSubscription';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
@@ -67,6 +68,9 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   returnItem: [],
   returnExchangeItem: [],
   cashSession: [],
+  // `invoiceId` is unique so a redelivered invoice.paid resolves to exactly one
+  // cycle — the same guarantee the real schema gives markInvoicePaid.
+  shopSubscription: [['shopId'], ['invoiceId']],
 };
 
 // Nested-relation field -> child model, for `{ create: [...] }` writes.
@@ -153,6 +157,7 @@ class FakeDb {
     returnItem: [],
     returnExchangeItem: [],
     cashSession: [],
+    shopSubscription: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -481,6 +486,7 @@ export const prismaFake: any = {
   returnItem: model('returnItem'),
   returnExchangeItem: model('returnExchangeItem'),
   cashSession: model('cashSession'),
+  shopSubscription: model('shopSubscription'),
   $transaction: (arg: any) => db.transaction(arg),
 };
 

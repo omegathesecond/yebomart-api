@@ -134,6 +134,22 @@ export const requireEntitlement = (
  * logged loudly for ops (never silently swallowed). Idempotency on a (shop,
  * route, ~10s) key means a client retry can't double-charge.
  */
+/**
+ * The dedupe handle for one metered action.
+ *
+ * A shop + route + ~10s bucket, so a client that retries a request whose work
+ * already succeeded is not billed twice. It travels to YeboPay as
+ * `external_ref`, which is capped at 200 characters and REJECTS anything
+ * longer with a 400 — and a rejected debit here is invisible, because the
+ * settle path deliberately does not fail the user's request. So the URL is
+ * truncated rather than trusted: a query string is unbounded, and losing a
+ * suffix costs nothing as long as truncation is deterministic (the same
+ * request must always produce the same key, or the dedupe stops working).
+ */
+export function buildChargeIdempotencyKey(shopId: string, url: string): string {
+  return `${shopId}:${url.slice(0, 140)}:${Math.floor(Date.now() / 10000)}`;
+}
+
 export async function settlePendingCharge(req: AuthRequest): Promise<void> {
   // An allowance draw and a credit charge are mutually exclusive: the gate
   // stashes exactly one of them.
@@ -163,7 +179,7 @@ export async function settlePendingCharge(req: AuthRequest): Promise<void> {
       shopId: req.user.shopId,
       amount: pending.amount,
       description: pending.description,
-      idempotencyKey: `${req.user.shopId}:${req.originalUrl}:${Math.floor(Date.now() / 10000)}`,
+      idempotencyKey: buildChargeIdempotencyKey(req.user.shopId, req.originalUrl),
     });
   } catch (err) {
     console.error(
