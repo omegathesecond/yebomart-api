@@ -17,5 +17,15 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts'],
     clearMocks: true,
+    // utils/jwt.ts requires its signing secrets at module load and throws
+    // without them — deliberately, so a missing secret can never silently fall
+    // back to a guessable default in production. Tests therefore have to supply
+    // them. These are throwaway values that exist only in this process; the
+    // real ones come from Secret Manager. Do NOT "fix" a failing test by adding
+    // a default back into jwt.ts — that reopens the forge-token hole.
+    env: {
+      JWT_SECRET: 'test-only-jwt-secret-not-used-anywhere-real-0000000000',
+      JWT_REFRESH_SECRET: 'test-only-refresh-secret-not-used-anywhere-real-000',
+    },
   },
 });

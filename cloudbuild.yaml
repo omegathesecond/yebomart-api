@@ -39,8 +39,15 @@ steps:
       # (called by Cloud Scheduler). Dev trigger overrides the *_SECRET subs
       # (→ _DEV variants) and _YEBOPAY_BASE_URL (→ dev yebopay service).
       # Comma-separated so all bind in one additive --update-secrets.
+      # JWT_SECRET / JWT_REFRESH_SECRET sign the yebomart-internal staff and
+      # admin tokens. They live in Secret Manager with SEPARATE dev and prod
+      # values (the dev trigger overrides the subs to the _DEV variants): when
+      # both environments shared one secret, a staff token minted on dev
+      # authenticated against prod. utils/jwt.ts throws at boot if either is
+      # missing, so a dropped binding fails the deploy instead of silently
+      # falling back to a default.
       - '--update-secrets'
-      - 'YEBOPAY_API_KEY=${_YEBOPAY_API_KEY_SECRET}:latest,YEBOLINK_API_KEY=${_YEBOLINK_API_KEY_SECRET}:latest,INTERNAL_NOTIFICATIONS_SECRET=${_INTERNAL_NOTIFICATIONS_SECRET}:latest,YEBOPAY_WEBHOOK_SECRET=${_YEBOPAY_WEBHOOK_SECRET}:latest'
+      - 'YEBOPAY_API_KEY=${_YEBOPAY_API_KEY_SECRET}:latest,YEBOLINK_API_KEY=${_YEBOLINK_API_KEY_SECRET}:latest,INTERNAL_NOTIFICATIONS_SECRET=${_INTERNAL_NOTIFICATIONS_SECRET}:latest,YEBOPAY_WEBHOOK_SECRET=${_YEBOPAY_WEBHOOK_SECRET}:latest,JWT_SECRET=${_JWT_SECRET}:latest,JWT_REFRESH_SECRET=${_JWT_REFRESH_SECRET}:latest'
 
 substitutions:
   _SERVICE: yebomart-api-prod
@@ -50,6 +57,10 @@ substitutions:
   # Verifies YeboPay's HMAC on inbound webhooks (invoice.paid activates a plan).
   _YEBOPAY_WEBHOOK_SECRET: YEBOMART__YEBOPAY_WEBHOOK_SECRET
   _YEBOPAY_BASE_URL: https://yebopay-api-prod-dysic27f5a-ew.a.run.app
+  # Signing keys for yebomart-internal staff/admin JWTs. Dev trigger overrides
+  # both to the _DEV variants so a dev-issued token can never pass on prod.
+  _JWT_SECRET: YEBOMART__JWT_SECRET
+  _JWT_REFRESH_SECRET: YEBOMART__JWT_REFRESH_SECRET
 
 images:
   - 'gcr.io/$PROJECT_ID/yebomart-api:$COMMIT_SHA'

@@ -1,5 +1,6 @@
 import { prisma } from '@config/prisma';
 import { Prisma, UserRole } from '@prisma/client';
+import { hashPin } from '@utils/hash';
 
 // Staff users authenticate with PIN-on-device (yebomart-internal). The shop
 // OWNER's identity is YeboID — separate concern; no password on staff.
@@ -53,7 +54,8 @@ export class UserService {
         name: input.name,
         phone: input.phone,
         email: input.email,
-        pin: input.pin,
+        // Hashed on the way in — the plaintext PIN never reaches the database.
+        pin: input.pin ? await hashPin(input.pin) : null,
         role: input.role,
         canDiscount: input.canDiscount ?? false,
         canVoid: input.canVoid ?? false,
@@ -174,9 +176,14 @@ export class UserService {
     }
 
     const updateData: Prisma.UserUpdateInput = { ...data };
-    // Don't overwrite existing PIN with empty.
+    // Don't overwrite existing PIN with empty; hash it when one IS supplied.
+    // Without the else branch an owner editing a staff member would write a
+    // fresh plaintext PIN straight back into a column everything else now
+    // treats as a bcrypt hash — that row could never log in again.
     if (!data.pin) {
       delete updateData.pin;
+    } else {
+      updateData.pin = await hashPin(data.pin);
     }
 
     const user = await prisma.user.update({

@@ -2,6 +2,7 @@ import { prisma } from '@config/prisma';
 import { JWTUtil, ITokenPayload } from '@utils/jwt';
 import { UserRole } from '@prisma/client';
 import { getCountryMetadata } from '@config/countries';
+import { verifyPin, dummyPinHash } from '@utils/hash';
 import { YeboIDClient, type YeboIDUserInfo } from './yeboid.client';
 
 // Map phone prefixes to country codes (ordered longest first for accurate matching)
@@ -158,7 +159,14 @@ export class AuthService {
     }
     normalizedPhone = '+' + normalizedPhone;
 
-    const user = await prisma.user.findFirst({
+    // Every active staff row matching the phone, not just the first one.
+    // `User` is unique on [shopId, phone], so the SAME phone legitimately
+    // exists in several shops — a cashier who works two jobs. `findFirst`
+    // returned an arbitrary one of those rows, which meant the login either
+    // signed the person into the wrong tenant or refused them because the
+    // arbitrary row's PIN wasn't theirs. Which row you got was up to the
+    // query planner.
+    const candidates = await prisma.user.findMany({
       where: {
         OR: [{ phone: normalizedPhone }, { phone }],
         isActive: true,
@@ -166,9 +174,36 @@ export class AuthService {
       include: { shop: true },
     });
 
-    if (!user || !user.pin || user.pin !== pin) {
+    // Check the PIN against every candidate. The PIN is what disambiguates
+    // the shop: two rows share a phone but normally not a PIN, so exactly one
+    // matches and that is the shop the person meant.
+    const matches = [];
+    for (const candidate of candidates) {
+      // Always run a compare, even for a row with no PIN set, so the work done
+      // doesn't reveal how many rows exist or which of them are usable.
+      const hash = candidate.pin ?? (await dummyPinHash());
+      const ok = await verifyPin(pin, hash);
+      if (ok && candidate.pin) matches.push(candidate);
+    }
+
+    if (matches.length === 0) {
+      // Burn the same CPU for an unknown phone as for a known one — otherwise
+      // "no such phone" returns in ~1ms and "wrong PIN" in ~300ms, which is a
+      // free oracle for which staff numbers are registered.
+      if (candidates.length === 0) await verifyPin(pin, await dummyPinHash());
       throw new Error('Invalid phone or PIN');
     }
+
+    if (matches.length > 1) {
+      // Same phone AND same PIN in more than one shop. There is no way to tell
+      // which shop was intended, and picking one would silently sign the person
+      // into another tenant's data. Refuse and make a human break the tie.
+      throw new Error(
+        'This phone and PIN match more than one shop. Ask the shop owner to change one of the PINs.',
+      );
+    }
+
+    const user = matches[0];
 
     await prisma.user.update({
       where: { id: user.id },

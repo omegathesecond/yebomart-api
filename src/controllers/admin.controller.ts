@@ -1,13 +1,11 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
 import { Prisma, UserRole, ShopStatus } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { JWTUtil } from '@utils/jwt';
 import Joi from 'joi';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'yebomart-jwt-secret';
 
 // bcrypt cost factor — matches the admin seed (prisma/seed.ts) so a rehashed
 // password is consistent with seeded ones.
@@ -49,11 +47,12 @@ export class AdminController {
         return;
       }
 
-      const token = jwt.sign(
-        { id: admin.id, email: admin.email, role: admin.role, type: 'admin' },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      const token = JWTUtil.generateAdminToken({
+        id: admin.id,
+        email: admin.email,
+        role: admin.role,
+        type: 'admin',
+      });
 
       ApiResponse.success(res, {
         admin: {

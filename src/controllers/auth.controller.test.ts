@@ -10,8 +10,14 @@ vi.mock('@yebo/mcp-server', () => ({
   extractBearerToken: vi.fn(),
 }));
 
+import bcrypt from 'bcrypt';
 import { AuthController } from './auth.controller';
 import { resetDb, seedShop, seedUser, table } from '../test/prismaFake';
+
+// Staff PINs are stored as bcrypt hashes (utils/hash.ts), so fixtures must seed
+// a hash, not the plaintext PIN. Cost 4 keeps the suite fast; the code under
+// test only calls bcrypt.compare, which doesn't care about the cost factor.
+const hashPin = (pin: string) => bcrypt.hash(pin, 4);
 
 // Minimal Express req/res doubles, mirroring the pattern in
 // user.controller.test.ts / customer.controller.test.ts.
@@ -73,7 +79,7 @@ describe('AuthController.yeboidExchange', () => {
 describe('AuthController.userLogin — staff PIN login', () => {
   it('succeeds with the correct phone + PIN and issues an access token', async () => {
     const shop = seedShop();
-    const user = seedUser({ phone: '+26878422613', pin: '1234', name: 'Cashier Jane' });
+    const user = seedUser({ phone: '+26878422613', pin: await hashPin('1234'), name: 'Cashier Jane' });
     const res = mockRes();
 
     await AuthController.userLogin(
@@ -92,7 +98,7 @@ describe('AuthController.userLogin — staff PIN login', () => {
 
   it('rejects a wrong PIN with 401 and does not update lastLoginAt', async () => {
     seedShop();
-    const user = seedUser({ phone: '+26878422613', pin: '1234' });
+    const user = seedUser({ phone: '+26878422613', pin: await hashPin('1234') });
     const res = mockRes();
 
     await AuthController.userLogin(
