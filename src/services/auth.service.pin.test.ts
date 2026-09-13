@@ -122,3 +122,82 @@ describe('AuthService.loginUser — same phone across shops picks the right tena
     );
   });
 });
+
+describe('AuthService.loginUser — brute-force throttle', () => {
+  it('locks the row after 5 consecutive wrong PINs', async () => {
+    seedShop({ id: 'shop_1' });
+    seedUser({ id: 'u1', shopId: 'shop_1', phone: '+26876003333', pin: await hash('1234') });
+
+    for (let i = 0; i < 4; i += 1) {
+      await expect(AuthService.loginUser('+26876003333', '0000')).rejects.toThrow(
+        'Invalid phone or PIN',
+      );
+    }
+    // The 5th failure trips the lock...
+    await expect(AuthService.loginUser('+26876003333', '0000')).rejects.toThrow(
+      'Invalid phone or PIN',
+    );
+    // ...and the CORRECT PIN is now refused, which is the whole point.
+    await expect(AuthService.loginUser('+26876003333', '1234')).rejects.toThrow(
+      /Too many incorrect PIN attempts/,
+    );
+  });
+
+  it('a correct PIN before the threshold clears the counter', async () => {
+    seedShop({ id: 'shop_1' });
+    seedUser({ id: 'u1', shopId: 'shop_1', phone: '+26876004444', pin: await hash('1234') });
+
+    for (let i = 0; i < 4; i += 1) {
+      await expect(AuthService.loginUser('+26876004444', '0000')).rejects.toThrow();
+    }
+    // Counter tracks CONSECUTIVE failures, so this resets it...
+    await expect(AuthService.loginUser('+26876004444', '1234')).resolves.toBeTruthy();
+    // ...and four more misses still don't lock.
+    for (let i = 0; i < 4; i += 1) {
+      await expect(AuthService.loginUser('+26876004444', '0000')).rejects.toThrow(
+        'Invalid phone or PIN',
+      );
+    }
+    await expect(AuthService.loginUser('+26876004444', '1234')).resolves.toBeTruthy();
+  });
+
+  it('lets the user back in once the lockout window has passed', async () => {
+    seedShop({ id: 'shop_1' });
+    const user = seedUser({
+      shopId: 'shop_1',
+      phone: '+26876005555',
+      pin: await hash('1234'),
+      pinLockedUntil: new Date(Date.now() - 60_000), // expired a minute ago
+    });
+    expect(user.pinLockedUntil).toBeTruthy();
+
+    await expect(AuthService.loginUser('+26876005555', '1234')).resolves.toBeTruthy();
+  });
+});
+
+describe('AuthService.loginUser — phone formats', () => {
+  it('signs in a South African number stored as E.164', async () => {
+    // The old normalizer turned this into +26827821234567 and never matched.
+    seedShop({ id: 'shop_za' });
+    seedUser({ id: 'uza', shopId: 'shop_za', phone: '+27821234567', pin: await hash('1234') });
+
+    const result = await AuthService.loginUser('+27821234567', '1234');
+    expect(result.user?.id).toBe('uza');
+  });
+
+  it('signs in from a trunk-zero national number', async () => {
+    seedShop({ id: 'shop_za' });
+    seedUser({ id: 'uza', shopId: 'shop_za', phone: '+27821234567', pin: await hash('1234') });
+
+    const result = await AuthService.loginUser('0821234567', '1234');
+    expect(result.user?.id).toBe('uza');
+  });
+
+  it('still signs in an Eswatini number typed without a prefix', async () => {
+    seedShop({ id: 'shop_sz' });
+    seedUser({ id: 'usz', shopId: 'shop_sz', phone: '+26876123456', pin: await hash('1234') });
+
+    const result = await AuthService.loginUser('76123456', '1234');
+    expect(result.user?.id).toBe('usz');
+  });
+});

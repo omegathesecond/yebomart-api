@@ -564,6 +564,10 @@ export function seedUser(partial: Partial<Row> = {}): Row {
     phone: partial.phone ?? `+2687${Math.floor(Math.random() * 1e7)}`,
     role: 'CASHIER',
     isActive: true,
+    // Mirror the schema defaults for the PIN throttle — loginUser reads both on
+    // every attempt, and an undefined counter would increment to NaN.
+    failedPinAttempts: 0,
+    pinLockedUntil: null,
     ...partial,
   });
 }

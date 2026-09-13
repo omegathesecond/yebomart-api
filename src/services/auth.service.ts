@@ -3,6 +3,19 @@ import { JWTUtil, ITokenPayload } from '@utils/jwt';
 import { UserRole } from '@prisma/client';
 import { getCountryMetadata } from '@config/countries';
 import { verifyPin, dummyPinHash } from '@utils/hash';
+import { phoneCandidates } from '@utils/phone';
+
+/**
+ * Consecutive wrong PINs before a staff row is locked, and for how long.
+ *
+ * Five is forgiving enough for a mistyped PIN on a till keypad; fifteen minutes
+ * is long enough to matter to a script and short enough that a cashier isn't
+ * stranded for a shift. Together they cut the reachable guess rate from roughly
+ * 9,600/day (the IP rate limiter alone) to about 480 — the difference between
+ * walking a 4-digit space in a day and in three weeks.
+ */
+const MAX_PIN_ATTEMPTS = 5;
+const PIN_LOCKOUT_MINUTES = 15;
 import { YeboIDClient, type YeboIDUserInfo } from './yeboid.client';
 
 // Map phone prefixes to country codes (ordered longest first for accurate matching)
@@ -144,20 +157,53 @@ export class AuthService {
   }
 
   /**
+   * Count a failed PIN attempt against every row that was actually checked,
+   * locking any that cross the threshold.
+   *
+   * Rows are counted together because the attacker is attacking the *number*,
+   * not one shop's row — and in practice the candidate set is a single row, so
+   * this is one UPDATE. A failure here must never block the login response:
+   * the caller is already on its way to throwing "Invalid phone or PIN", and a
+   * database hiccup while recording a throttle counter is not a reason to
+   * change what the user is told.
+   */
+  private static async recordFailedPinAttempts(
+    candidates: { id: string; failedPinAttempts: number }[],
+    now: Date,
+  ): Promise<void> {
+    try {
+      await Promise.all(
+        candidates.map((candidate) => {
+          const attempts = candidate.failedPinAttempts + 1;
+          const locked = attempts >= MAX_PIN_ATTEMPTS;
+          return prisma.user.update({
+            where: { id: candidate.id },
+            data: {
+              // Reset the counter as the lock is applied, so the next window
+              // starts from zero rather than locking again on the first miss.
+              failedPinAttempts: locked ? 0 : attempts,
+              pinLockedUntil: locked
+                ? new Date(now.getTime() + PIN_LOCKOUT_MINUTES * 60_000)
+                : undefined,
+            },
+          });
+        }),
+      );
+    } catch (err) {
+      console.error('[AuthService] could not record failed PIN attempt:', err);
+    }
+  }
+
+  /**
    * Staff (cashier / manager) login with PIN. yebomart-internal — issues a
    * yebomart-signed JWT scoped to the staff member's shop. The shop OWNER
    * identity lives separately on YeboID.
    */
   static async loginUser(phone: string, pin: string): Promise<LoginResult> {
-    // Normalize phone (default to Eswatini if no country prefix).
-    let normalizedPhone = phone.replace(/\D/g, '');
-    if (normalizedPhone.startsWith('0')) {
-      normalizedPhone = '268' + normalizedPhone.slice(1);
-    }
-    if (!normalizedPhone.startsWith('268')) {
-      normalizedPhone = '268' + normalizedPhone;
-    }
-    normalizedPhone = '+' + normalizedPhone;
+    // Every stored form the typed number could have. The login screen has no
+    // shop selected, so the country is unknown at this point — see
+    // utils/phone.ts for why offering all of them is safe.
+    const candidatePhones = phoneCandidates(phone);
 
     // Every active staff row matching the phone, not just the first one.
     // `User` is unique on [shopId, phone], so the SAME phone legitimately
@@ -166,13 +212,39 @@ export class AuthService {
     // signed the person into the wrong tenant or refused them because the
     // arbitrary row's PIN wasn't theirs. Which row you got was up to the
     // query planner.
-    const candidates = await prisma.user.findMany({
+    const allCandidates = await prisma.user.findMany({
       where: {
-        OR: [{ phone: normalizedPhone }, { phone }],
+        phone: { in: candidatePhones },
         isActive: true,
       },
       include: { shop: true },
     });
+
+    // Rows still inside their lockout window are not checked at all — that is
+    // the point of the throttle. An expired lockout is simply ignored; the
+    // counter is cleared on the next write rather than in a read path.
+    const now = new Date();
+    const lockedOut = allCandidates.filter(
+      (c) => c.pinLockedUntil !== null && c.pinLockedUntil > now,
+    );
+    const candidates = allCandidates.filter((c) => !lockedOut.includes(c));
+
+    if (allCandidates.length > 0 && candidates.length === 0) {
+      // Every row for this number is locked. Say so plainly: a cashier who
+      // fat-fingered their PIN five times needs to know why the till won't let
+      // them in, and "Invalid phone or PIN" would send them to the owner with
+      // a working PIN and no explanation. This does confirm the number is
+      // registered — an accepted trade, because the alternative strands staff
+      // mid-shift with a misleading error.
+      const until = lockedOut.reduce<Date>(
+        (soonest, c) => (c.pinLockedUntil! < soonest ? c.pinLockedUntil! : soonest),
+        lockedOut[0].pinLockedUntil!,
+      );
+      const minutes = Math.max(1, Math.ceil((until.getTime() - now.getTime()) / 60000));
+      throw new Error(
+        `Too many incorrect PIN attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+      );
+    }
 
     // Check the PIN against every candidate. The PIN is what disambiguates
     // the shop: two rows share a phone but normally not a PIN, so exactly one
@@ -191,6 +263,7 @@ export class AuthService {
       // "no such phone" returns in ~1ms and "wrong PIN" in ~300ms, which is a
       // free oracle for which staff numbers are registered.
       if (candidates.length === 0) await verifyPin(pin, await dummyPinHash());
+      await AuthService.recordFailedPinAttempts(candidates, now);
       throw new Error('Invalid phone or PIN');
     }
 
@@ -205,9 +278,11 @@ export class AuthService {
 
     const user = matches[0];
 
+    // Success clears the throttle for this row — the counter tracks
+    // *consecutive* failures, so one correct PIN resets it.
     await prisma.user.update({
       where: { id: user.id },
-      data: { lastLoginAt: new Date() },
+      data: { lastLoginAt: now, failedPinAttempts: 0, pinLockedUntil: null },
     });
 
     const payload: ITokenPayload = {
