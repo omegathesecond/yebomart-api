@@ -83,12 +83,17 @@ const RELATIONS: Partial<Record<ModelName, Record<string, ModelName>>> = {
 
 // Belongs-to (parent) relation field -> [parent model, FK field on this row].
 // Used by includeOn for `include: { shop: { select } }`-style joins, where the
-// row carries a FK (e.g. Sale.shopId) pointing at the parent's id.
+// row carries a FK (e.g. Sale.shopId) pointing at the parent's id — AND by
+// matchesWhere (below) to resolve through-relation where-filters like
+// `saleItem.groupBy({ where: { sale: { shopId, status, createdAt } } })`,
+// which several services (stock/report/ai) use to scope by the parent Sale.
 const PARENT_RELATIONS: Partial<Record<ModelName, Record<string, [ModelName, string]>>> = {
   sale: { shop: ['shop', 'shopId'], customer: ['customer', 'customerId'] },
   purchaseOrder: { shop: ['shop', 'shopId'], supplier: ['supplier', 'supplierId'] },
   user: { shop: ['shop', 'shopId'] },
   cashSession: { shop: ['shop', 'shopId'], user: ['user', 'userId'] },
+  stockLog: { product: ['product', 'productId'], user: ['user', 'userId'] },
+  saleItem: { sale: ['sale', 'saleId'] },
 };
 
 // Column defaults from the schema (`@default(...)`), applied on create when the
@@ -106,10 +111,23 @@ const MODEL_DEFAULTS: Partial<Record<ModelName, Record<string, () => any>>> = {
   },
 };
 
-function matchesWhere(rec: Row, where: Row | undefined): boolean {
+// `model` is optional (defaults to no relation support) so this stays callable
+// from spots that only ever match scalar fields; every FakeDb method that
+// knows its model passes it through so a `{ sale: { shopId, status } }`-style
+// through-relation filter (saleItem.groupBy scoped by the parent Sale, etc.)
+// resolves against the real parent row instead of silently matching everything.
+function matchesWhere(rec: Row, where: Row | undefined, model?: ModelName): boolean {
   if (!where) return true;
+  const parents = model ? (PARENT_RELATIONS[model] ?? {}) : {};
   return Object.entries(where).every(([key, cond]) => {
     if (cond === undefined) return true;
+    const parent = parents[key];
+    if (parent && cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
+      const [parentModel, fk] = parent;
+      const parentRow = db.rows(parentModel).find((r) => r.id === rec[fk]);
+      if (!parentRow) return false;
+      return matchesWhere(parentRow, cond, parentModel);
+    }
     const val = rec[key];
     if (cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
       if ('in' in cond) return (cond.in as any[]).includes(val);
@@ -264,13 +282,13 @@ class FakeDb {
 
   // --- query engine ---
   findFirst(model: ModelName, args: Row = {}): Row | null {
-    const hit = this.tables[model].find((r) => matchesWhere(r, args.where));
+    const hit = this.tables[model].find((r) => matchesWhere(r, args.where, model));
     if (!hit) return null;
     return args.select ? project(hit, args.select) : this.includeOn(model, hit, args.include);
   }
 
   findUnique(model: ModelName, args: Row = {}): Row | null {
-    const hit = this.tables[model].find((r) => matchesWhere(r, args.where));
+    const hit = this.tables[model].find((r) => matchesWhere(r, args.where, model));
     if (!hit) return null;
     return args.select ? project(hit, args.select) : this.includeOn(model, hit, args.include);
   }
@@ -282,9 +300,16 @@ class FakeDb {
     // stable-sort fallback to insertion order.
     let out = this.tables[model]
       .map((r, i) => ({ r, i }))
-      .filter(({ r }) => matchesWhere(r, args.where));
+      .filter(({ r }) => matchesWhere(r, args.where, model));
     if (args.orderBy) {
-      const clauses = Object.entries(args.orderBy as Row);
+      // Prisma accepts either a single `{ field: dir }` clause or an ARRAY of
+      // them for compound sorts (e.g. stock.service.ts's
+      // `orderBy: [{ category: 'asc' }, { name: 'asc' }]`). Treating an array
+      // as a plain object via Object.entries would read numeric indices as
+      // field names and silently sort by nothing — normalize both shapes into
+      // one flat clause list first.
+      const orderByList: Row[] = Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy];
+      const clauses = orderByList.flatMap((o) => Object.entries(o));
       const primaryDir = clauses[0]?.[1];
       out = [...out].sort((a, b) => {
         for (const [field, dir] of clauses) {
@@ -312,7 +337,7 @@ class FakeDb {
   }
 
   count(model: ModelName, args: Row = {}): number {
-    return this.tables[model].filter((r) => matchesWhere(r, args.where)).length;
+    return this.tables[model].filter((r) => matchesWhere(r, args.where, model)).length;
   }
 
   // Apply a Prisma `data` payload to a row, honouring the atomic field
@@ -341,7 +366,7 @@ class FakeDb {
   }
 
   update(model: ModelName, args: Row): Row {
-    const hit = this.tables[model].find((r) => matchesWhere(r, args.where));
+    const hit = this.tables[model].find((r) => matchesWhere(r, args.where, model));
     if (!hit) {
       throw new Prisma.PrismaClientKnownRequestError('Record to update not found.', {
         code: 'P2025',
@@ -358,7 +383,7 @@ class FakeDb {
   // synchronous step, so the guard is evaluated and applied atomically (no
   // check-then-act gap), exactly like a single SQL UPDATE ... WHERE.
   updateMany(model: ModelName, args: Row): { count: number } {
-    const hits = this.tables[model].filter((r) => matchesWhere(r, args.where));
+    const hits = this.tables[model].filter((r) => matchesWhere(r, args.where, model));
     for (const hit of hits) this.applyData(hit, args.data);
     return { count: hits.length };
   }
@@ -395,7 +420,7 @@ class FakeDb {
 
   aggregate(model: ModelName, args: Row = {}): Row {
     return this.aggregateRows(
-      this.tables[model].filter((r) => matchesWhere(r, args.where)),
+      this.tables[model].filter((r) => matchesWhere(r, args.where, model)),
       args
     );
   }
@@ -403,7 +428,7 @@ class FakeDb {
   groupBy(model: ModelName, args: Row = {}): Row[] {
     const by: string[] = Array.isArray(args.by) ? args.by : [args.by];
     const groups = new Map<string, Row[]>();
-    for (const r of this.tables[model].filter((rec) => matchesWhere(rec, args.where))) {
+    for (const r of this.tables[model].filter((rec) => matchesWhere(rec, args.where, model))) {
       const key = JSON.stringify(by.map((f) => r[f] ?? null));
       const bucket = groups.get(key);
       if (bucket) bucket.push(r);
@@ -665,6 +690,25 @@ export function seedCashSession(partial: Partial<Row> = {}): Row {
     variance: null,
     notes: null,
     updatedAt: new Date(),
+    ...partial,
+  });
+}
+
+// Seed a StockLog row directly (bypassing StockService), for tests that need
+// pre-existing movement history with a controlled `createdAt`/type/product —
+// e.g. movement-history filtering by date range or type.
+export function seedStockLog(partial: Partial<Row> = {}): Row {
+  return db.createOne('stockLog', {
+    shopId: 'shop_1',
+    productId: 'product_1',
+    userId: null,
+    type: 'ADJUSTMENT',
+    quantity: 1,
+    previousQty: 0,
+    newQty: 1,
+    note: null,
+    reference: null,
+    syncedAt: null,
     ...partial,
   });
 }
