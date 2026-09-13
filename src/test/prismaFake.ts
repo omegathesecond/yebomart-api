@@ -121,6 +121,8 @@ function matchesWhere(rec: Row, where: Row | undefined, model?: ModelName): bool
   const parents = model ? (PARENT_RELATIONS[model] ?? {}) : {};
   return Object.entries(where).every(([key, cond]) => {
     if (cond === undefined) return true;
+    if (key === 'OR') return (cond as Row[]).some((sub) => matchesWhere(rec, sub, model));
+    if (key === 'AND') return (cond as Row[]).every((sub) => matchesWhere(rec, sub, model));
     const parent = parents[key];
     if (parent && cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
       const [parentModel, fk] = parent;
@@ -329,6 +331,15 @@ class FakeDb {
       });
     }
     let rows = out.map(({ r }) => r);
+    if (Array.isArray(args.distinct) && args.distinct.length) {
+      const seen = new Set<string>();
+      rows = rows.filter((r) => {
+        const key = JSON.stringify(args.distinct.map((f: string) => r[f] ?? null));
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
     if (typeof args.skip === 'number') rows = rows.slice(args.skip);
     if (typeof args.take === 'number') rows = rows.slice(0, args.take);
     return rows.map((r) =>
