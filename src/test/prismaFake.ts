@@ -488,6 +488,11 @@ export const prismaFake: any = {
   cashSession: model('cashSession'),
   shopSubscription: model('shopSubscription'),
   $transaction: (arg: any) => db.transaction(arg),
+  // health.service pings the database with `SELECT 1`. The fake has no SQL
+  // engine, but an in-memory store is by definition reachable, so answering
+  // truthfully here lets the health check be tested at all — without it every
+  // health report came back with database "down".
+  $queryRaw: async () => [{ '?column?': 1 }],
 };
 
 export default prismaFake;
