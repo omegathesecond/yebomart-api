@@ -128,7 +128,7 @@ export class ShopController {
       const shop = await ShopService.getById(id);
       ApiResponse.success(res, shop);
     } catch (error: any) {
-      if (error.message.includes('not found')) {
+      if (error.message?.includes('not found')) {
         ApiResponse.notFound(res, error.message);
       } else {
         ApiResponse.serverError(res, error.message, error);
