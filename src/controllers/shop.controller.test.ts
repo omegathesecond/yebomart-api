@@ -354,6 +354,16 @@ describe('ShopController.getById', () => {
 
     expect(res.statusCode).toBe(500);
   });
+
+  it('serverErrors (not an unhandled throw) when ShopService rejects with an Error that has no message', async () => {
+    const errorWithoutMessage = new Error();
+    delete (errorWithoutMessage as { message?: string }).message;
+    vi.spyOn(ShopService, 'getById').mockRejectedValue(errorWithoutMessage);
+    const res = mockRes();
+    await ShopController.getById(reqFor({ user: owner(shopId), params: { id: shopId } }), res);
+
+    expect(res.statusCode).toBe(500);
+  });
 });
 
 describe('ShopController.update', () => {
