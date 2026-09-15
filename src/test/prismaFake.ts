@@ -50,7 +50,9 @@ type ModelName =
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
 // are allowed — same as prod).
 const UNIQUE_KEYS: Record<ModelName, string[][]> = {
-  shop: [['ownerYeboidSub'], ['ownerPhone']],
+  // Neither ownerYeboidSub nor ownerPhone is unique any more — one YeboID
+  // owner can own multiple Shop rows (multi-shop switching).
+  shop: [],
   product: [['shopId', 'barcode']],
   sale: [['shopId', 'localId'], ['shopId', 'receiptNumber']],
   saleItem: [],

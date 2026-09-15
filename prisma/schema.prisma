@@ -19,9 +19,14 @@ model Shop {
   // Owner identity = YeboID. Required. Populated at signup from the validated
   // OAuth access_token's `sub`. Profile (ownerName/Phone/Email) is fetched
   // once from /oauth/userinfo and cached here for display + comms.
-  ownerYeboidSub String            @unique @db.Uuid
+  //
+  // NOT unique: one YeboID owner can own multiple Shop rows (multi-shop
+  // switching). ownerPhone/ownerEmail are copied onto every shop the owner
+  // creates rather than normalized out, so they're not unique either — the
+  // same owner legitimately has the same phone on several shop rows.
+  ownerYeboidSub String            @db.Uuid
   ownerName      String
-  ownerPhone     String            @unique // E.164; mirrored from YeboID profile
+  ownerPhone     String // E.164; mirrored from YeboID profile
   ownerEmail     String?
 
   // Business Type (generic for any shop)
@@ -89,6 +94,8 @@ model Shop {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([ownerYeboidSub])
 }
 
 enum ShopStatus {

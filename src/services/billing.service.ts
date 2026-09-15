@@ -5,8 +5,8 @@ import { CREDIT_PACKS, findPack, type CreditPack } from '@config/creditPacks';
 /**
  * Get the shop owner's YeboID UUID. This is what yebopay keys wallets on,
  * so cross-product credits unify under one real identity. Throws if the
- * shop has no owner — should never happen given the schema's @unique
- * constraint on ownerYeboidSub.
+ * shop has no owner — should never happen, ownerYeboidSub is a required
+ * field. (Not unique: the same owner may have this value on several shops.)
  */
 export async function getShopOwnerYeboidSub(shopId: string): Promise<string> {
   const shop = await prisma.shop.findUnique({

@@ -93,7 +93,7 @@ export class AuthController {
         return;
       }
       if (req.yeboidUserId) {
-        const result = await AuthService.getMeByYeboID(req.yeboidUserId);
+        const result = await AuthService.getMeByYeboID(req.user.shopId);
         ApiResponse.success(res, result);
         return;
       }

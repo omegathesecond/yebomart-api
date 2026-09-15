@@ -41,6 +41,7 @@ vi.mock('@yebo/mcp-server', () => ({
 
 import { ShopController } from './shop.controller';
 import { ShopService } from '../services/shop.service';
+import { AuthService } from '../services/auth.service';
 import { ownerAuth } from '../middleware/auth.middleware';
 import { JWTUtil } from '../utils/jwt';
 import { resetDb, seedShop, table } from '../test/prismaFake';
@@ -61,12 +62,14 @@ function mockRes() {
 
 function reqFor(opts: {
   user?: { id: string; shopId: string; role: 'OWNER' | 'MANAGER' | 'CASHIER' };
+  yeboidUserId?: string;
   params?: Record<string, any>;
   body?: Record<string, any>;
   query?: Record<string, any>;
 }): any {
   return {
     user: opts.user,
+    yeboidUserId: opts.yeboidUserId,
     params: opts.params ?? {},
     body: opts.body ?? {},
     query: opts.query ?? {},
@@ -531,6 +534,106 @@ describe('ShopController.getConfig', () => {
     vi.spyOn(ShopService, 'getById').mockRejectedValue(new Error('db exploded'));
     const res = mockRes();
     await ShopController.getConfig(reqFor({ user: owner(shopId) }), res);
+
+    expect(res.statusCode).toBe(500);
+  });
+});
+
+describe('ShopController.list — GET /api/shops (multi-shop switching)', () => {
+  it("returns every shop the caller's YeboID identity owns", async () => {
+    const first = seedShop({ ownerYeboidSub: 'yeboid_switch_1', name: 'Main Branch' });
+    await AuthService.createAdditionalShop('yeboid_switch_1', { name: 'Second Branch' });
+    const res = mockRes();
+
+    await ShopController.list(
+      reqFor({ user: owner(first.id), yeboidUserId: 'yeboid_switch_1' }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data.map((s: any) => s.name)).toEqual(['Main Branch', 'Second Branch']);
+  });
+
+  it('401s when req.yeboidUserId is missing (staff device has no owner identity)', async () => {
+    const res = mockRes();
+    await ShopController.list(reqFor({ user: owner(shopId) }), res);
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('401s when req.user is missing', async () => {
+    const res = mockRes();
+    await ShopController.list(reqFor({}), res);
+
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('serverErrors when AuthService throws unexpectedly', async () => {
+    vi.spyOn(AuthService, 'listShopsForOwner').mockRejectedValue(new Error('db exploded'));
+    const res = mockRes();
+    await ShopController.list(reqFor({ user: owner(shopId), yeboidUserId: 'yeboid_x' }), res);
+
+    expect(res.statusCode).toBe(500);
+  });
+});
+
+describe('ShopController.create — POST /api/shops (multi-shop switching)', () => {
+  it('creates an additional shop under the caller\'s YeboID identity', async () => {
+    const first = seedShop({ ownerYeboidSub: 'yeboid_switch_2', name: 'First Shop' });
+    const res = mockRes();
+
+    await ShopController.create(
+      reqFor({
+        user: owner(first.id),
+        yeboidUserId: 'yeboid_switch_2',
+        body: { name: 'Branch Two', businessType: 'tuckshop' },
+      }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data.name).toBe('Branch Two');
+    expect(res.body.data.ownerYeboidSub).toBe('yeboid_switch_2');
+    expect(res.body.data.id).not.toBe(first.id);
+    // +1 for the module-level beforeEach's default seeded shop.
+    expect(table('shop')).toHaveLength(3);
+  });
+
+  it('400s when the caller has no existing shop yet', async () => {
+    const res = mockRes();
+
+    await ShopController.create(
+      reqFor({
+        user: owner('nonexistent'),
+        yeboidUserId: 'yeboid_never_signed_up',
+        body: { name: 'Orphan Shop' },
+      }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.success).toBe(false);
+    // Unchanged — only the module-level beforeEach's default seeded shop.
+    expect(table('shop')).toHaveLength(1);
+  });
+
+  it('401s when req.yeboidUserId is missing', async () => {
+    const res = mockRes();
+    await ShopController.create(reqFor({ user: owner(shopId), body: { name: 'X' } }), res);
+
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('serverErrors when AuthService throws an unexpected error', async () => {
+    vi.spyOn(AuthService, 'createAdditionalShop').mockRejectedValue(new Error('db exploded'));
+    const res = mockRes();
+
+    await ShopController.create(
+      reqFor({ user: owner(shopId), yeboidUserId: 'yeboid_x', body: { name: 'X' } }),
+      res,
+    );
 
     expect(res.statusCode).toBe(500);
   });

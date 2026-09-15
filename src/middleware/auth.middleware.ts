@@ -2,9 +2,13 @@
  * Unified yebomart auth middleware.
  *
  * Two valid tokens:
- *   - YeboID Bearer (RS256, JWKS-validated)  → shop OWNER. We look up the
- *     Shop by ownerYeboidSub and populate req.user with the owner shape.
- *   - Staff HS256 Bearer (yebomart-signed)   → cashier/manager. PIN-issued.
+ *   - YeboID Bearer (RS256, JWKS-validated)  → shop OWNER. We look up ALL
+ *     Shop rows by ownerYeboidSub (one owner can now own several shops) and
+ *     resolve the ACTIVE one for this request from the `X-Shop-Id` header,
+ *     defaulting to the oldest shop when no header is sent — so an existing
+ *     single-shop owner's requests are byte-for-byte unchanged.
+ *   - Staff HS256 Bearer (yebomart-signed)   → cashier/manager. PIN-issued,
+ *     already scoped to exactly one shop (no switching).
  *
  * Routes don't need to know which; they read `req.user.shopId` + role.
  * For admin-dashboard routes, `authenticateAdmin` is the separate path
@@ -33,6 +37,38 @@ function getJwksValidator(): JwksValidator {
   return cachedJwksValidator;
 }
 
+type ActiveShopResolution =
+  | { ok: true; shop: { id: string; ownerPhone: string; ownerEmail: string | null } }
+  | { ok: false; reason: 'no-shop' }
+  | { ok: false; reason: 'not-found' };
+
+/**
+ * Resolve which of a YeboID owner's (possibly several) shops is active for
+ * this request. The frontend's ShopSwitcher sends `X-Shop-Id`; with no
+ * header we default to the oldest shop, so a single-shop owner's requests
+ * never need the header at all and behave exactly as before multi-shop
+ * support existed. An X-Shop-Id that doesn't belong to this owner is a hard
+ * reject rather than a silent fallback to a different shop's data.
+ */
+async function resolveActiveShop(
+  yeboidUserId: string,
+  requestedShopId?: string,
+): Promise<ActiveShopResolution> {
+  const shops = await prisma.shop.findMany({
+    where: { ownerYeboidSub: yeboidUserId },
+    select: { id: true, ownerPhone: true, ownerEmail: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (shops.length === 0) return { ok: false, reason: 'no-shop' };
+
+  if (requestedShopId) {
+    const match = shops.find((s) => s.id === requestedShopId);
+    if (!match) return { ok: false, reason: 'not-found' };
+    return { ok: true, shop: match };
+  }
+  return { ok: true, shop: shops[0] };
+}
+
 /**
  * Authenticate a request as a shop OWNER (YeboID JWT) or STAFF member
  * (yebomart-signed HS256). Populates req.user uniformly. Most routes use this.
@@ -48,26 +84,32 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
     // Try YeboID first — RS256 + JWKS. If it parses + validates, this is an
     // owner. If it errors (wrong issuer / wrong signing alg / bad signature),
     // fall through to staff HS256 path.
+    let ownerAuthResult: ActiveShopResolution | 'not-yeboid' = 'not-yeboid';
     try {
       const auth = await getJwksValidator().verify(token);
       req.yeboidUserId = auth.userId;
+      ownerAuthResult = await resolveActiveShop(auth.userId, req.headers['x-shop-id'] as string | undefined);
+    } catch {
+      // Not a valid YeboID token — try staff HS256 below.
+    }
 
-      // Owner → resolve to the Shop they own. One indexed lookup; sub-ms in
-      // practice.
-      const shop = await prisma.shop.findUnique({
-        where: { ownerYeboidSub: auth.userId },
-        select: { id: true, ownerPhone: true, ownerEmail: true },
-      });
-
-      if (!shop) {
-        // Valid YeboID token but no Shop yet. Caller hasn't completed signup.
-        ApiResponse.unauthorized(
-          res,
-          'No shop found for this YeboID account. Complete signup via POST /api/auth/yeboid/exchange.',
-        );
+    if (ownerAuthResult !== 'not-yeboid') {
+      if (!ownerAuthResult.ok) {
+        if (ownerAuthResult.reason === 'no-shop') {
+          // Valid YeboID token but no Shop yet. Caller hasn't completed signup.
+          ApiResponse.unauthorized(
+            res,
+            'No shop found for this YeboID account. Complete signup via POST /api/auth/yeboid/exchange.',
+          );
+        } else {
+          // X-Shop-Id was sent but doesn't belong to this owner — reject
+          // rather than silently falling back to a different shop's data.
+          ApiResponse.forbidden(res, 'That shop is not linked to your account');
+        }
         return;
       }
 
+      const shop = ownerAuthResult.shop;
       req.user = {
         id: shop.id,
         shopId: shop.id,
@@ -78,8 +120,6 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       };
       next();
       return;
-    } catch {
-      // Not a valid YeboID token — try staff HS256 below.
     }
 
     const decoded = JWTUtil.verifyAccessToken(token);
@@ -131,17 +171,14 @@ export const optionalAuth = async (req: AuthRequest, _res: Response, next: NextF
     }
     try {
       const auth = await getJwksValidator().verify(token);
-      const shop = await prisma.shop.findUnique({
-        where: { ownerYeboidSub: auth.userId },
-        select: { id: true, ownerPhone: true, ownerEmail: true },
-      });
-      if (shop) {
+      const resolution = await resolveActiveShop(auth.userId, req.headers['x-shop-id'] as string | undefined);
+      if (resolution.ok) {
         req.yeboidUserId = auth.userId;
         req.user = {
-          id: shop.id,
-          shopId: shop.id,
-          phone: shop.ownerPhone,
-          email: shop.ownerEmail ?? undefined,
+          id: resolution.shop.id,
+          shopId: resolution.shop.id,
+          phone: resolution.shop.ownerPhone,
+          email: resolution.shop.ownerEmail ?? undefined,
           role: 'OWNER' as UserRole,
           type: 'shop',
         };

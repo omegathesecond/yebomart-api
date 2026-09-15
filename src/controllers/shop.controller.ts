@@ -1,9 +1,17 @@
 import { Response } from 'express';
 import Joi from 'joi';
 import { ShopService } from '@services/shop.service';
+import { AuthService } from '@services/auth.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { getAllBusinessTypes, getBusinessConfig, BUSINESS_TYPES } from '@config/businessTypes';
+
+export const createShopSchema = Joi.object({
+  name: Joi.string().required().trim().min(2).max(100),
+  businessType: Joi.string().optional().valid(...Object.keys(BUSINESS_TYPES)),
+  assistantName: Joi.string().optional().trim().max(50),
+  countryCode: Joi.string().optional().length(2).uppercase(),
+});
 
 export const updateShopSchema = Joi.object({
   name: Joi.string().optional().trim().min(2).max(100),
@@ -32,6 +40,49 @@ export const updateTaxSettingsSchema = Joi.object({
 }).min(1);
 
 export class ShopController {
+  /**
+   * GET /api/shops — every shop the authenticated YeboID owner has (multi-shop
+   * switching). Owner-only; staff devices are scoped to one shop and have no
+   * yeboidUserId to look up other shops with.
+   */
+  static async list(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user || !req.yeboidUserId) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const shops = await AuthService.listShopsForOwner(req.yeboidUserId);
+      ApiResponse.success(res, shops);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * POST /api/shops — create an ADDITIONAL shop under the caller's existing
+   * YeboID identity (multi-shop switching). Owner-only. Owner identity
+   * (name/phone/email) is carried over from the owner's existing shop, not
+   * re-collected — it's the same person across every shop they own.
+   */
+  static async create(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user || !req.yeboidUserId) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+
+      const shop = await AuthService.createAdditionalShop(req.yeboidUserId, req.body);
+      ApiResponse.created(res, shop, 'Shop created');
+    } catch (error: any) {
+      if (error.message?.includes('No existing shop found')) {
+        ApiResponse.badRequest(res, error.message);
+      } else {
+        ApiResponse.serverError(res, error.message, error);
+      }
+    }
+  }
+
   /**
    * GET /api/shops/notifications — current shop's notification prefs + recipient.
    */

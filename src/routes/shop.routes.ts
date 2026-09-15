@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   ShopController,
+  createShopSchema,
   updateShopSchema,
   updateNotificationSettingsSchema,
   updateTaxSettingsSchema,
@@ -15,6 +16,13 @@ router.get('/types', ShopController.getBusinessTypes);
 
 // All other routes require authentication
 router.use(authMiddleware);
+
+// Multi-shop switching: list every shop the authed owner has, and create an
+// additional one under the same YeboID identity. Declared BEFORE `/:id` so
+// `/` isn't swallowed as a shop id. Owner-only — staff devices are scoped to
+// one shop.
+router.get('/', ownerAuth, ShopController.list);
+router.post('/', ownerAuth, validateRequest(createShopSchema), ShopController.create);
 
 // Get shop config (units, categories based on business type)
 router.get('/config', ShopController.getConfig);
