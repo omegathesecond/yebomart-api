@@ -71,15 +71,52 @@ interface YeboIDSignInResult {
   isNewShop: boolean;
 }
 
+// Same shape as ShopService.getById / AuthService.getMeByYeboID's `shop` — so
+// the frontend's Shop type maps directly onto every entry GET /api/shops
+// returns, no separate "summary" shape to reconcile with the ShopSwitcher.
 export interface ShopSummary {
   id: string;
   name: string;
   ownerName: string;
+  ownerPhone: string;
+  ownerEmail: string | null;
   businessType: string;
   assistantName: string;
+  currency: string;
+  timezone: string;
+  address: string | null;
+  logoUrl: string | null;
   countryCode: string;
+  phoneCountryCode: string;
   currencySymbol: string;
+  taxRate: number;
+  taxInclusive: boolean;
+  taxNumber: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
+
+const SHOP_SUMMARY_SELECT = {
+  id: true,
+  name: true,
+  ownerName: true,
+  ownerPhone: true,
+  ownerEmail: true,
+  businessType: true,
+  assistantName: true,
+  currency: true,
+  timezone: true,
+  address: true,
+  logoUrl: true,
+  countryCode: true,
+  phoneCountryCode: true,
+  currencySymbol: true,
+  taxRate: true,
+  taxInclusive: true,
+  taxNumber: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
 export class AuthService {
   /**
@@ -332,15 +369,7 @@ export class AuthService {
     const shops = await prisma.shop.findMany({
       where: { ownerYeboidSub: yeboidUserId },
       orderBy: { createdAt: 'asc' },
-      select: {
-        id: true,
-        name: true,
-        ownerName: true,
-        businessType: true,
-        assistantName: true,
-        countryCode: true,
-        currencySymbol: true,
-      },
+      select: SHOP_SUMMARY_SELECT,
     });
     if (shops.length === 0) throw new Error('No shop found for this YeboID account');
     return shops;
@@ -388,10 +417,22 @@ export class AuthService {
       id: shop.id,
       name: shop.name,
       ownerName: shop.ownerName,
+      ownerPhone: shop.ownerPhone,
+      ownerEmail: shop.ownerEmail,
       businessType: shop.businessType,
       assistantName: shop.assistantName,
+      currency: shop.currency,
+      timezone: shop.timezone,
+      address: shop.address,
+      logoUrl: shop.logoUrl,
       countryCode: shop.countryCode,
+      phoneCountryCode: shop.phoneCountryCode,
       currencySymbol: shop.currencySymbol,
+      taxRate: shop.taxRate,
+      taxInclusive: shop.taxInclusive,
+      taxNumber: shop.taxNumber,
+      createdAt: shop.createdAt,
+      updatedAt: shop.updatedAt,
     };
   }
 
