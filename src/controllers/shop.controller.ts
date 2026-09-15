@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import Joi from 'joi';
 import { ShopService } from '@services/shop.service';
+import { AuthService } from '@services/auth.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { getAllBusinessTypes, getBusinessConfig, BUSINESS_TYPES } from '@config/businessTypes';
@@ -31,7 +32,51 @@ export const updateTaxSettingsSchema = Joi.object({
   taxNumber: Joi.string().allow('', null).trim().max(50).optional(),
 }).min(1);
 
+// POST /api/shops — an ADDITIONAL shop under the owner's existing YeboID
+// identity (multi-shop). shopName is required here (unlike signup, where a
+// default gets synthesized from the profile name) because this is an
+// explicit "create another shop" action with its own name field in the UI.
+export const createShopSchema = Joi.object({
+  shopName: Joi.string().required().trim().min(2).max(100),
+  businessType: Joi.string().optional().valid(...Object.keys(BUSINESS_TYPES)),
+  assistantName: Joi.string().optional().trim().max(50),
+});
+
 export class ShopController {
+  /**
+   * GET /api/shops — every shop owned by the authenticated YeboID identity,
+   * oldest first. Owner-only (route-gated) — the ShopSwitcher's data source.
+   */
+  static async list(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.yeboidUserId) {
+        ApiResponse.forbidden(res, 'Only shop owners can list shops');
+        return;
+      }
+      const shops = await AuthService.listShopsForOwner(req.yeboidUserId);
+      ApiResponse.success(res, shops);
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  /**
+   * POST /api/shops — create an additional shop under the authenticated
+   * owner's existing YeboID identity. Owner-only (route-gated).
+   */
+  static async create(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.yeboidUserId) {
+        ApiResponse.forbidden(res, 'Only shop owners can create shops');
+        return;
+      }
+      const shop = await AuthService.createAdditionalShop(req.yeboidUserId, req.body);
+      ApiResponse.created(res, shop, 'Shop created');
+    } catch (error: any) {
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
   /**
    * GET /api/shops/notifications — current shop's notification prefs + recipient.
    */

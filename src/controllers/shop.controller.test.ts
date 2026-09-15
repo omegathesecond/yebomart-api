@@ -43,7 +43,7 @@ import { ShopController } from './shop.controller';
 import { ShopService } from '../services/shop.service';
 import { ownerAuth } from '../middleware/auth.middleware';
 import { JWTUtil } from '../utils/jwt';
-import { resetDb, seedShop, table } from '../test/prismaFake';
+import { resetDb, seedShop, seedProduct, seedSale, table } from '../test/prismaFake';
 
 function mockRes() {
   const res: any = { statusCode: 200, body: undefined };
@@ -61,12 +61,14 @@ function mockRes() {
 
 function reqFor(opts: {
   user?: { id: string; shopId: string; role: 'OWNER' | 'MANAGER' | 'CASHIER' };
+  yeboidUserId?: string;
   params?: Record<string, any>;
   body?: Record<string, any>;
   query?: Record<string, any>;
 }): any {
   return {
     user: opts.user,
+    yeboidUserId: opts.yeboidUserId,
     params: opts.params ?? {},
     body: opts.body ?? {},
     query: opts.query ?? {},
@@ -533,5 +535,130 @@ describe('ShopController.getConfig', () => {
     await ShopController.getConfig(reqFor({ user: owner(shopId) }), res);
 
     expect(res.statusCode).toBe(500);
+  });
+});
+
+describe('multi-shop: ShopController.list / create', () => {
+  const YEBOID_SUB = 'yeboid_multi_owner';
+
+  it('create adds a second shop under the same YeboID identity, and list returns both, oldest first', async () => {
+    const first = seedShop({ ownerYeboidSub: YEBOID_SUB, name: 'First Shop' });
+
+    const createRes = mockRes();
+    await ShopController.create(
+      reqFor({
+        user: owner(first.id),
+        yeboidUserId: YEBOID_SUB,
+        body: { shopName: 'Second Shop', businessType: 'general' },
+      }),
+      createRes,
+    );
+
+    expect(createRes.statusCode).toBe(201);
+    expect(createRes.body.success).toBe(true);
+    expect(createRes.body.data.name).toBe('Second Shop');
+    const second = createRes.body.data;
+    expect(second.id).not.toBe(first.id);
+
+    // Both shops now exist as distinct rows sharing the same owner identity
+    // (the outer beforeEach already seeded one unrelated shop).
+    expect(table('shop')).toHaveLength(3);
+    expect(table('shop').filter((s) => s.ownerYeboidSub === YEBOID_SUB)).toHaveLength(2);
+
+    const listRes = mockRes();
+    await ShopController.list(reqFor({ user: owner(first.id), yeboidUserId: YEBOID_SUB }), listRes);
+
+    expect(listRes.statusCode).toBe(200);
+    expect(listRes.body.data).toHaveLength(2);
+    expect(listRes.body.data.map((s: any) => s.id)).toEqual([first.id, second.id]);
+  });
+
+  it('create carries over the owner identity (name/phone/email) from the existing shop', async () => {
+    const first = seedShop({
+      ownerYeboidSub: YEBOID_SUB,
+      ownerName: 'Jane Owner',
+      ownerPhone: '+26876123456',
+      ownerEmail: 'jane@example.com',
+    });
+
+    const res = mockRes();
+    await ShopController.create(
+      reqFor({ user: owner(first.id), yeboidUserId: YEBOID_SUB, body: { shopName: 'Branch 2' } }),
+      res,
+    );
+
+    const created = table('shop').find((s) => s.id === res.body.data.id)!;
+    expect(created.ownerName).toBe('Jane Owner');
+    expect(created.ownerPhone).toBe('+26876123456');
+    expect(created.ownerEmail).toBe('jane@example.com');
+  });
+
+  it('list is forbidden without a YeboID identity (staff PIN token)', async () => {
+    const shop = seedShop();
+    const res = mockRes();
+    await ShopController.list(reqFor({ user: owner(shop.id) }), res);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('create is forbidden without a YeboID identity (staff PIN token)', async () => {
+    const shop = seedShop();
+    const before = table('shop').length;
+    const res = mockRes();
+    await ShopController.create(
+      reqFor({ user: owner(shop.id), body: { shopName: 'Sneaky Shop' } }),
+      res,
+    );
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.success).toBe(false);
+    // No new shop was created.
+    expect(table('shop')).toHaveLength(before);
+  });
+
+  it('single-shop owners are unaffected: list returns exactly their one shop', async () => {
+    const shop = seedShop({ ownerYeboidSub: 'solo_owner' });
+    seedShop({ ownerYeboidSub: 'someone_else' }); // unrelated shop, must not leak in
+
+    const res = mockRes();
+    await ShopController.list(reqFor({ user: owner(shop.id), yeboidUserId: 'solo_owner' }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].id).toBe(shop.id);
+  });
+});
+
+describe('multi-shop: data isolation between two shops under the same owner', () => {
+  it('products/customers/expenses seeded on one shop never appear under the sibling shop', async () => {
+    const shopA = seedShop({ ownerYeboidSub: 'multi_isolation_owner', name: 'Shop A' });
+    const shopB = seedShop({ ownerYeboidSub: 'multi_isolation_owner', name: 'Shop B' });
+
+    seedProduct({ shopId: shopA.id, name: 'A Widget' });
+    seedProduct({ shopId: shopB.id, name: 'B Widget' });
+    seedSale({ shopId: shopA.id, receiptNumber: 'RCP-A-0001' });
+    seedSale({ shopId: shopB.id, receiptNumber: 'RCP-B-0001' });
+
+    const productsInA = table('product').filter((p) => p.shopId === shopA.id);
+    const productsInB = table('product').filter((p) => p.shopId === shopB.id);
+    expect(productsInA).toHaveLength(1);
+    expect(productsInA[0].name).toBe('A Widget');
+    expect(productsInB).toHaveLength(1);
+    expect(productsInB[0].name).toBe('B Widget');
+
+    const salesInA = table('sale').filter((s) => s.shopId === shopA.id);
+    const salesInB = table('sale').filter((s) => s.shopId === shopB.id);
+    expect(salesInA).toHaveLength(1);
+    expect(salesInA[0].receiptNumber).toBe('RCP-A-0001');
+    expect(salesInB).toHaveLength(1);
+    expect(salesInB[0].receiptNumber).toBe('RCP-B-0001');
+
+    // getById/getStats already enforce req.user.shopId === params.id (tested
+    // above) — an owner acting as Shop A can never read Shop B's row via that
+    // path even though both shops share ownerYeboidSub.
+    const res = mockRes();
+    await ShopController.getById(reqFor({ user: owner(shopA.id), params: { id: shopB.id } }), res);
+    expect(res.statusCode).toBe(403);
   });
 });

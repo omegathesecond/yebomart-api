@@ -71,6 +71,16 @@ interface YeboIDSignInResult {
   isNewShop: boolean;
 }
 
+export interface ShopSummary {
+  id: string;
+  name: string;
+  ownerName: string;
+  businessType: string;
+  assistantName: string;
+  countryCode: string;
+  currencySymbol: string;
+}
+
 export class AuthService {
   /**
    * Sign in / sign up a shop OWNER via YeboID. Called from
@@ -79,7 +89,11 @@ export class AuthService {
    * accessToken itself is passed through to /oauth/userinfo for profile
    * sync on first signup.
    *
-   * If a Shop already exists for this yeboid_sub → return it (sign-in).
+   * If a Shop already exists for this yeboid_sub → return it (sign-in). An
+   * owner can have several shops (multi-shop) — exchange always resolves to
+   * the OLDEST one, the same default auth.middleware.ts uses when no
+   * X-Shop-Id header is sent, so this stays a stable "your primary shop"
+   * result. Use GET /api/shops to list all of them and switch.
    * If not → create a new Shop using YeboID profile data (sign-up).
    *
    * Optional `signupOverrides` lets the frontend pass a custom shop name +
@@ -91,7 +105,10 @@ export class AuthService {
     accessToken: string,
     signupOverrides?: { shopName?: string; businessType?: string; assistantName?: string },
   ): Promise<YeboIDSignInResult> {
-    const existing = await prisma.shop.findUnique({ where: { ownerYeboidSub: yeboidUserId } });
+    const existing = await prisma.shop.findFirst({
+      where: { ownerYeboidSub: yeboidUserId },
+      orderBy: { createdAt: 'asc' },
+    });
 
     if (existing) {
       return {
@@ -307,14 +324,86 @@ export class AuthService {
   }
 
   /**
-   * Fetch the current authenticated entity's profile. Called by GET /api/auth/me.
-   * Two paths:
-   *   - YeboID-authed (shop owner): yeboidUserId is the lookup key.
+   * List every shop the given YeboID owner has, oldest first (the same order
+   * auth.middleware.ts uses to pick the default active shop). Backs
+   * GET /api/shops — the ShopSwitcher's source of truth.
+   */
+  static async listShopsForOwner(yeboidUserId: string): Promise<ShopSummary[]> {
+    const shops = await prisma.shop.findMany({
+      where: { ownerYeboidSub: yeboidUserId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        ownerName: true,
+        businessType: true,
+        assistantName: true,
+        countryCode: true,
+        currencySymbol: true,
+      },
+    });
+    if (shops.length === 0) throw new Error('No shop found for this YeboID account');
+    return shops;
+  }
+
+  /**
+   * Create an ADDITIONAL shop under an owner's existing YeboID identity.
+   * Requires the owner to already have at least one shop — this is not a
+   * signup path (that's signInWithYeboID's create branch). Identity fields
+   * (owner name/phone/email) are carried over from the existing shop rather
+   * than re-fetched, since they mirror the same YeboID profile either way.
+   */
+  static async createAdditionalShop(
+    yeboidUserId: string,
+    overrides: { shopName: string; businessType?: string; assistantName?: string },
+  ): Promise<ShopSummary> {
+    const existing = await prisma.shop.findFirst({
+      where: { ownerYeboidSub: yeboidUserId },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!existing) {
+      throw new Error(
+        'No existing shop found for this YeboID account. Sign up first via POST /api/auth/yeboid/exchange.',
+      );
+    }
+
+    const shop = await prisma.shop.create({
+      data: {
+        ownerYeboidSub: yeboidUserId,
+        name: overrides.shopName,
+        ownerName: existing.ownerName,
+        ownerPhone: existing.ownerPhone,
+        ownerEmail: existing.ownerEmail,
+        businessType: overrides.businessType ?? 'general',
+        assistantName: overrides.assistantName ?? 'Yebo',
+        countryCode: existing.countryCode,
+        phoneCountryCode: existing.phoneCountryCode,
+        currencySymbol: existing.currencySymbol,
+        currency: existing.currency,
+        timezone: existing.timezone,
+      },
+    });
+
+    return {
+      id: shop.id,
+      name: shop.name,
+      ownerName: shop.ownerName,
+      businessType: shop.businessType,
+      assistantName: shop.assistantName,
+      countryCode: shop.countryCode,
+      currencySymbol: shop.currencySymbol,
+    };
+  }
+
+  /**
+   * Fetch the ACTIVE shop's profile for GET /api/auth/me. Two paths:
+   *   - YeboID-authed (shop owner): shopId is auth.middleware.ts's resolved
+   *     active shop (X-Shop-Id header, or the owner's oldest shop).
    *   - Staff PIN (yebomart JWT): userId/shopId came from req.user.
    */
-  static async getMeByYeboID(yeboidUserId: string) {
+  static async getMeByYeboID(shopId: string) {
     const shop = await prisma.shop.findUnique({
-      where: { ownerYeboidSub: yeboidUserId },
+      where: { id: shopId },
       select: {
         id: true,
         name: true,

@@ -19,9 +19,15 @@ model Shop {
   // Owner identity = YeboID. Required. Populated at signup from the validated
   // OAuth access_token's `sub`. Profile (ownerName/Phone/Email) is fetched
   // once from /oauth/userinfo and cached here for display + comms.
-  ownerYeboidSub String            @unique @db.Uuid
+  //
+  // NOT unique: one YeboID owner can own several Shop rows (multi-shop). The
+  // active shop for a request is resolved by auth.middleware.ts from an
+  // X-Shop-Id header (defaulting to the owner's oldest shop), not by a
+  // one-to-one lookup. ownerPhone mirrors the same YeboID profile across every
+  // shop the owner has, so it can't be unique either.
+  ownerYeboidSub String            @db.Uuid
   ownerName      String
-  ownerPhone     String            @unique // E.164; mirrored from YeboID profile
+  ownerPhone     String // E.164; mirrored from YeboID profile
   ownerEmail     String?
 
   // Business Type (generic for any shop)
@@ -89,6 +95,10 @@ model Shop {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Resolves "all shops owned by this YeboID sub", ordered oldest-first by
+  // auth.middleware.ts's default-active-shop logic.
+  @@index([ownerYeboidSub, createdAt])
 }
 
 enum ShopStatus {

@@ -33,6 +33,39 @@ function getJwksValidator(): JwksValidator {
   return cachedJwksValidator;
 }
 
+type ActiveShop = { id: string; ownerPhone: string; ownerEmail: string | null };
+
+/**
+ * Resolve which Shop a YeboID-authed request is acting on. A single owner can
+ * now own several shops (multi-shop), so the shop is no longer implied by the
+ * owner identity alone — the client picks via the `X-Shop-Id` header.
+ *
+ * - No header → the owner's OLDEST shop (stable default; single-shop owners
+ *   always get their one shop, so this is a no-op for them).
+ * - Header set to a shop this owner doesn't own → 'forbidden'. Never falls
+ *   back to a default shop here — that would silently let a stale/foreign
+ *   X-Shop-Id read another tenant's data instead of erroring loudly.
+ * - Owner has no shops at all → null (hasn't completed signup).
+ */
+async function resolveActiveShop(
+  yeboidUserId: string,
+  requestedShopId: string | undefined,
+): Promise<ActiveShop | 'forbidden' | null> {
+  const shops = await prisma.shop.findMany({
+    where: { ownerYeboidSub: yeboidUserId },
+    select: { id: true, ownerPhone: true, ownerEmail: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (shops.length === 0) return null;
+  if (!requestedShopId) return shops[0];
+  return shops.find((shop) => shop.id === requestedShopId) ?? 'forbidden';
+}
+
+function getRequestedShopId(req: Request): string | undefined {
+  const header = req.headers['x-shop-id'];
+  return typeof header === 'string' && header.length > 0 ? header : undefined;
+}
+
 /**
  * Authenticate a request as a shop OWNER (YeboID JWT) or STAFF member
  * (yebomart-signed HS256). Populates req.user uniformly. Most routes use this.
@@ -52,14 +85,10 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       const auth = await getJwksValidator().verify(token);
       req.yeboidUserId = auth.userId;
 
-      // Owner → resolve to the Shop they own. One indexed lookup; sub-ms in
-      // practice.
-      const shop = await prisma.shop.findUnique({
-        where: { ownerYeboidSub: auth.userId },
-        select: { id: true, ownerPhone: true, ownerEmail: true },
-      });
+      // Owner → resolve which shop this request acts on (see resolveActiveShop).
+      const resolved = await resolveActiveShop(auth.userId, getRequestedShopId(req));
 
-      if (!shop) {
+      if (resolved === null) {
         // Valid YeboID token but no Shop yet. Caller hasn't completed signup.
         ApiResponse.unauthorized(
           res,
@@ -67,12 +96,16 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
         );
         return;
       }
+      if (resolved === 'forbidden') {
+        ApiResponse.forbidden(res, 'X-Shop-Id does not match a shop owned by this account');
+        return;
+      }
 
       req.user = {
-        id: shop.id,
-        shopId: shop.id,
-        phone: shop.ownerPhone,
-        email: shop.ownerEmail ?? undefined,
+        id: resolved.id,
+        shopId: resolved.id,
+        phone: resolved.ownerPhone,
+        email: resolved.ownerEmail ?? undefined,
         role: 'OWNER' as UserRole,
         type: 'shop',
       };
@@ -122,7 +155,7 @@ export const staffAuth = requireRole('OWNER', 'MANAGER', 'CASHIER');
  * doesn't reject if missing. Used by /api/billing/plans-style public-ish
  * endpoints that personalize when authed.
  */
-export const optionalAuth = async (req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
+export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
     const token = extractBearerToken(req.headers.authorization);
     if (!token) {
@@ -131,17 +164,21 @@ export const optionalAuth = async (req: AuthRequest, _res: Response, next: NextF
     }
     try {
       const auth = await getJwksValidator().verify(token);
-      const shop = await prisma.shop.findUnique({
-        where: { ownerYeboidSub: auth.userId },
-        select: { id: true, ownerPhone: true, ownerEmail: true },
-      });
-      if (shop) {
+      const resolved = await resolveActiveShop(auth.userId, getRequestedShopId(req));
+      if (resolved === 'forbidden') {
+        // A token was presented and a shop was explicitly requested — an
+        // invalid X-Shop-Id here is still a tenancy violation, not something
+        // to silently drop and treat as unauthenticated.
+        ApiResponse.forbidden(res, 'X-Shop-Id does not match a shop owned by this account');
+        return;
+      }
+      if (resolved) {
         req.yeboidUserId = auth.userId;
         req.user = {
-          id: shop.id,
-          shopId: shop.id,
-          phone: shop.ownerPhone,
-          email: shop.ownerEmail ?? undefined,
+          id: resolved.id,
+          shopId: resolved.id,
+          phone: resolved.ownerPhone,
+          email: resolved.ownerEmail ?? undefined,
           role: 'OWNER' as UserRole,
           type: 'shop',
         };

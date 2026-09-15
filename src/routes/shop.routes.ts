@@ -4,6 +4,7 @@ import {
   updateShopSchema,
   updateNotificationSettingsSchema,
   updateTaxSettingsSchema,
+  createShopSchema,
 } from '@controllers/shop.controller';
 import { validateRequest } from '@middleware/validation.middleware';
 import { authMiddleware, ownerAuth } from '@middleware/auth.middleware';
@@ -15,6 +16,11 @@ router.get('/types', ShopController.getBusinessTypes);
 
 // All other routes require authentication
 router.use(authMiddleware);
+
+// Multi-shop: list/create shops under the authed owner's YeboID identity.
+// Declared BEFORE `/:id` so `router.get('/')` isn't shadowed. Owner-only.
+router.get('/', ownerAuth, ShopController.list);
+router.post('/', ownerAuth, validateRequest(createShopSchema), ShopController.create);
 
 // Get shop config (units, categories based on business type)
 router.get('/config', ShopController.getConfig);
