@@ -151,11 +151,13 @@ describe('invoices', () => {
       currency: 'SZL',
       dueDate: '2026-10-01T00:00:00.000Z',
       lineItems: [{ description: 'Plan', quantity: 1, unitPrice: 250 }],
+      allowPartialPayment: false,
       toEmail: 'shop@example.com',
     });
 
     const { body } = lastCall(fn);
     expect(body.due_date).toBe('2026-10-01T00:00:00.000Z');
+    expect(body.allow_partial_payment).toBe(false);
     expect(Object.keys(body)).toContain('due_date');
   });
 

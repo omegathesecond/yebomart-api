@@ -136,6 +136,7 @@ describe('BillingService.createTopUpCheckout', () => {
       expect.objectContaining({
         amount: 450,
         currency: 'SZL',
+        description: `YeboMart Standard pack — 500 credits for shop ${shopId}`,
         yeboidSub: OWNER_SUB,
         metadata: expect.objectContaining({ credit_amount: '500', credit_pack: 'STANDARD' }),
       })

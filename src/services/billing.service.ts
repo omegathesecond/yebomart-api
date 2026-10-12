@@ -77,6 +77,7 @@ export class BillingService {
     let priceSzl: number;
     let credits: number;
     let packLabel: string;
+    let packName: string;
 
     if (opts.packId) {
       const pack = findPack(opts.packId);
@@ -84,11 +85,13 @@ export class BillingService {
       priceSzl = pack.priceSzl;
       credits = pack.credits;
       packLabel = pack.id;
+      packName = pack.name;
     } else if (typeof opts.customAmountSzl === 'number' && opts.customAmountSzl >= 10) {
       // Custom top-up: 1:1, no bonus.
       priceSzl = Math.round(opts.customAmountSzl);
       credits = priceSzl;
       packLabel = 'CUSTOM';
+      packName = 'Custom top-up';
     } else {
       throw new Error('Either packId or customAmountSzl (>=10) is required');
     }
@@ -101,7 +104,7 @@ export class BillingService {
       paymentMethod: 'CARD',
       successUrl: opts.successUrl,
       cancelUrl: opts.cancelUrl,
-      description: `Top up ${credits} credits for shop ${opts.shopId}`,
+      description: `YeboMart ${packName} — ${credits} credits for shop ${opts.shopId}`,
       email: opts.shopEmail,
       // credit_amount is the key yebopay's webhook handler reads to credit
       // the wallet. Without it, the checkout would record a payment but
