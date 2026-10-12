@@ -82,7 +82,8 @@ async function issueCycleInvoice(opts: {
     ],
     toEmail: shop.ownerEmail,
     toName: shop.ownerName,
-    description: `${plan.name} plan for ${shop.name}`,
+    description: `YeboMart ${plan.name} plan for ${shop.name} — ${period}`,
+    allowPartialPayment: false,
     metadata: {
       yebomart_shop_id: opts.shopId,
       yebomart_subscription_id: opts.subscriptionId,

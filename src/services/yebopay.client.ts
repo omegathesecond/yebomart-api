@@ -41,6 +41,7 @@ export interface CreateCheckoutInput {
 }
 
 export interface CreateInvoiceInput {
+  allowPartialPayment?: boolean;
   yeboidSub: string;
   currency: string;
   dueDate: string; // ISO-8601
@@ -197,6 +198,7 @@ export class YeboPayClient {
         to_email: input.toEmail,
         to_name: input.toName,
         description: input.description,
+        allow_partial_payment: input.allowPartialPayment,
         status: input.status,
         paid_at: input.paidAt,
         amount_paid: input.amountPaid,
