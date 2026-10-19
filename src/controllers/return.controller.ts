@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { round2 } from '@utils/tax';
 import {
   lockSale,
@@ -10,6 +11,18 @@ import Joi from 'joi';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+
+// Shared by creation and completion; validate even lines that do not move stock.
+async function validateReturnProducts(
+  db: Pick<Prisma.TransactionClient, 'product'>,
+  shopId: string,
+  lines: Array<{ productId: string }>
+) {
+  for (const productId of new Set(lines.map((line) => line.productId))) {
+    const product = await db.product.findFirst({ where: { id: productId, shopId } });
+    if (!product) throw new ReturnEligibilityError(`Product ${productId} not found in this shop`);
+  }
+}
 
 export const createReturnSchema = Joi.object({
   saleId: Joi.string().optional(),
@@ -104,6 +117,7 @@ export class ReturnController {
       }>;
 
       const returnRecord = await prisma.$transaction(async (tx) => {
+        await validateReturnProducts(tx, shopId, [...items, ...(exchangeItems ?? [])]);
         if (saleId) {
           await lockSale(tx, saleId);
           const remaining = await loadEntitlement(tx, saleId, shopId);
@@ -391,6 +405,8 @@ export class ReturnController {
             );
         }
 
+        await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+
         let newStatus: string;
         let updateData: any = { notes: notes || returnRecord.notes };
 
@@ -421,6 +437,8 @@ export class ReturnController {
                     throw new ReturnEligibilityError(
                       'Return product not found in this shop',
                     );
+
+                  if (!product.trackStock) continue;
 
                   const previousQty = product.quantity;
                   const newQty = previousQty + item.quantity;
@@ -460,6 +478,8 @@ export class ReturnController {
                     throw new ReturnEligibilityError(
                       'Return product not found in this shop',
                     );
+
+                  if (!product.trackStock) continue;
 
                   const previousQty = product.quantity;
                   const newQty = previousQty - item.quantity;

@@ -50,6 +50,7 @@ function req(body: Record<string, any>): any {
 beforeEach(() => {
   resetDb();
   seedShop({ ownerYeboidSub: '11111111-1111-1111-1111-111111111111' });
+  seedProduct({ id: 'prod_widget' });
 });
 
 // Seed a sale in shop_1 with a single line: 5 x Widget @ 10.
@@ -450,7 +451,7 @@ describe('cumulative sale entitlement', () => {
     expect((await create(sale.id, 1)).statusCode).toBe(400);
   });
   it('completed returns consume entitlement permanently and prevent void stock restoration', async () => {
-    seedProduct({ id: 'prod_widget', shopId: 'shop_1', quantity: 10 });
+    table('product')[0].quantity = 10;
     const sale = seedShopSale();
     const created = await create(sale.id, 5);
     expect((await process(created.body.data.id, 'complete')).statusCode).toBe(200);
@@ -478,5 +479,99 @@ describe('cumulative sale entitlement', () => {
     const voided = table('sale')[0].status === 'VOIDED';
     expect(table('return').length).toBe(voided ? 0 : 1);
     expect(results).toHaveLength(2);
+  });
+});
+
+describe('return inventory isolation', () => {
+  const line = (productId: string, extra = {}) => ({
+    productId, productName: 'Widget', quantity: 2, unitPrice: 10, ...extra,
+  });
+  const body = (exchange = false) => ({
+    reason: 'Wrong size', type: exchange ? 'EXCHANGE' : 'REFUND',
+    items: [line('prod_widget')],
+    exchangeItems: exchange ? [line('replacement')] : [],
+  });
+  async function create(payload: any) {
+    const res = mockRes();
+    await ReturnController.create(req(payload), res);
+    return res;
+  }
+  async function complete(id: string) {
+    const res = mockRes();
+    await ReturnController.process({ ...req({ action: 'complete' }), params: { id } }, res);
+    return res;
+  }
+  const snapshot = () => structuredClone({
+    products: table('product'), returns: table('return'),
+    items: table('returnItem'), logs: table('stockLog'),
+  });
+
+  it.each(['returned', 'exchange'])('rejects foreign %s inventory at creation', async (kind) => {
+    seedShop({ id: 'shop_2' });
+    seedProduct({ id: 'foreign', shopId: 'shop_2' });
+    const payload = body();
+    if (kind === 'returned') payload.items = [line('foreign', { restockable: false })];
+    else payload.exchangeItems = [line('foreign')];
+    const before = snapshot();
+    const res = await create(payload);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.body)).toContain('not found in this shop');
+    expect(snapshot()).toEqual(before);
+  });
+
+  it.each(['returned', 'exchange'])('rejects missing %s products at creation', async (kind) => {
+    const payload = body();
+    if (kind === 'returned') payload.items = [line('missing')];
+    else payload.exchangeItems = [line('missing')];
+    const before = snapshot();
+    expect((await create(payload)).statusCode).toBe(400);
+    expect(snapshot()).toEqual(before);
+  });
+
+  it.each(['returned', 'exchange'])('revalidates %s ownership within completion', async (kind) => {
+    seedShop({ id: 'shop_2' });
+    seedProduct({ id: 'replacement' });
+    const created = await create(body(true));
+    expect(created.statusCode).toBe(201);
+    const id = kind === 'returned' ? 'prod_widget' : 'replacement';
+    table('product').find(p => p.id === id)!.shopId = 'shop_2';
+    const before = snapshot();
+    const res = await complete(created.body.data.id);
+    expect(res.statusCode).toBe(400);
+    expect(snapshot()).toEqual(before);
+  });
+
+  it.each(['returned', 'exchange'])('rejects %s disappearance without partial completion', async (kind) => {
+    seedProduct({ id: 'replacement' });
+    const created = await create(body(true));
+    expect(created.statusCode).toBe(201);
+    const id = kind === 'returned' ? 'prod_widget' : 'replacement';
+    const products = table('product');
+    products.splice(products.findIndex(p => p.id === id), 1);
+    const before = snapshot();
+    const res = await complete(created.body.data.id);
+    expect(res.statusCode).toBe(400);
+    expect(snapshot()).toEqual(before);
+  });
+
+  it.each([false, true])('completes legitimate same-shop return (exchange=%s)', async (exchange) => {
+    seedProduct({ id: 'replacement', quantity: 50 });
+    const created = await create(body(exchange));
+    expect(created.statusCode).toBe(201);
+    expect((await complete(created.body.data.id)).statusCode).toBe(200);
+    expect(table('product').find(p => p.id === 'prod_widget')!.quantity).toBe(102);
+    expect(table('product').find(p => p.id === 'replacement')!.quantity).toBe(exchange ? 48 : 50);
+    expect(table('return')[0].status).toBe('COMPLETED');
+    expect(table('stockLog')).toHaveLength(exchange ? 2 : 1);
+    expect(table('stockLog').every(log => log.shopId === 'shop_1')).toBe(true);
+  });
+
+  it('validates untracked products but does not change their quantities or log stock', async () => {
+    table('product')[0].trackStock = false;
+    seedProduct({ id: 'replacement', trackStock: false });
+    const created = await create(body(true));
+    expect((await complete(created.body.data.id)).statusCode).toBe(200);
+    expect(table('product').map(p => p.quantity)).toEqual([100, 100]);
+    expect(table('stockLog')).toHaveLength(0);
   });
 });
