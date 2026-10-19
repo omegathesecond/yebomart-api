@@ -4,7 +4,7 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
-import { creditBalanceChange, evaluateCredit, CreditLimitExceededError } from './customerCredit.service';
+import { evaluateCredit, creditBalanceChange, CreditLimitExceededError } from './customerCredit.service';
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -528,9 +528,9 @@ export class SaleService {
    * Void a sale
    */
   static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
-    return prisma.$transaction(async (tx) => {
-      // Conditional UPDATE takes the sale row lock. A competing void waits and
-      // then sees VOIDED, so only the winner can touch stock or customer debt.
+    const updatedSale = await prisma.$transaction(async (tx) => {
+      // Compare-and-set takes the sale row lock before any financial/stock writes.
+      // A concurrent void waits, then fails this predicate after the winner commits.
       const claimed = await tx.sale.updateMany({
         where: { id: saleId, shopId, status: 'COMPLETED' },
         data: { status: 'VOIDED', voidReason: reason },
@@ -542,6 +542,7 @@ export class SaleService {
         include: { items: true },
       });
       if (!sale) throw new Error('Sale not found');
+
       const returns = await tx.return.findMany({
         where: { saleId, shopId },
         include: { items: true },
@@ -554,44 +555,54 @@ export class SaleService {
       }
 
       if (sale.paymentMethod === 'CREDIT') {
-        const entries = await tx.customerCredit.findMany({ where: { shopId, saleId } });
+        const entries = await tx.customerCredit.findMany({ where: { saleId, shopId } });
         const purchases = entries.filter((entry) => entry.type === 'PURCHASE');
-        if (!sale.customerId || purchases.length !== 1 ||
-          purchases[0].customerId !== sale.customerId ||
-          !Number.isFinite(purchases[0].amount) || purchases[0].amount <= 0 ||
-          entries.some((entry) => entry.type === 'REFUND' || entry.type === 'ADJUSTMENT')) {
-          throw new Error('Cannot void credit sale with missing or incompatible debt history');
+        // Never guess debt from the sale total or erase repayments. Reverse only
+        // the actual booked purchase, and reject ambiguous/corrected history.
+        if (purchases.length !== 1 || entries.some((entry) =>
+          entry.type === 'REFUND' || entry.type === 'ADJUSTMENT')) {
+          throw new Error('Cannot void credit sale with missing or incompatible credit history');
         }
-        // Reverse the booked amount, not today's balance or a recalculated sale
-        // total. Repayments and unrelated ledger entries remain untouched.
-        const amount = -creditBalanceChange('PURCHASE', purchases[0].amount);
+        const purchase = purchases[0];
+        if (purchase.customerId !== sale.customerId || !Number.isFinite(purchase.amount) || purchase.amount <= 0) {
+          throw new Error('Cannot void credit sale with invalid booked debt');
+        }
+        const amount = -creditBalanceChange('PURCHASE', purchase.amount);
         await tx.customerCredit.create({
-          data: { shopId, customerId: sale.customerId, saleId, userId,
+          data: {
+            shopId, customerId: purchase.customerId, saleId, userId,
             type: 'ADJUSTMENT', amount,
-            note: `Void credit sale ${sale.receiptNumber}: ${reason}` },
+            note: `Void credit sale ${sale.receiptNumber || saleId}; reversal of ${purchase.id}: ${reason}`,
+          },
         });
         await tx.customer.update({
-          where: { id: sale.customerId, shopId },
+          where: { id: purchase.customerId },
           data: { balance: { increment: creditBalanceChange('ADJUSTMENT', amount) } },
         });
       }
 
       for (const item of sale.items) {
-        const product = await tx.product.findFirst({ where: { id: item.productId, shopId } });
-        if (!product) throw new Error('Sale product not found in this shop');
-        if (!product.trackStock) continue;
-        const restored = await tx.product.update({
-          where: { id: item.productId, shopId },
-          data: { quantity: { increment: item.quantity } },
-        });
-        await tx.stockLog.create({
-          data: { shopId, productId: item.productId, userId, type: 'RETURN',
-            quantity: item.quantity, previousQty: restored.quantity - item.quantity,
-            newQty: restored.quantity, reference: saleId, note: `Voided: ${reason}` },
-        });
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        if (product?.trackStock) {
+          const restored = await tx.product.update({
+            where: { id: item.productId },
+            data: { quantity: { increment: item.quantity } },
+          });
+          await tx.stockLog.create({
+            data: {
+              shopId, productId: item.productId, userId, type: 'RETURN',
+              quantity: item.quantity,
+              previousQty: restored.quantity - item.quantity,
+              newQty: restored.quantity,
+              reference: saleId, note: `Voided: ${reason}`,
+            },
+          });
+        }
       }
       return sale;
     });
+
+    return updatedSale;
   }
 
   /**
