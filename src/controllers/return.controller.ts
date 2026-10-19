@@ -1,8 +1,23 @@
 import { Response } from 'express';
 import Joi from 'joi';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+
+class ReturnProductError extends Error {}
+
+// Shared by creation and completion; validate even lines that do not move stock.
+async function validateReturnProducts(
+  db: Pick<Prisma.TransactionClient, 'product'>,
+  shopId: string,
+  lines: Array<{ productId: string }>
+) {
+  for (const productId of new Set(lines.map((line) => line.productId))) {
+    const product = await db.product.findFirst({ where: { id: productId, shopId } });
+    if (!product) throw new ReturnProductError(`Product ${productId} not found in this shop`);
+  }
+}
 
 export const createReturnSchema = Joi.object({
   saleId: Joi.string().optional(),
@@ -164,6 +179,8 @@ export class ReturnController {
         }));
       }
 
+      await validateReturnProducts(prisma, shopId, [...returnLines, ...(exchangeItems ?? [])]);
+
       // Refund is ALWAYS computed from the validated lines — never trusted from
       // the request body.
       const calculatedRefund = returnLines.reduce(
@@ -209,6 +226,10 @@ export class ReturnController {
 
       ApiResponse.created(res, returnRecord, 'Return created successfully');
     } catch (error: any) {
+      if (error instanceof ReturnProductError) {
+        ApiResponse.badRequest(res, error.message);
+        return;
+      }
       ApiResponse.serverError(res, error.message, error);
     }
   }
@@ -338,20 +359,26 @@ export class ReturnController {
 
           // Restock returned items and deduct exchanged-out items atomically so
           // the product quantity and the StockLog audit trail stay consistent.
-          await prisma.$transaction(async (tx) => {
+          const updated = await prisma.$transaction(async (tx) => {
+            await validateReturnProducts(tx, shopId, [
+              ...returnRecord.items,
+              ...returnRecord.exchangeItems,
+            ]);
+
             // Restock items if restockable
             for (const item of returnRecord.items) {
               if (item.restockable && !item.restocked) {
-                const product = await tx.product.findUnique({
-                  where: { id: item.productId },
+                const product = await tx.product.findFirst({
+                  where: { id: item.productId, shopId },
                 });
-                if (!product) continue;
+                if (!product) throw new ReturnProductError(`Product ${item.productId} not found in this shop`);
+                if (!product.trackStock) continue;
 
                 const previousQty = product.quantity;
                 const newQty = previousQty + item.quantity;
 
                 await tx.product.update({
-                  where: { id: item.productId },
+                  where: { id: item.productId, shopId },
                   data: { quantity: newQty },
                 });
                 await tx.returnItem.update({
@@ -378,16 +405,17 @@ export class ReturnController {
             // Deduct exchange items from stock (these leave the shop again)
             if (returnRecord.exchangeItems) {
               for (const item of returnRecord.exchangeItems) {
-                const product = await tx.product.findUnique({
-                  where: { id: item.productId },
+                const product = await tx.product.findFirst({
+                  where: { id: item.productId, shopId },
                 });
-                if (!product) continue;
+                if (!product) throw new ReturnProductError(`Product ${item.productId} not found in this shop`);
+                if (!product.trackStock) continue;
 
                 const previousQty = product.quantity;
                 const newQty = previousQty - item.quantity;
 
                 await tx.product.update({
-                  where: { id: item.productId },
+                  where: { id: item.productId, shopId },
                   data: { quantity: newQty },
                 });
                 // Log stock movement (negative quantity = stock removed)
@@ -406,8 +434,15 @@ export class ReturnController {
                 });
               }
             }
+            const updated = await tx.return.update({
+              where: { id: returnId, shopId },
+              data: { ...updateData, status: newStatus },
+              include: { items: true, exchangeItems: true },
+            });
+            return updated;
           });
-          break;
+          ApiResponse.success(res, updated, `Return ${action}d successfully`);
+          return;
         }
         default:
           ApiResponse.badRequest(res, 'Invalid action');
@@ -424,6 +459,10 @@ export class ReturnController {
 
       ApiResponse.success(res, updated, `Return ${action}d successfully`);
     } catch (error: any) {
+      if (error instanceof ReturnProductError) {
+        ApiResponse.badRequest(res, error.message);
+        return;
+      }
       ApiResponse.serverError(res, error.message, error);
     }
   }
