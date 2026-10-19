@@ -4,7 +4,7 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
-import { evaluateCredit, CreditLimitExceededError } from './customerCredit.service';
+import { evaluateCredit, creditBalanceChange, CreditLimitExceededError } from './customerCredit.service';
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -528,61 +528,72 @@ export class SaleService {
    * Void a sale
    */
   static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
-    const sale = await prisma.sale.findFirst({
-      where: {
-        id: saleId,
-        shopId,
-        status: 'COMPLETED',
-      },
-      include: { items: true },
-    });
-
-    if (!sale) {
-      throw new Error('Sale not found or already voided');
-    }
-
-    // Void and restore stock in transaction
     const updatedSale = await prisma.$transaction(async (tx) => {
-      // Update sale status
-      const updated = await tx.sale.update({
-        where: { id: saleId },
-        data: {
-          status: 'VOIDED',
-          voidReason: reason,
-        },
+      // Compare-and-set takes the sale row lock before any financial/stock writes.
+      // A concurrent void waits, then fails this predicate after the winner commits.
+      const claimed = await tx.sale.updateMany({
+        where: { id: saleId, shopId, status: 'COMPLETED' },
+        data: { status: 'VOIDED', voidReason: reason },
       });
+      if (claimed.count !== 1) throw new Error('Sale not found or already voided');
 
-      // Restore stock
-      for (const item of sale.items) {
-        const product = await tx.product.findUnique({
-          where: { id: item.productId },
+      const sale = await tx.sale.findFirst({
+        where: { id: saleId, shopId },
+        include: { items: true },
+      });
+      if (!sale) throw new Error('Sale not found');
+
+      const priorReturn = await tx.return.findFirst({
+        where: { saleId, shopId, status: { not: 'REJECTED' } },
+      });
+      if (priorReturn) throw new Error('Cannot void a sale with an existing return or refund');
+
+      if (sale.paymentMethod === 'CREDIT') {
+        const entries = await tx.customerCredit.findMany({ where: { saleId, shopId } });
+        const purchases = entries.filter((entry) => entry.type === 'PURCHASE');
+        // Never guess debt from the sale total or erase repayments. Reverse only
+        // the actual booked purchase, and reject ambiguous/corrected history.
+        if (purchases.length !== 1 || entries.some((entry) =>
+          entry.type === 'REFUND' || entry.type === 'ADJUSTMENT')) {
+          throw new Error('Cannot void credit sale with missing or incompatible credit history');
+        }
+        const purchase = purchases[0];
+        if (purchase.customerId !== sale.customerId || !Number.isFinite(purchase.amount) || purchase.amount <= 0) {
+          throw new Error('Cannot void credit sale with invalid booked debt');
+        }
+        const amount = -creditBalanceChange('PURCHASE', purchase.amount);
+        await tx.customerCredit.create({
+          data: {
+            shopId, customerId: purchase.customerId, saleId, userId,
+            type: 'ADJUSTMENT', amount,
+            note: `Void credit sale ${sale.receiptNumber || saleId}; reversal of ${purchase.id}: ${reason}`,
+          },
         });
+        await tx.customer.update({
+          where: { id: purchase.customerId },
+          data: { balance: { increment: creditBalanceChange('ADJUSTMENT', amount) } },
+        });
+      }
 
+      for (const item of sale.items) {
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
         if (product?.trackStock) {
-          const newQty = product.quantity + item.quantity;
-
-          await tx.product.update({
+          const restored = await tx.product.update({
             where: { id: item.productId },
-            data: { quantity: newQty },
+            data: { quantity: { increment: item.quantity } },
           });
-
           await tx.stockLog.create({
             data: {
-              shopId,
-              productId: item.productId,
-              userId,
-              type: 'RETURN',
+              shopId, productId: item.productId, userId, type: 'RETURN',
               quantity: item.quantity,
-              previousQty: product.quantity,
-              newQty,
-              reference: saleId,
-              note: `Voided: ${reason}`,
+              previousQty: restored.quantity - item.quantity,
+              newQty: restored.quantity,
+              reference: saleId, note: `Voided: ${reason}`,
             },
           });
         }
       }
-
-      return updated;
+      return sale;
     });
 
     return updatedSale;
