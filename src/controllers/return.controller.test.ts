@@ -15,12 +15,14 @@
  * server-side from the validated lines (the body refundAmount is ignored).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { SaleService } from '../services/sale.service';
 import { ReturnController } from './return.controller';
 import {
   resetDb,
   seedShop,
   seedSale,
   seedCustomer,
+  seedProduct,
   table,
 } from '../test/prismaFake';
 
@@ -54,6 +56,8 @@ beforeEach(() => {
 function seedShopSale(overrides: Record<string, any> = {}) {
   return seedSale({
     shopId: 'shop_1',
+    subtotal: 50,
+    totalAmount: 50,
     items: [
       {
         productId: 'prod_widget',
@@ -73,7 +77,14 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
     const otherShopSale = seedSale({
       shopId: 'shop_other',
       items: [
-        { productId: 'prod_widget', productName: 'Widget', quantity: 5, unitPrice: 10, costPrice: 5, totalPrice: 50 },
+        {
+          productId: 'prod_widget',
+          productName: 'Widget',
+          quantity: 5,
+          unitPrice: 10,
+          costPrice: 5,
+          totalPrice: 50,
+        },
       ],
     });
 
@@ -83,9 +94,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         saleId: otherShopSale.id,
         reason: 'Change of mind',
         type: 'REFUND',
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 1, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 1,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(400);
@@ -101,9 +119,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         saleId: sale.id,
         reason: 'Defective',
         type: 'REFUND',
-        items: [{ productId: 'prod_not_sold', productName: 'Gizmo', quantity: 1, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_not_sold',
+            productName: 'Gizmo',
+            quantity: 1,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(400);
@@ -119,9 +144,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         saleId: sale.id,
         reason: 'Defective',
         type: 'REFUND',
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 6, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 6,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(400);
@@ -138,11 +170,21 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         reason: 'Defective',
         type: 'REFUND',
         items: [
-          { productId: 'prod_widget', productName: 'Widget', quantity: 3, unitPrice: 10 },
-          { productId: 'prod_widget', productName: 'Widget', quantity: 3, unitPrice: 10 },
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 3,
+            unitPrice: 10,
+          },
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 3,
+            unitPrice: 10,
+          },
         ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(400);
@@ -151,7 +193,10 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
 
   it('rejects a customerId that is not in the caller shop', async () => {
     const sale = seedShopSale();
-    const otherCustomer = seedCustomer({ shopId: 'shop_other', name: 'Outsider' });
+    const otherCustomer = seedCustomer({
+      shopId: 'shop_other',
+      name: 'Outsider',
+    });
 
     const res = mockRes();
     await ReturnController.create(
@@ -160,9 +205,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         customerId: otherCustomer.id,
         reason: 'Defective',
         type: 'REFUND',
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 1, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 1,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(400);
@@ -180,9 +232,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         type: 'REFUND',
         // Attacker inflates both the per-line price and the total refund.
         refundAmount: 9999,
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 2, unitPrice: 9999 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 2,
+            unitPrice: 9999,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(201);
@@ -203,9 +262,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         customerId: customer.id,
         reason: 'Change of mind',
         type: 'REFUND',
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 1, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 1,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(201);
@@ -226,9 +292,16 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         saleId: sale.id,
         reason: 'Wrong size',
         type: 'EXCHANGE',
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 1, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 1,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(201);
@@ -242,12 +315,168 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
         reason: 'No receipt return',
         type: 'REFUND',
         refundAmount: 9999, // still ignored
-        items: [{ productId: 'prod_widget', productName: 'Widget', quantity: 2, unitPrice: 10 }],
+        items: [
+          {
+            productId: 'prod_widget',
+            productName: 'Widget',
+            quantity: 2,
+            unitPrice: 10,
+          },
+        ],
       }),
-      res
+      res,
     );
 
     expect(res.statusCode).toBe(201);
     expect(res.body.data.refundAmount).toBe(20); // derived from lines, not 9999
+  });
+});
+
+describe('cumulative sale entitlement', () => {
+  function body(saleId: string, quantity: number, extra: any = {}) {
+    return {
+      saleId,
+      reason: 'Change of mind',
+      type: 'REFUND',
+      items: [
+        {
+          productId: 'prod_widget',
+          productName: 'Widget',
+          quantity,
+          unitPrice: 999,
+        },
+      ],
+      ...extra,
+    };
+  }
+  async function create(saleId: string, quantity: number, extra: any = {}) {
+    const res = mockRes();
+    await ReturnController.create(req(body(saleId, quantity, extra)), res);
+    return res;
+  }
+  async function process(id: string, action: string) {
+    const res = mockRes();
+    await ReturnController.process({ ...req({ action }), params: { id } }, res);
+    return res;
+  }
+  it('reserves pending quantities, rejects sequential over-return, and releases rejected reservations', async () => {
+    const sale = seedShopSale();
+    const first = await create(sale.id, 4);
+    expect(first.statusCode).toBe(201);
+    expect((await create(sale.id, 2)).statusCode).toBe(400);
+    expect((await process(first.body.data.id, 'reject')).statusCode).toBe(200);
+    expect((await create(sale.id, 5)).body.data.refundAmount).toBe(50);
+    expect(table('stockLog')).toHaveLength(0);
+  });
+  it('concurrent full-sale reservations cannot both succeed (serialized transaction fake)', async () => {
+    const sale = seedShopSale();
+    const results = await Promise.all([create(sale.id, 5), create(sale.id, 5)]);
+    expect(results.map((r) => r.statusCode).sort()).toEqual([201, 400]);
+    expect(table('return')).toHaveLength(1);
+    expect(table('stockLog')).toHaveLength(0);
+  });
+  it('aggregates duplicate request lines and duplicate sale lines at different prices', async () => {
+    const sale = seedShopSale({
+      totalAmount: 25,
+      items: [
+        {
+          productId: 'prod_widget',
+          productName: 'Widget',
+          quantity: 1,
+          unitPrice: 10,
+          totalPrice: 10,
+        },
+        {
+          productId: 'prod_widget',
+          productName: 'Widget',
+          quantity: 1,
+          unitPrice: 20,
+          totalPrice: 20,
+        },
+      ],
+    });
+    const line = body(sale.id, 1).items[0];
+    const result = await create(sale.id, 1, { items: [line, line] });
+    expect(result.body.data.refundAmount).toBe(25);
+    expect(result.body.data.items).toHaveLength(1);
+    expect((await create(sale.id, 1)).statusCode).toBe(400);
+  });
+  it.each([10, 11.5, 0.01, 0])(
+    'partial discounted/taxed returns exhaust exactly %s charged',
+    async (totalAmount) => {
+      const sale = seedShopSale({
+        totalAmount,
+        discount: 40,
+        tax: totalAmount === 11.5 ? 1.5 : 0,
+      });
+      let sum = 0;
+      for (let i = 0; i < 5; i++) {
+        const result = await create(sale.id, 1);
+        expect(result.statusCode).toBe(201);
+        sum += Math.round(result.body.data.refundAmount * 100);
+      }
+      expect(sum).toBe(Math.round(totalAmount * 100));
+      expect((await create(sale.id, 1)).statusCode).toBe(400);
+    },
+  );
+  it.each(['VOIDED', 'PENDING', 'REFUNDED'])(
+    'rejects %s sales without side effects',
+    async (status) => {
+      const sale = seedShopSale({ status });
+      expect((await create(sale.id, 1)).statusCode).toBe(400);
+      expect(table('return')).toHaveLength(0);
+      expect(table('stockLog')).toHaveLength(0);
+    },
+  );
+  it('revalidates stale completion before touching stock', async () => {
+    const sale = seedShopSale();
+    const created = await create(sale.id, 1);
+    table('sale')[0].status = 'VOIDED';
+    expect((await process(created.body.data.id, 'complete')).statusCode).toBe(
+      400,
+    );
+    expect(table('stockLog')).toHaveLength(0);
+    expect(table('return')[0].status).toBe('PENDING');
+  });
+  it('blocks void with a reservation; rejection permits void and prevents a new return', async () => {
+    const sale = seedShopSale();
+    const created = await create(sale.id, 1);
+    await expect(
+      SaleService.voidSale(sale.id, 'shop_1', undefined, 'test'),
+    ).rejects.toThrow('Cannot void');
+    expect(table('sale')[0].status).toBe('COMPLETED');
+    await process(created.body.data.id, 'reject');
+    await SaleService.voidSale(sale.id, 'shop_1', undefined, 'test');
+    expect((await create(sale.id, 1)).statusCode).toBe(400);
+  });
+  it('completed returns consume entitlement permanently and prevent void stock restoration', async () => {
+    seedProduct({ id: 'prod_widget', shopId: 'shop_1', quantity: 10 });
+    const sale = seedShopSale();
+    const created = await create(sale.id, 5);
+    expect((await process(created.body.data.id, 'complete')).statusCode).toBe(200);
+    expect(table('product')[0].quantity).toBe(15);
+    expect((await create(sale.id, 1)).statusCode).toBe(400);
+    expect((await process(created.body.data.id, 'reject')).statusCode).toBe(400);
+    await expect(SaleService.voidSale(sale.id, 'shop_1', undefined, 'test')).rejects.toThrow('Cannot void');
+    expect(table('product')[0].quantity).toBe(15);
+    expect(table('stockLog')).toHaveLength(1);
+  });
+  it('rejects an overvalued historical request at completion without stock changes', async () => {
+    const sale = seedShopSale({ totalAmount: 10 });
+    const created = await create(sale.id, 1);
+    table('returnItem')[0].unitPrice = 100;
+    expect((await process(created.body.data.id, 'complete')).statusCode).toBe(400);
+    expect(table('stockLog')).toHaveLength(0);
+    expect(table('return')[0].status).toBe('PENDING');
+  });
+  it('concurrent void and reservation have exactly one winner', async () => {
+    const sale = seedShopSale();
+    const results = await Promise.allSettled([
+      SaleService.voidSale(sale.id, 'shop_1', undefined, 'test'),
+      create(sale.id, 5),
+    ]);
+    const voided = table('sale')[0].status === 'VOIDED';
+    expect(table('return').length).toBe(voided ? 0 : 1);
+    expect(results).toHaveLength(2);
   });
 });

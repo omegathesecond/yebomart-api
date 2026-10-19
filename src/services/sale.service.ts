@@ -1,3 +1,4 @@
+import { lockSale, ReturnEligibilityError } from './return-entitlement';
 import { prisma } from '@config/prisma';
 import { Prisma, PaymentMethod, SaleStatus } from '@prisma/client';
 import { paginate, paginationMeta } from '@utils/pagination';
@@ -527,65 +528,79 @@ export class SaleService {
   /**
    * Void a sale
    */
-  static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
-    const sale = await prisma.sale.findFirst({
-      where: {
-        id: saleId,
-        shopId,
-        status: 'COMPLETED',
-      },
-      include: { items: true },
-    });
-
-    if (!sale) {
-      throw new Error('Sale not found or already voided');
-    }
-
-    // Void and restore stock in transaction
-    const updatedSale = await prisma.$transaction(async (tx) => {
-      // Update sale status
-      const updated = await tx.sale.update({
-        where: { id: saleId },
-        data: {
-          status: 'VOIDED',
-          voidReason: reason,
+  static async voidSale(
+    saleId: string,
+    shopId: string,
+    userId: string | undefined,
+    reason: string,
+  ) {
+    return prisma.$transaction(async (tx) => {
+      await lockSale(tx, saleId);
+      const sale = await tx.sale.findFirst({
+        where: {
+          id: saleId,
+          shopId,
+          status: "COMPLETED",
         },
+        include: { items: true },
       });
 
-      // Restore stock
-      for (const item of sale.items) {
-        const product = await tx.product.findUnique({
-          where: { id: item.productId },
-        });
-
-        if (product?.trackStock) {
-          const newQty = product.quantity + item.quantity;
-
-          await tx.product.update({
-            where: { id: item.productId },
-            data: { quantity: newQty },
-          });
-
-          await tx.stockLog.create({
-            data: {
-              shopId,
-              productId: item.productId,
-              userId,
-              type: 'RETURN',
-              quantity: item.quantity,
-              previousQty: product.quantity,
-              newQty,
-              reference: saleId,
-              note: `Voided: ${reason}`,
-            },
-          });
-        }
+      if (!sale) {
+        throw new Error("Sale not found or already voided");
       }
 
-      return updated;
-    });
+      // Void and restore stock in transaction
+      if (
+        await tx.return.count({
+          where: { saleId, status: { not: "REJECTED" } },
+        })
+      )
+        throw new ReturnEligibilityError(
+          "Cannot void a sale with reserved or completed returns",
+        );
+      {
+        // Update sale status
+        const updated = await tx.sale.update({
+          where: { id: saleId },
+          data: {
+            status: "VOIDED",
+            voidReason: reason,
+          },
+        });
 
-    return updatedSale;
+        // Restore stock
+        for (const item of sale.items) {
+          const product = await tx.product.findUnique({
+            where: { id: item.productId },
+          });
+
+          if (product?.trackStock) {
+            const newQty = product.quantity + item.quantity;
+
+            await tx.product.update({
+              where: { id: item.productId },
+              data: { quantity: newQty },
+            });
+
+            await tx.stockLog.create({
+              data: {
+                shopId,
+                productId: item.productId,
+                userId,
+                type: "RETURN",
+                quantity: item.quantity,
+                previousQty: product.quantity,
+                newQty,
+                reference: saleId,
+                note: `Voided: ${reason}`,
+              },
+            });
+          }
+        }
+
+        return updated;
+      }
+    });
   }
 
   /**

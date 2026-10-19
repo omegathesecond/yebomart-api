@@ -15,6 +15,7 @@ router.use(authMiddleware);
 
 // List and get
 router.get('/', validateQuery(listReturnsSchema), ReturnController.list);
+router.get('/sale/:saleId/remaining', ReturnController.remaining);
 router.get('/:id', ReturnController.getById);
 
 // Create return
