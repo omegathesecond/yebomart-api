@@ -26,6 +26,7 @@ vi.mock('./shop.service', () => ({
 }));
 
 import { SaleService } from './sale.service';
+import { CustomerController } from '../controllers/customer.controller';
 import {
   prismaFake,
   resetDb,
@@ -372,5 +373,135 @@ describe('SaleService.create — concurrency hardening', () => {
     expect(a.receiptNumber).not.toBe(b.receiptNumber);
     // Both units sold from stock of 10, no double-decrement from the retry.
     expect(table('product').find((p) => p.id === product.id)!.quantity).toBe(8);
+  });
+});
+
+describe('SaleService.voidSale — atomic stock and debt reversal', () => {
+  async function fixture(paymentMethod = 'CREDIT') {
+    const customer = seedCustomer({ shopId, balance: 20 });
+    const product = seedProduct({ shopId, quantity: 15, sellPrice: 50 });
+    const sale = await SaleService.create(saleInput({
+      customerId: customer.id, paymentMethod,
+      items: [{ productId: product.id, quantity: 2 }],
+      amountPaid: paymentMethod === 'CREDIT' ? 0 : 100,
+    }));
+    return { customer, product, sale };
+  }
+
+  it('appends a signed sale-linked reversal and restores the original debt and stock', async () => {
+    const { customer, product, sale } = await fixture();
+    expect(table('customer')[0].balance).toBe(120);
+    const purchase = { ...table('customerCredit')[0] };
+    const result = await SaleService.voidSale(sale.id, shopId, undefined, 'Mistake');
+    expect(result.status).toBe('VOIDED');
+    expect(table('customer').find(c => c.id === customer.id)!.balance).toBe(20);
+    expect(table('product').find(p => p.id === product.id)!.quantity).toBe(15);
+    expect(table('customerCredit')).toEqual([purchase, expect.objectContaining({
+      saleId: sale.id, customerId: customer.id, shopId, type: 'ADJUSTMENT',
+      amount: -100, note: expect.stringContaining('Mistake'),
+    })]);
+    expect(table('stockLog').at(-1)).toMatchObject({ previousQty: 13, newQty: 15 });
+    // Customers.tsx renders this endpoint's balance, signed amount and note.
+    const res: any = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await CustomerController.getById({
+      user: { shopId }, params: { id: customer.id },
+    } as any, res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].data).toMatchObject({
+      balance: 20,
+      credits: expect.arrayContaining([expect.objectContaining({
+        type: 'ADJUSTMENT', amount: -100, saleId: sale.id,
+        note: expect.stringContaining('Mistake'),
+      })]),
+    });
+  });
+
+  it('preserves repayments and unrelated ledger history, including a resulting customer credit', async () => {
+    const { customer, sale } = await fixture();
+    await prismaFake.customerCredit.create({ data: {
+      shopId, customerId: customer.id, saleId: sale.id, type: 'PAYMENT', amount: 80,
+    } });
+    await prismaFake.customer.update({ where: { id: customer.id }, data: { balance: { decrement: 80 } } });
+    const history = table('customerCredit').map(c => ({ ...c }));
+    // The ledger is authoritative even if a sale snapshot has been altered.
+    await prismaFake.sale.update({ where: { id: sale.id }, data: { totalAmount: 999 } });
+    await SaleService.voidSale(sale.id, shopId, undefined, 'Cancelled');
+    expect(table('customer')[0].balance).toBe(-60);
+    expect(table('customerCredit').slice(0, history.length)).toEqual(history);
+    expect(table('customerCredit').at(-1)!.amount).toBe(-100);
+  });
+
+  it('only one concurrent or repeated void can restore stock and reverse debt', async () => {
+    const { sale } = await fixture();
+    const results = await Promise.allSettled([
+      SaleService.voidSale(sale.id, shopId, undefined, 'First'),
+      SaleService.voidSale(sale.id, shopId, undefined, 'Second'),
+    ]);
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+    await expect(SaleService.voidSale(sale.id, shopId, undefined, 'Again')).rejects.toThrow('already voided');
+    expect(table('customer')[0].balance).toBe(20);
+    expect(table('product')[0].quantity).toBe(15);
+    expect(table('stockLog').filter(l => l.type === 'RETURN')).toHaveLength(1);
+    expect(table('customerCredit').filter(c => c.type === 'ADJUSTMENT')).toHaveLength(1);
+  });
+
+  it.each(['customerCredit', 'customer', 'stockLog'] as const)('rolls back every write if %s fails', async (model) => {
+    const { sale } = await fixture();
+    const before = ['sale', 'customer', 'customerCredit', 'product', 'stockLog'].map(m =>
+      JSON.stringify(table(m as any)));
+    vi.spyOn(prismaFake[model], model === 'customer' ? 'update' : 'create')
+      .mockRejectedValueOnce(new Error('Write failed'));
+    await expect(SaleService.voidSale(sale.id, shopId, undefined, 'Cancel')).rejects.toThrow('Write failed');
+    expect(['sale', 'customer', 'customerCredit', 'product', 'stockLog'].map(m =>
+      JSON.stringify(table(m as any)))).toEqual(before);
+  });
+
+  it.each([
+    { status: 'PENDING' }, { status: 'APPROVED' }, { status: 'COMPLETED' },
+    { status: 'REJECTED', processedAt: new Date() },
+    { status: 'REJECTED', restocked: true },
+  ])('rejects incompatible return history: %j', async ({ status, processedAt, restocked }) => {
+    const { sale } = await fixture();
+    await prismaFake.return.create({ data: { shopId, saleId: sale.id, status,
+      processedAt: processedAt ?? null,
+      items: { create: [{ restocked: restocked ?? false }] },
+    } });
+    await expect(SaleService.voidSale(sale.id, shopId, undefined, 'Cancel')).rejects.toThrow('return');
+    expect(table('sale')[0].status).toBe('COMPLETED');
+    expect(table('product')[0].quantity).toBe(13);
+    expect(table('customer')[0].balance).toBe(120);
+    expect(table('customerCredit')).toHaveLength(1);
+  });
+
+  it.each(['REFUND', 'ADJUSTMENT'])('rejects an existing sale-linked %s without changing balances', async (type) => {
+    const { customer, sale } = await fixture();
+    await prismaFake.customerCredit.create({ data: { shopId, saleId: sale.id,
+      customerId: customer.id, type, amount: 10 } });
+    await expect(SaleService.voidSale(sale.id, shopId, undefined, 'Cancel')).rejects.toThrow('history');
+    expect(table('sale')[0].status).toBe('COMPLETED');
+    expect(table('customer')[0].balance).toBe(120);
+  });
+
+  it('allows a rejected, unprocessed return and a normal paid-sale void without credit entries', async () => {
+    const { sale } = await fixture('CASH');
+    await prismaFake.return.create({ data: { shopId, saleId: sale.id,
+      status: 'REJECTED', processedAt: null, items: { create: [{ restocked: false }] } } });
+    await SaleService.voidSale(sale.id, shopId, undefined, 'Cancel');
+    expect(table('sale')[0].status).toBe('VOIDED');
+    expect(table('product')[0].quantity).toBe(15);
+    expect(table('customer')[0].balance).toBe(20);
+    expect(table('customerCredit')).toHaveLength(0);
+  });
+
+  it('adds stock to the latest quantity rather than overwriting another stock movement', async () => {
+    const { sale } = await fixture('CASH');
+    const original = prismaFake.product.update;
+    vi.spyOn(prismaFake.product, 'update').mockImplementationOnce(async (args: any) => {
+      table('product')[0].quantity -= 3;
+      return original(args);
+    });
+    await SaleService.voidSale(sale.id, shopId, undefined, 'Cancel');
+    expect(table('product')[0].quantity).toBe(12);
+    expect(table('stockLog').at(-1)).toMatchObject({ previousQty: 10, newQty: 12 });
   });
 });

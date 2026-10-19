@@ -4,7 +4,7 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
-import { evaluateCredit, CreditLimitExceededError } from './customerCredit.service';
+import { creditBalanceChange, evaluateCredit, CreditLimitExceededError } from './customerCredit.service';
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -528,64 +528,70 @@ export class SaleService {
    * Void a sale
    */
   static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
-    const sale = await prisma.sale.findFirst({
-      where: {
-        id: saleId,
-        shopId,
-        status: 'COMPLETED',
-      },
-      include: { items: true },
-    });
-
-    if (!sale) {
-      throw new Error('Sale not found or already voided');
-    }
-
-    // Void and restore stock in transaction
-    const updatedSale = await prisma.$transaction(async (tx) => {
-      // Update sale status
-      const updated = await tx.sale.update({
-        where: { id: saleId },
-        data: {
-          status: 'VOIDED',
-          voidReason: reason,
-        },
+    return prisma.$transaction(async (tx) => {
+      // Conditional UPDATE takes the sale row lock. A competing void waits and
+      // then sees VOIDED, so only the winner can touch stock or customer debt.
+      const claimed = await tx.sale.updateMany({
+        where: { id: saleId, shopId, status: 'COMPLETED' },
+        data: { status: 'VOIDED', voidReason: reason },
       });
+      if (claimed.count !== 1) throw new Error('Sale not found or already voided');
 
-      // Restore stock
-      for (const item of sale.items) {
-        const product = await tx.product.findUnique({
-          where: { id: item.productId },
-        });
-
-        if (product?.trackStock) {
-          const newQty = product.quantity + item.quantity;
-
-          await tx.product.update({
-            where: { id: item.productId },
-            data: { quantity: newQty },
-          });
-
-          await tx.stockLog.create({
-            data: {
-              shopId,
-              productId: item.productId,
-              userId,
-              type: 'RETURN',
-              quantity: item.quantity,
-              previousQty: product.quantity,
-              newQty,
-              reference: saleId,
-              note: `Voided: ${reason}`,
-            },
-          });
-        }
+      const sale = await tx.sale.findFirst({
+        where: { id: saleId, shopId },
+        include: { items: true },
+      });
+      if (!sale) throw new Error('Sale not found');
+      const returns = await tx.return.findMany({
+        where: { saleId, shopId },
+        include: { items: true },
+      });
+      // Status alone is insufficient: a completed return can later be rejected.
+      // Retain the processing/restocking evidence when deciding eligibility.
+      if (returns.some((entry) => entry.status !== 'REJECTED' ||
+        entry.processedAt != null || entry.items.some((item) => item.restocked))) {
+        throw new Error('Cannot void a sale with an active or previously processed return');
       }
 
-      return updated;
-    });
+      if (sale.paymentMethod === 'CREDIT') {
+        const entries = await tx.customerCredit.findMany({ where: { shopId, saleId } });
+        const purchases = entries.filter((entry) => entry.type === 'PURCHASE');
+        if (!sale.customerId || purchases.length !== 1 ||
+          purchases[0].customerId !== sale.customerId ||
+          !Number.isFinite(purchases[0].amount) || purchases[0].amount <= 0 ||
+          entries.some((entry) => entry.type === 'REFUND' || entry.type === 'ADJUSTMENT')) {
+          throw new Error('Cannot void credit sale with missing or incompatible debt history');
+        }
+        // Reverse the booked amount, not today's balance or a recalculated sale
+        // total. Repayments and unrelated ledger entries remain untouched.
+        const amount = -creditBalanceChange('PURCHASE', purchases[0].amount);
+        await tx.customerCredit.create({
+          data: { shopId, customerId: sale.customerId, saleId, userId,
+            type: 'ADJUSTMENT', amount,
+            note: `Void credit sale ${sale.receiptNumber}: ${reason}` },
+        });
+        await tx.customer.update({
+          where: { id: sale.customerId, shopId },
+          data: { balance: { increment: creditBalanceChange('ADJUSTMENT', amount) } },
+        });
+      }
 
-    return updatedSale;
+      for (const item of sale.items) {
+        const product = await tx.product.findFirst({ where: { id: item.productId, shopId } });
+        if (!product) throw new Error('Sale product not found in this shop');
+        if (!product.trackStock) continue;
+        const restored = await tx.product.update({
+          where: { id: item.productId, shopId },
+          data: { quantity: { increment: item.quantity } },
+        });
+        await tx.stockLog.create({
+          data: { shopId, productId: item.productId, userId, type: 'RETURN',
+            quantity: item.quantity, previousQty: restored.quantity - item.quantity,
+            newQty: restored.quantity, reference: saleId, note: `Voided: ${reason}` },
+        });
+      }
+      return sale;
+    });
   }
 
   /**
