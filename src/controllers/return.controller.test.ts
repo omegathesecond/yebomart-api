@@ -566,6 +566,17 @@ describe('return inventory isolation', () => {
     expect(table('stockLog').every(log => log.shopId === 'shop_1')).toBe(true);
   });
 
+  it('allows rejection to release reservations after a product disappears', async () => {
+    const created = await create(body());
+    expect(created.statusCode).toBe(201);
+    table('product').splice(0);
+    const res = mockRes();
+    await ReturnController.process({ ...req({ action: 'reject' }), params: { id: created.body.data.id } }, res);
+    expect(res.statusCode).toBe(200);
+    expect(table('return')[0].status).toBe('REJECTED');
+    expect(table('stockLog')).toHaveLength(0);
+  });
+
   it('validates untracked products but does not change their quantities or log stock', async () => {
     table('product')[0].trackStock = false;
     seedProduct({ id: 'replacement', trackStock: false });

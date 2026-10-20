@@ -405,7 +405,9 @@ export class ReturnController {
             );
         }
 
-        await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+        if (action !== 'reject') {
+          await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+        }
 
         let newStatus: string;
         let updateData: any = { notes: notes || returnRecord.notes };
