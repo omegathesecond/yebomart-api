@@ -5,7 +5,7 @@ import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { settlePendingCharge } from '@middleware/billing.middleware';
 import { YeboLinkClient } from '@services/yebolink.client';
-import { evaluateCredit } from '@services/customerCredit.service';
+import { applyCustomerCredit, CreditLimitExceededError } from '@services/customerCredit.service';
 
 export const createCustomerSchema = Joi.object({
   name: Joi.string().required().trim().min(2).max(100),
@@ -255,70 +255,29 @@ export class CustomerController {
         return;
       }
 
-      // Compute the signed balance change and check it against the credit limit.
-      const { balanceChange, newBalance, exceedsLimit } = evaluateCredit({
-        type,
-        amount,
-        currentBalance: customer.balance,
-        creditLimit: customer.creditLimit,
-      });
-
-      // Reject entries that would push the customer over their credit limit,
-      // unless a shop OWNER explicitly overrides. Surface a loud, specific error
-      // so the cashier knows exactly why it was blocked (no silent fallback).
-      if (exceedsLimit) {
-        const isOwner = req.user.role === 'OWNER';
-        if (!(override === true && isOwner)) {
-          const symbol = customer.shop?.currencySymbol ?? '';
-          const label = CREDIT_TYPE_LABEL[type] ?? type;
-          const base =
-            `Credit limit exceeded: this ${label} of ${money(symbol, amount)} would raise ` +
-            `${customer.name}'s balance to ${money(symbol, newBalance)}, over their ` +
-            `${money(symbol, customer.creditLimit)} limit.`;
-          const hint = isOwner
-            ? ' Re-submit with override=true to force it through.'
-            : ' An owner must approve to override.';
-          // Surface the machine-readable signal via the PUBLIC code/meta
-          // channel (not the dev-only `error` arg) so the POS can detect
-          // over-limit / needs-override in production without parsing the
-          // human message.
-          ApiResponse.error(res, base + hint, 422, undefined, {
-            code: 'CREDIT_LIMIT_EXCEEDED',
-            meta: {
-              requiresOverride: true,
-              creditLimit: customer.creditLimit,
-              currentBalance: customer.balance,
-              attemptedBalance: newBalance,
-            },
-          });
-          return;
-        }
-      }
-
-      const [credit, updatedCustomer] = await prisma.$transaction([
-        prisma.customerCredit.create({
-          data: {
-            shopId: req.user.shopId,
-            customerId: id,
-            type,
-            amount,
-            note,
-            saleId,
-            userId: req.user.id,
-          },
-        }),
-        prisma.customer.update({
-          where: { id },
-          data: { balance: { increment: balanceChange } },
-        }),
-      ]);
+      const result = await prisma.$transaction(tx => applyCustomerCredit(tx, {
+        shopId: req.user!.shopId, customerId: id, type, amount, note, saleId,
+        userId: req.user!.id,
+      }, { currencySymbol: customer.shop?.currencySymbol ?? '',
+        override, role: req.user!.role }));
 
       ApiResponse.success(
         res,
-        { credit, newBalance: updatedCustomer.balance, balanceChange },
+        result,
         'Credit entry added',
       );
     } catch (error: any) {
+      if (error instanceof CreditLimitExceededError) {
+        const hint = req.user?.role === 'OWNER'
+          ? ' Re-submit with override=true to force it through.'
+          : ' An owner must approve to override.';
+        ApiResponse.error(res, error.message + hint, 422, undefined, {
+          code: 'CREDIT_LIMIT_EXCEEDED', meta: { requiresOverride: true,
+            creditLimit: error.creditLimit, currentBalance: error.currentBalance,
+            attemptedBalance: error.attemptedBalance },
+        });
+        return;
+      }
       ApiResponse.badRequest(res, error.message);
     }
   }

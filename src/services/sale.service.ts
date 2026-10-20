@@ -4,7 +4,7 @@ import { paginate, paginationMeta } from '@utils/pagination';
 import { computeTax } from '@utils/tax';
 import { ShopService } from './shop.service';
 import { CashSessionService } from './cashSession.service';
-import { evaluateCredit, creditBalanceChange, CreditLimitExceededError } from './customerCredit.service';
+import { applyCustomerCredit, lockCustomerCredit, creditBalanceChange } from './customerCredit.service';
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -185,6 +185,13 @@ export class SaleService {
     for (let attempt = 0; ; attempt++) {
       try {
         sale = await prisma.$transaction(async (tx) => {
+          // Lock before stock/sale writes: customer foreign-key KEY SHARE locks
+          // must not be upgraded concurrently to FOR UPDATE later in the sale.
+          if (isCredit) {
+            await lockCustomerCredit(tx, {
+              customerId: input.customerId!, shopId: input.shopId,
+            });
+          }
           // Generate receipt number (e.g., RCP-240212-0001)
           const today = new Date();
           const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
@@ -206,48 +213,6 @@ export class SaleService {
           });
 
           const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
-
-          // Credit check BEFORE any write. Read the customer inside the
-          // transaction so the balance we evaluate is the committed one (the
-          // same reason the stock guard below lives in here), and so a rejection
-          // rolls back cleanly having touched nothing. Reuses evaluateCredit —
-          // the single source of truth for the PURCHASE sign and the
-          // "creditLimit <= 0 means unlimited" rule — so the POS and the manual
-          // ledger endpoint can never disagree about what "over the limit" means.
-          let creditCustomer: { id: string; name: string; balance: number; creditLimit: number } | null =
-            null;
-          let creditEvaluation: ReturnType<typeof evaluateCredit> | null = null;
-
-          if (isCredit) {
-            creditCustomer = await tx.customer.findFirst({
-              where: { id: input.customerId!, shopId: input.shopId },
-              select: { id: true, name: true, balance: true, creditLimit: true },
-            });
-            if (!creditCustomer) {
-              throw new Error('Customer not found for credit sale');
-            }
-
-            creditEvaluation = evaluateCredit({
-              type: 'PURCHASE',
-              amount: totalAmount,
-              currentBalance: creditCustomer.balance,
-              creditLimit: creditCustomer.creditLimit,
-            });
-
-            // Over the limit → refuse the sale loudly. There is deliberately no
-            // override at the till: the cashier must take a payment or an owner
-            // must raise the limit first.
-            if (creditEvaluation.exceedsLimit) {
-              throw new CreditLimitExceededError({
-                customerName: creditCustomer.name,
-                currencySymbol: shop.currencySymbol,
-                amount: totalAmount,
-                creditLimit: creditCustomer.creditLimit,
-                currentBalance: creditCustomer.balance,
-                attemptedBalance: creditEvaluation.newBalance,
-              });
-            }
-          }
 
           // Decrement stock FIRST with an atomic, guarded write so an oversell
           // can never even create the sale. Doing this before tx.sale.create
@@ -344,23 +309,13 @@ export class SaleService {
           // drift apart. Stock was still decremented above — a credit sale draws
           // down inventory exactly like a paid one.
           let customerBalance: number | undefined;
-          if (isCredit && creditCustomer && creditEvaluation) {
-            await tx.customerCredit.create({
-              data: {
-                shopId: input.shopId,
-                customerId: creditCustomer.id,
-                type: 'PURCHASE',
-                amount: totalAmount,
-                saleId: sale.id,
-                userId: input.userId,
-                note: `Credit sale ${sale.receiptNumber}`,
-              },
-            });
-            const updatedCustomer = await tx.customer.update({
-              where: { id: creditCustomer.id },
-              data: { balance: { increment: creditEvaluation.balanceChange } },
-            });
-            customerBalance = updatedCustomer.balance;
+          if (isCredit) {
+            const credit = await applyCustomerCredit(tx, {
+              shopId: input.shopId, customerId: input.customerId!, type: 'PURCHASE',
+              amount: totalAmount, saleId: sale.id, userId: input.userId,
+              note: `Credit sale ${sale.receiptNumber}`,
+            }, { currencySymbol: shop.currencySymbol });
+            customerBalance = credit.newBalance;
           }
 
           // customerBalance rides along on the sale so the POS receipt can print

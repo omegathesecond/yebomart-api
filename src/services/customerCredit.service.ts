@@ -1,10 +1,10 @@
-import { CreditType } from '@prisma/client';
+import { Prisma, CreditType } from '@prisma/client';
 
 /**
  * Customer-credit money rules.
  *
- * Two invariants live here (extracted from the controller so they can be unit
- * tested without a DB):
+ * Two invariants live here, with a transaction helper to enforce them under
+ * concurrent writes:
  *
  *  1. Every ledger entry has a SIGNED effect on `Customer.balance`
  *     (positive balance = the customer owes the shop). PURCHASE adds debt,
@@ -108,9 +108,15 @@ export class CreditLimitExceededError extends Error {
     attemptedBalance: number;
   }) {
     super(
-      `Credit limit exceeded: this sale of ${money(params.currencySymbol, params.amount)} ` +
+      `Credit limit exceeded: this credit entry of ${money(
+        params.currencySymbol,
+        params.amount,
+      )} ` +
         `would raise ${params.customerName}'s balance to ` +
-        `${money(params.currencySymbol, params.attemptedBalance)}, over their ` +
+        `${money(
+          params.currencySymbol,
+          params.attemptedBalance,
+        )}, over their ` +
         `${money(params.currencySymbol, params.creditLimit)} limit. ` +
         `Take a payment towards their account or raise their limit first.`,
     );
@@ -119,4 +125,65 @@ export class CreditLimitExceededError extends Error {
     this.currentBalance = params.currentBalance;
     this.attemptedBalance = params.attemptedBalance;
   }
+}
+
+/** Acquire before creating rows with customer foreign keys, avoiding lock upgrades. */
+export async function lockCustomerCredit(
+  tx: Prisma.TransactionClient,
+  entry: { customerId: string; shopId: string },
+): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${entry.customerId}
+    AND "shopId" = ${entry.shopId} FOR UPDATE`;
+}
+
+/** Lock before reading: every debt writer shares this lock until its transaction commits.
+ * Keep the ledger and balance mutation in the caller's transaction (including sales).
+ */
+export async function applyCustomerCredit(
+  tx: Prisma.TransactionClient,
+  entry: {
+    shopId: string;
+    customerId: string;
+    type: CreditType;
+    amount: number;
+    userId?: string;
+    note?: string;
+    saleId?: string;
+  },
+  options: { currencySymbol: string; override?: boolean; role?: string },
+) {
+  await lockCustomerCredit(tx, entry);
+  const customer = await tx.customer.findFirst({
+    where: { id: entry.customerId, shopId: entry.shopId },
+  });
+  if (!customer) throw new Error('Customer not found');
+  const evaluation = evaluateCredit({
+    type: entry.type,
+    amount: entry.amount,
+    currentBalance: customer.balance,
+    creditLimit: customer.creditLimit,
+  });
+  if (
+    evaluation.exceedsLimit &&
+    !(options.override === true && options.role === 'OWNER')
+  ) {
+    throw new CreditLimitExceededError({
+      customerName: customer.name,
+      currencySymbol: options.currencySymbol,
+      amount: entry.amount,
+      creditLimit: customer.creditLimit,
+      currentBalance: customer.balance,
+      attemptedBalance: evaluation.newBalance,
+    });
+  }
+  const credit = await tx.customerCredit.create({ data: entry });
+  const updatedCustomer = await tx.customer.update({
+    where: { id: customer.id },
+    data: { balance: { increment: evaluation.balanceChange } },
+  });
+  return {
+    credit,
+    newBalance: updatedCustomer.balance,
+    balanceChange: evaluation.balanceChange,
+  };
 }
