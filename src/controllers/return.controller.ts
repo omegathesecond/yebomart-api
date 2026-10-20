@@ -1,11 +1,16 @@
+import { Prisma } from '@prisma/client';
+import { round2 } from '@utils/tax';
+import {
+  lockSale,
+  loadEntitlement,
+  refundCents,
+  ReturnEligibilityError,
+} from '@services/return-entitlement';
 import { Response } from 'express';
 import Joi from 'joi';
-import { Prisma } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
-
-class ReturnProductError extends Error {}
 
 // Shared by creation and completion; validate even lines that do not move stock.
 async function validateReturnProducts(
@@ -15,7 +20,7 @@ async function validateReturnProducts(
 ) {
   for (const productId of new Set(lines.map((line) => line.productId))) {
     const product = await db.product.findFirst({ where: { id: productId, shopId } });
-    if (!product) throw new ReturnProductError(`Product ${productId} not found in this shop`);
+    if (!product) throw new ReturnEligibilityError(`Product ${productId} not found in this shop`);
   }
 }
 
@@ -24,23 +29,28 @@ export const createReturnSchema = Joi.object({
   customerId: Joi.string().optional(),
   reason: Joi.string().required().min(3).max(500),
   type: Joi.string().required().valid('REFUND', 'EXCHANGE', 'STORE_CREDIT'),
-  items: Joi.array().items(
-    Joi.object({
-      productId: Joi.string().required(),
-      productName: Joi.string().required(),
-      quantity: Joi.number().required().integer().min(1),
-      unitPrice: Joi.number().required().min(0),
-      restockable: Joi.boolean().optional().default(true),
-    })
-  ).required().min(1),
-  exchangeItems: Joi.array().items(
-    Joi.object({
-      productId: Joi.string().required(),
-      productName: Joi.string().required(),
-      quantity: Joi.number().required().integer().min(1),
-      unitPrice: Joi.number().required().min(0),
-    })
-  ).optional(),
+  items: Joi.array()
+    .items(
+      Joi.object({
+        productId: Joi.string().required(),
+        productName: Joi.string().required(),
+        quantity: Joi.number().required().integer().min(1),
+        unitPrice: Joi.number().required().min(0),
+        restockable: Joi.boolean().optional().default(true),
+      }),
+    )
+    .required()
+    .min(1),
+  exchangeItems: Joi.array()
+    .items(
+      Joi.object({
+        productId: Joi.string().required(),
+        productName: Joi.string().required(),
+        quantity: Joi.number().required().integer().min(1),
+        unitPrice: Joi.number().required().min(0),
+      }),
+    )
+    .optional(),
   // Accepted for backward compatibility but IGNORED — the server always derives
   // the refund from the (sale-validated) line items. See ReturnController.create.
   refundAmount: Joi.number().optional().min(0),
@@ -50,7 +60,9 @@ export const createReturnSchema = Joi.object({
 export const listReturnsSchema = Joi.object({
   page: Joi.number().optional().integer().min(1).default(1),
   limit: Joi.number().optional().integer().min(1).max(100).default(20),
-  status: Joi.string().optional().valid('PENDING', 'APPROVED', 'COMPLETED', 'REJECTED'),
+  status: Joi.string()
+    .optional()
+    .valid('PENDING', 'APPROVED', 'COMPLETED', 'REJECTED'),
   type: Joi.string().optional().valid('REFUND', 'EXCHANGE', 'STORE_CREDIT'),
   startDate: Joi.date().optional(),
   endDate: Joi.date().optional(),
@@ -75,8 +87,9 @@ export class ReturnController {
       // NOTE: refundAmount is deliberately NOT read from the body — it is always
       // derived server-side below. saleId/customerId from the body are treated as
       // untrusted references and validated against the caller's shop before use.
-      const { saleId, customerId, reason, type, items, exchangeItems, notes } = req.body;
-      const shopId = req.user.shopId;
+      const { saleId, customerId, reason, type, items, exchangeItems, notes } =
+        req.body;
+      const shopId = req.user!.shopId;
 
       // A customer reference must belong to the caller's shop — never trust a
       // customerId that points at another shop's customer.
@@ -103,130 +116,121 @@ export class ReturnController {
         restockable: boolean;
       }>;
 
-      if (saleId) {
-        const sale = await prisma.sale.findFirst({
-          where: { id: saleId, shopId },
-          include: { items: true },
-        });
-        if (!sale) {
-          ApiResponse.badRequest(res, 'Sale not found in this shop');
-          return;
-        }
-
-        // Aggregate what was sold, per product (a product may span multiple lines).
-        const soldByProduct = new Map<
-          string,
-          { quantity: number; unitPrice: number; productName: string }
-        >();
-        for (const line of sale.items) {
-          const existing = soldByProduct.get(line.productId);
-          if (existing) {
-            existing.quantity += line.quantity;
-          } else {
-            soldByProduct.set(line.productId, {
-              quantity: line.quantity,
-              unitPrice: line.unitPrice,
-              productName: line.productName,
+      const returnRecord = await prisma.$transaction(async (tx) => {
+        await validateReturnProducts(tx, shopId, [...items, ...(exchangeItems ?? [])]);
+        if (saleId) {
+          await lockSale(tx, saleId);
+          const remaining = await loadEntitlement(tx, saleId, shopId);
+          const requested = new Map<string, any>();
+          for (const item of items) {
+            const existing = requested.get(item.productId);
+            if (existing && existing.restockable !== (item.restockable ?? true))
+              throw new ReturnEligibilityError(
+                'Duplicate lines must agree on restocking',
+              );
+            requested.set(item.productId, {
+              ...item,
+              restockable: item.restockable ?? true,
+              quantity: (existing?.quantity || 0) + item.quantity,
             });
           }
-        }
-
-        // Tally the requested return quantities per product so that duplicate
-        // lines for the same product can't collectively exceed what was sold.
-        const requestedByProduct = new Map<string, number>();
-        for (const item of items) {
-          requestedByProduct.set(
-            item.productId,
-            (requestedByProduct.get(item.productId) ?? 0) + item.quantity
-          );
-        }
-
-        for (const [productId, requestedQty] of requestedByProduct) {
-          const sold = soldByProduct.get(productId);
-          if (!sold) {
-            ApiResponse.badRequest(res, `Item ${productId} was not part of sale ${saleId}`);
-            return;
-          }
-          if (requestedQty > sold.quantity) {
-            ApiResponse.badRequest(
-              res,
-              `Cannot return ${requestedQty} of "${sold.productName}"; only ${sold.quantity} were sold`
-            );
-            return;
-          }
-        }
-
-        returnLines = items.map((item: any) => {
-          const sold = soldByProduct.get(item.productId)!;
-          return {
-            productId: item.productId,
-            productName: sold.productName, // snapshot from the sale, not the request
-            quantity: item.quantity,
-            unitPrice: sold.unitPrice, // server-side price, not the request
-            restockable: item.restockable ?? true,
-          };
-        });
-      } else {
-        // Receiptless return (no sale reference): there is no server-side price
-        // to validate against, so keep the supplied lines as-is. The refund is
-        // still derived from these lines below (never an arbitrary body value).
-        returnLines = items.map((item: any) => ({
-          productId: item.productId,
-          productName: item.productName,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          restockable: item.restockable ?? true,
-        }));
-      }
-
-      await validateReturnProducts(prisma, shopId, [...returnLines, ...(exchangeItems ?? [])]);
-
-      // Refund is ALWAYS computed from the validated lines — never trusted from
-      // the request body.
-      const calculatedRefund = returnLines.reduce(
-        (sum, item) => sum + item.quantity * item.unitPrice,
-        0
-      );
-
-      // Create the return
-      const returnRecord = await prisma.return.create({
-        data: {
-          shopId,
-          saleId: saleId ?? undefined,
-          customerId: customerId ?? undefined,
-          userId: req.user.type === 'user' ? req.user.id : undefined,
-          reason,
-          type,
-          refundAmount: type === 'REFUND' ? calculatedRefund : 0,
-          status: 'PENDING',
-          notes,
-          items: {
-            create: returnLines.map((item) => ({
-              productId: item.productId,
-              productName: item.productName,
+          returnLines = [...requested.values()].map((item) => {
+            const p = remaining.find((p) => p.productId === item.productId);
+            if (!p)
+              throw new ReturnEligibilityError('Item was not part of the sale');
+            const cents = refundCents(p, item.quantity);
+            return {
+              productId: p.productId,
+              productName: p.productName,
               quantity: item.quantity,
-              unitPrice: item.unitPrice,
+              unitPrice: cents / 100 / item.quantity,
               restockable: item.restockable,
-            })),
+            };
+          });
+        } else {
+          // Receiptless return (no sale reference): there is no server-side price
+          // to validate against, so keep the supplied lines as-is. The refund is
+          // still derived from these lines below (never an arbitrary body value).
+          returnLines = items.map((item: any) => ({
+            productId: item.productId,
+            productName: item.productName,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+            restockable: item.restockable ?? true,
+          }));
+        }
+
+        // Refund is ALWAYS computed from the validated lines — never trusted from
+        // the request body.
+        const calculatedRefund = round2(
+          returnLines.reduce(
+            (sum, item) => sum + item.quantity * item.unitPrice,
+            0,
+          ),
+        );
+
+        // Create the return
+        return tx.return.create({
+          data: {
+            shopId,
+            saleId: saleId ?? undefined,
+            customerId: customerId ?? undefined,
+            userId: req.user!.type === 'user' ? req.user!.id : undefined,
+            reason,
+            type,
+            refundAmount: type === 'REFUND' ? calculatedRefund : 0,
+            status: 'PENDING',
+            notes,
+            items: {
+              create: returnLines.map((item) => ({
+                productId: item.productId,
+                productName: item.productName,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                restockable: item.restockable,
+              })),
+            },
+            exchangeItems: exchangeItems
+              ? {
+                  create: exchangeItems.map((item: any) => ({
+                    productId: item.productId,
+                    productName: item.productName,
+                    quantity: item.quantity,
+                    unitPrice: item.unitPrice,
+                  })),
+                }
+              : undefined,
           },
-          exchangeItems: exchangeItems ? {
-            create: exchangeItems.map((item: any) => ({
-              productId: item.productId,
-              productName: item.productName,
-              quantity: item.quantity,
-              unitPrice: item.unitPrice,
-            })),
-          } : undefined,
-        },
-        include: {
-          items: true,
-          exchangeItems: true,
-        },
+          include: {
+            items: true,
+            exchangeItems: true,
+          },
+        });
       });
 
       ApiResponse.created(res, returnRecord, 'Return created successfully');
     } catch (error: any) {
-      if (error instanceof ReturnProductError) {
+      if (error instanceof ReturnEligibilityError) {
+        ApiResponse.badRequest(res, error.message);
+        return;
+      }
+      ApiResponse.serverError(res, error.message, error);
+    }
+  }
+
+  static async remaining(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      if (!req.user) {
+        ApiResponse.unauthorized(res, 'Unauthorized');
+        return;
+      }
+      const data = await prisma.$transaction(async (tx) => {
+        await lockSale(tx, req.params.saleId);
+        return loadEntitlement(tx, req.params.saleId, req.user!.shopId);
+      });
+      ApiResponse.success(res, data);
+    } catch (error: any) {
+      if (error instanceof ReturnEligibilityError) {
         ApiResponse.badRequest(res, error.message);
         return;
       }
@@ -244,10 +248,17 @@ export class ReturnController {
         return;
       }
 
-      const { page = 1, limit = 20, status, type, startDate, endDate } = req.query as any;
+      const {
+        page = 1,
+        limit = 20,
+        status,
+        type,
+        startDate,
+        endDate,
+      } = req.query as any;
       const skip = (page - 1) * limit;
 
-      const where: any = { shopId: req.user.shopId };
+      const where: any = { shopId: req.user!.shopId };
       if (status) where.status = status;
       if (type) where.type = type;
       if (startDate || endDate) {
@@ -278,6 +289,10 @@ export class ReturnController {
         hasPrev: page > 1,
       });
     } catch (error: any) {
+      if (error instanceof ReturnEligibilityError) {
+        ApiResponse.badRequest(res, error.message);
+        return;
+      }
       ApiResponse.serverError(res, error.message, error);
     }
   }
@@ -295,7 +310,7 @@ export class ReturnController {
       const returnRecord = await prisma.return.findFirst({
         where: {
           id: req.params.id,
-          shopId: req.user.shopId,
+          shopId: req.user!.shopId,
         },
         include: {
           items: true,
@@ -310,6 +325,10 @@ export class ReturnController {
 
       ApiResponse.success(res, returnRecord);
     } catch (error: any) {
+      if (error instanceof ReturnEligibilityError) {
+        ApiResponse.badRequest(res, error.message);
+        return;
+      }
       ApiResponse.serverError(res, error.message, error);
     }
   }
@@ -327,139 +346,186 @@ export class ReturnController {
       const { action, notes } = req.body;
       const returnId = req.params.id;
 
-      const returnRecord = await prisma.return.findFirst({
-        where: {
-          id: returnId,
-          shopId: req.user.shopId,
-        },
-        include: { items: true, exchangeItems: true },
-      });
+      const updated = await prisma.$transaction(async (tx) => {
+        const reference = await tx.return.findFirst({
+          where: { id: returnId, shopId: req.user!.shopId },
+        });
+        if (!reference) throw new ReturnEligibilityError('Return not found');
+        if (reference.saleId) await lockSale(tx, reference.saleId);
+        await tx.$queryRaw`SELECT id FROM "Return" WHERE id = ${returnId} FOR UPDATE`;
+        const returnRecord = await tx.return.findFirst({
+          where: {
+            id: returnId,
+            shopId: req.user!.shopId,
+          },
+          include: { items: true, exchangeItems: true },
+        });
 
-      if (!returnRecord) {
-        ApiResponse.notFound(res, 'Return not found');
-        return;
-      }
-
-      let newStatus: string;
-      let updateData: any = { notes: notes || returnRecord.notes };
-
-      switch (action) {
-        case 'approve':
-          newStatus = 'APPROVED';
-          break;
-        case 'reject':
-          newStatus = 'REJECTED';
-          break;
-        case 'complete': {
-          newStatus = 'COMPLETED';
-          updateData.processedAt = new Date();
-
-          const userId = req.user.type === 'user' ? req.user.id : undefined;
-          const shopId = req.user.shopId;
-
-          // Restock returned items and deduct exchanged-out items atomically so
-          // the product quantity and the StockLog audit trail stay consistent.
-          const updated = await prisma.$transaction(async (tx) => {
-            await validateReturnProducts(tx, shopId, [
-              ...returnRecord.items,
-              ...returnRecord.exchangeItems,
-            ]);
-
-            // Restock items if restockable
-            for (const item of returnRecord.items) {
-              if (item.restockable && !item.restocked) {
-                const product = await tx.product.findFirst({
-                  where: { id: item.productId, shopId },
-                });
-                if (!product) throw new ReturnProductError(`Product ${item.productId} not found in this shop`);
-                if (!product.trackStock) continue;
-
-                const previousQty = product.quantity;
-                const newQty = previousQty + item.quantity;
-
-                await tx.product.update({
-                  where: { id: item.productId, shopId },
-                  data: { quantity: newQty },
-                });
-                await tx.returnItem.update({
-                  where: { id: item.id },
-                  data: { restocked: true },
-                });
-                // Log stock movement (positive quantity = stock added back)
-                await tx.stockLog.create({
-                  data: {
-                    shopId,
-                    productId: item.productId,
-                    userId,
-                    type: 'RETURN',
-                    quantity: item.quantity,
-                    previousQty,
-                    newQty,
-                    note: `Return #${returnRecord.id}`,
-                    reference: returnRecord.id,
-                  },
-                });
-              }
-            }
-
-            // Deduct exchange items from stock (these leave the shop again)
-            if (returnRecord.exchangeItems) {
-              for (const item of returnRecord.exchangeItems) {
-                const product = await tx.product.findFirst({
-                  where: { id: item.productId, shopId },
-                });
-                if (!product) throw new ReturnProductError(`Product ${item.productId} not found in this shop`);
-                if (!product.trackStock) continue;
-
-                const previousQty = product.quantity;
-                const newQty = previousQty - item.quantity;
-
-                await tx.product.update({
-                  where: { id: item.productId, shopId },
-                  data: { quantity: newQty },
-                });
-                // Log stock movement (negative quantity = stock removed)
-                await tx.stockLog.create({
-                  data: {
-                    shopId,
-                    productId: item.productId,
-                    userId,
-                    type: 'SALE',
-                    quantity: -item.quantity,
-                    previousQty,
-                    newQty,
-                    note: `Exchange on return #${returnRecord.id}`,
-                    reference: returnRecord.id,
-                  },
-                });
-              }
-            }
-            const updated = await tx.return.update({
-              where: { id: returnId, shopId },
-              data: { ...updateData, status: newStatus },
-              include: { items: true, exchangeItems: true },
-            });
-            return updated;
-          });
-          ApiResponse.success(res, updated, `Return ${action}d successfully`);
-          return;
+        if (!returnRecord) {
+          throw new ReturnEligibilityError('Return not found');
         }
-        default:
-          ApiResponse.badRequest(res, 'Invalid action');
-          return;
-      }
+        if (!['PENDING', 'APPROVED'].includes(returnRecord.status))
+          throw new ReturnEligibilityError('Return is already final');
+        if (action !== 'reject' && returnRecord.saleId) {
+          const remaining = await loadEntitlement(
+            tx,
+            returnRecord.saleId,
+            req.user!.shopId,
+            returnId,
+          );
+          const grouped = new Map<
+            string,
+            { quantity: number; cents: number }
+          >();
+          for (const item of returnRecord.items) {
+            const prior = grouped.get(item.productId) || {
+              quantity: 0,
+              cents: 0,
+            };
+            prior.quantity += item.quantity;
+            prior.cents += item.quantity * item.unitPrice * 100;
+            grouped.set(item.productId, prior);
+          }
+          for (const [productId, value] of grouped) {
+            const p = remaining.find((p) => p.productId === productId);
+            if (
+              !p ||
+              value.quantity > p.remainingQuantity ||
+              Math.round(value.cents) > p.remainingCents
+            )
+              throw new ReturnEligibilityError('Return is no longer eligible');
+          }
+          if (
+            returnRecord.type === 'REFUND' &&
+            Math.round(returnRecord.refundAmount * 100) !==
+              Math.round([...grouped.values()].reduce((n, v) => n + v.cents, 0))
+          )
+            throw new ReturnEligibilityError(
+              'Return refund does not match reserved value',
+            );
+        }
 
-      updateData.status = newStatus;
+        // Rejection only releases the reservation; missing or moved inventory
+        // must not prevent cancelling a pending return.
+        if (action !== 'reject') {
+          await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+        }
 
-      const updated = await prisma.return.update({
-        where: { id: returnId },
-        data: updateData,
-        include: { items: true, exchangeItems: true },
+        let newStatus: string;
+        let updateData: any = { notes: notes || returnRecord.notes };
+
+        switch (action) {
+          case 'approve':
+            newStatus = 'APPROVED';
+            break;
+          case 'reject':
+            newStatus = 'REJECTED';
+            break;
+          case 'complete': {
+            newStatus = 'COMPLETED';
+            updateData.processedAt = new Date();
+
+            const userId = req.user!.type === 'user' ? req.user!.id : undefined;
+            const shopId = req.user!.shopId;
+
+            // Restock returned items and deduct exchanged-out items atomically so
+            // the product quantity and the StockLog audit trail stay consistent.
+            {
+              // Restock items if restockable
+              for (const item of returnRecord.items) {
+                if (item.restockable && !item.restocked) {
+                  const product = await tx.product.findUnique({
+                    where: { id: item.productId },
+                  });
+                  if (!product || product.shopId !== shopId)
+                    throw new ReturnEligibilityError(
+                      'Return product not found in this shop',
+                    );
+
+                  if (!product.trackStock) continue;
+
+                  const previousQty = product.quantity;
+                  const newQty = previousQty + item.quantity;
+
+                  await tx.product.update({
+                    where: { id: item.productId },
+                    data: { quantity: newQty },
+                  });
+                  await tx.returnItem.update({
+                    where: { id: item.id },
+                    data: { restocked: true },
+                  });
+                  // Log stock movement (positive quantity = stock added back)
+                  await tx.stockLog.create({
+                    data: {
+                      shopId,
+                      productId: item.productId,
+                      userId,
+                      type: 'RETURN',
+                      quantity: item.quantity,
+                      previousQty,
+                      newQty,
+                      note: `Return #${returnRecord.id}`,
+                      reference: returnRecord.id,
+                    },
+                  });
+                }
+              }
+
+              // Deduct exchange items from stock (these leave the shop again)
+              if (returnRecord.exchangeItems) {
+                for (const item of returnRecord.exchangeItems) {
+                  const product = await tx.product.findUnique({
+                    where: { id: item.productId },
+                  });
+                  if (!product || product.shopId !== shopId)
+                    throw new ReturnEligibilityError(
+                      'Return product not found in this shop',
+                    );
+
+                  if (!product.trackStock) continue;
+
+                  const previousQty = product.quantity;
+                  const newQty = previousQty - item.quantity;
+
+                  await tx.product.update({
+                    where: { id: item.productId },
+                    data: { quantity: newQty },
+                  });
+                  // Log stock movement (negative quantity = stock removed)
+                  await tx.stockLog.create({
+                    data: {
+                      shopId,
+                      productId: item.productId,
+                      userId,
+                      type: 'SALE',
+                      quantity: -item.quantity,
+                      previousQty,
+                      newQty,
+                      note: `Exchange on return #${returnRecord.id}`,
+                      reference: returnRecord.id,
+                    },
+                  });
+                }
+              }
+            }
+            break;
+          }
+          default:
+            throw new ReturnEligibilityError('Invalid action');
+        }
+
+        updateData.status = newStatus;
+
+        return tx.return.update({
+          where: { id: returnId },
+          data: updateData,
+          include: { items: true, exchangeItems: true },
+        });
       });
-
       ApiResponse.success(res, updated, `Return ${action}d successfully`);
     } catch (error: any) {
-      if (error instanceof ReturnProductError) {
+      if (error instanceof ReturnEligibilityError) {
         ApiResponse.badRequest(res, error.message);
         return;
       }

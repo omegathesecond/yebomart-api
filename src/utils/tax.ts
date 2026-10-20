@@ -20,7 +20,7 @@ export interface TaxBreakdown {
   total: number;
 }
 
-const round2 = (n: number): number => Math.round(n * 100) / 100;
+export const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export function computeTax(subtotal: number, discount: number, cfg: TaxConfig): TaxBreakdown {
   const base = Math.max(0, subtotal - discount);

@@ -1,3 +1,4 @@
+import { lockSale } from './return-entitlement';
 import { prisma } from '@config/prisma';
 import { Prisma, PaymentMethod, SaleStatus } from '@prisma/client';
 import { paginate, paginationMeta } from '@utils/pagination';
@@ -509,6 +510,7 @@ export class SaleService {
    */
   static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
     const updatedSale = await prisma.$transaction(async (tx) => {
+      await lockSale(tx, saleId);
       // Compare-and-set takes the sale row lock before any financial/stock writes.
       // A concurrent void waits, then fails this predicate after the winner commits.
       const claimed = await tx.sale.updateMany({
