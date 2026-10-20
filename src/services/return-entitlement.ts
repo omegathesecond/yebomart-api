@@ -43,7 +43,10 @@ export function entitlement(sale: any, returns: any[]) {
       : 0;
     const cents = boundary - allocated;
     allocated = boundary;
-    const active = returns.filter((r) => r.status !== 'REJECTED');
+    const active = returns.filter((r) =>
+      r.status !== 'REJECTED' || r.processedAt != null ||
+      r.items.some((item: any) => item.restocked),
+    );
     const used = active
       .flatMap((r) => r.items)
       .filter((i) => i.productId === p.productId)
