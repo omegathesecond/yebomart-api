@@ -369,6 +369,37 @@ describe('cumulative sale entitlement', () => {
     expect((await create(sale.id, 5)).body.data.refundAmount).toBe(50);
     expect(table('stockLog')).toHaveLength(0);
   });
+  it.each(['PENDING', 'APPROVED'])('releases a %s reservation when its exchange product was deleted', async (status) => {
+    const sale = seedShopSale();
+    seedProduct({ id: 'replacement' });
+    const created = await create(sale.id, 5, {
+      type: 'EXCHANGE',
+      exchangeItems: [{ productId: 'replacement', productName: 'Replacement', quantity: 1, unitPrice: 50 }],
+    });
+    expect(created.statusCode).toBe(201);
+    if (status === 'APPROVED') {
+      expect((await process(created.body.data.id, 'approve')).statusCode).toBe(200);
+    }
+    const products = table('product');
+    products.splice(products.findIndex(p => p.id === 'replacement'), 1);
+    const before = structuredClone({
+      products, sales: table('sale'), payments: table('payment'),
+      customers: table('customer'), logs: table('stockLog'), items: table('returnItem'),
+      exchanges: table('returnExchangeItem'),
+    });
+    expect((await create(sale.id, 1)).statusCode).toBe(400);
+    expect((await process(created.body.data.id, 'reject')).statusCode).toBe(200);
+    expect(table('return')[0].status).toBe('REJECTED');
+    expect(table('return')[0].processedAt).toBeFalsy();
+    expect({
+      products: table('product'), sales: table('sale'), payments: table('payment'),
+      customers: table('customer'), logs: table('stockLog'), items: table('returnItem'),
+      exchanges: table('returnExchangeItem'),
+    }).toEqual(before);
+    const retry = await create(sale.id, 5);
+    expect(retry.statusCode).toBe(201);
+    expect(retry.body.data.refundAmount).toBe(50);
+  });
   it('does not release historical processed returns whose status was changed to rejected', async () => {
     const sale = seedShopSale();
     const created = await create(sale.id, 5);

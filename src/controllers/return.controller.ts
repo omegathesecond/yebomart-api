@@ -405,7 +405,11 @@ export class ReturnController {
             );
         }
 
-        await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+        // Rejection only releases the reservation; missing or moved inventory
+        // must not prevent cancelling a pending return.
+        if (action !== 'reject') {
+          await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+        }
 
         let newStatus: string;
         let updateData: any = { notes: notes || returnRecord.notes };
