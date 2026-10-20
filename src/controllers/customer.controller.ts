@@ -15,6 +15,13 @@ export const createCustomerSchema = Joi.object({
   creditLimit: Joi.number().optional().min(0).default(0),
 });
 
+// Reuse profile constraints, but never apply create defaults to a PATCH.
+export const updateCustomerSchema = createCustomerSchema
+  .fork(['name'], (field) => field.optional())
+  .keys({ isActive: Joi.boolean().optional() })
+  .unknown(false)
+  .prefs({ stripUnknown: false, noDefaults: true });
+
 export const addCreditSchema = Joi.object({
   type: Joi.string().required().valid('PURCHASE', 'PAYMENT', 'ADJUSTMENT', 'REFUND'),
   // ADJUSTMENT carries its own sign (a negative amount reduces the balance), so
@@ -328,7 +335,14 @@ export class CustomerController {
 
       const customer = await prisma.customer.updateMany({
         where: { id: req.params.id, shopId: req.user.shopId },
-        data: req.body,
+        data: {
+          ...(req.body.name !== undefined ? { name: req.body.name } : {}),
+          ...(req.body.phone !== undefined ? { phone: req.body.phone } : {}),
+          ...(req.body.email !== undefined ? { email: req.body.email } : {}),
+          ...(req.body.address !== undefined ? { address: req.body.address } : {}),
+          ...(req.body.creditLimit !== undefined ? { creditLimit: req.body.creditLimit } : {}),
+          ...(req.body.isActive !== undefined ? { isActive: req.body.isActive } : {}),
+        },
       });
 
       if (customer.count === 0) {
