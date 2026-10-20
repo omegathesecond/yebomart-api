@@ -482,3 +482,22 @@ describe('SaleController.create — customer ownership', () => {
     expect(snapshot()).toEqual(before);
   });
 });
+
+describe('SaleController.create — excessive discounts', () => {
+  it.each([[100, 0], [0, 100], [4, 7]])('returns a clear 400 for line=%s cart=%s', async (line, cart) => {
+    const product = seedProduct({ shopId: 'shop_1', sellPrice: 10, quantity: 10 });
+    const customer = seedCustomer({ shopId: 'shop_1', balance: 25 });
+    const before = structuredClone(['sale', 'saleItem', 'product', 'stockLog', 'customer', 'customerCredit'].map(n => table(n as any)));
+    const res = mockRes();
+    const { value, error } = createSaleSchema.validate({
+      items: [{ productId: product.id, quantity: 1, discount: line }],
+      discount: cart, paymentMethod: 'CREDIT', customerId: customer.id, amountPaid: 0,
+    });
+    expect(error).toBeUndefined();
+    await SaleController.create(reqFor(value), res);
+    expect(res.statusCode).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/discount.*cannot exceed/i);
+    expect(['sale', 'saleItem', 'product', 'stockLog', 'customer', 'customerCredit'].map(n => table(n as any))).toEqual(before);
+  });
+});
