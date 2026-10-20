@@ -214,6 +214,15 @@ export class SaleService {
 
           const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
 
+          // Validate customer ownership for every payment method before any write.
+          if (input.customerId != null) {
+            const customer = await tx.customer.findFirst({
+              where: { id: input.customerId, shopId: input.shopId },
+              select: { id: true },
+            });
+            if (!customer) throw new Error('Customer not found');
+          }
+
           // Decrement stock FIRST with an atomic, guarded write so an oversell
           // can never even create the sale. Doing this before tx.sale.create
           // means a stock shortfall throws before any Sale/SaleItem rows exist,

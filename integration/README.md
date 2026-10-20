@@ -19,3 +19,9 @@ This prevents the unrelated receipt unique constraint and retry loop from serial
 the test accidentally. Everything involved in the credit invariant uses real Postgres.
 The suite was also run against the pre-fix sale and controller implementations:
 all four limit-race tests failed; override and unlimited cases passed.
+
+Rework verification (2026-10-20): merged the shipped all-payment customer
+ownership checks and their controller regressions into the credit-locking branch.
+Ownership is checked inside the sale transaction before stock or sale writes for
+CASH, CARD, MOMO, EMALI, MIXED and CREDIT; credit evaluation still uses the shared
+locked ledger helper. The six PostgreSQL tests passed on a fresh local database.
