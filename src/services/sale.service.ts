@@ -24,6 +24,18 @@ function isUniqueViolationOn(err: unknown, field: string): boolean {
   return String(target ?? '').includes(field);
 }
 
+export class SaleDiscountError extends Error {}
+
+/** Validate against authoritative values without rounding away an excess. */
+function validateDiscount(discount: number, maximum: Prisma.Decimal, label: string): void {
+  if (!Number.isFinite(discount) || discount < 0) {
+    throw new SaleDiscountError(`${label} must be a finite, non-negative amount`);
+  }
+  if (maximum.lessThan(discount)) {
+    throw new SaleDiscountError(`${label} cannot exceed ${maximum.toString()}`);
+  }
+}
+
 interface SaleItemInput {
   productId: string;
   quantity: number;
@@ -89,7 +101,7 @@ export class SaleService {
     const productMap = new Map(products.map(p => [p.id, p]));
 
     // Calculate totals
-    let subtotal = 0;
+    let subtotalValue = new Prisma.Decimal(0);
     const saleItems: Prisma.SaleItemCreateWithoutSaleInput[] = [];
 
     for (const item of input.items) {
@@ -101,10 +113,12 @@ export class SaleService {
       // The authoritative, race-proof check is the atomic guarded decrement
       // inside the $transaction below.
 
-      const itemDiscount = item.discount || 0;
-      const itemTotal = (product.sellPrice * item.quantity) - itemDiscount;
+      const itemDiscount = item.discount ?? 0;
+      const extendedPrice = new Prisma.Decimal(product.sellPrice).times(item.quantity);
+      validateDiscount(itemDiscount, extendedPrice, `Line discount for ${product.name}`);
+      const itemTotal = extendedPrice.minus(itemDiscount);
 
-      subtotal += itemTotal;
+      subtotalValue = subtotalValue.plus(itemTotal);
 
       saleItems.push({
         product: { connect: { id: item.productId } },
@@ -113,11 +127,13 @@ export class SaleService {
         unitPrice: product.sellPrice,
         costPrice: product.costPrice,
         discount: itemDiscount,
-        totalPrice: itemTotal,
+        totalPrice: itemTotal.toNumber(),
       });
     }
 
-    const discount = input.discount || 0;
+    const discount = input.discount ?? 0;
+    validateDiscount(discount, subtotalValue, 'Cart discount');
+    const subtotal = subtotalValue.toNumber();
 
     // VAT. The shop's tax config is authoritative — the client computes the
     // same figure for display, but we recompute here so the persisted Sale.tax

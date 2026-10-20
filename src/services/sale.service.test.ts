@@ -525,3 +525,51 @@ describe('SaleService.voidSale — rejected return processing history', () => {
     expect(table('stockLog')).toHaveLength(1);
   });
 });
+
+describe('SaleService.create — authoritative discount bounds', () => {
+  const snapshot = () => structuredClone(Object.fromEntries(
+    ['sale', 'saleItem', 'product', 'stockLog', 'customer', 'customerCredit', 'shop'].map(name => [name, table(name as any)]),
+  ));
+
+  it.each(['CASH', 'CREDIT'])('rejects excess discounts before any writes (%s)', async paymentMethod => {
+    const product = seedProduct({ shopId, quantity: 20, sellPrice: 10 });
+    const other = seedProduct({ shopId, quantity: 20, sellPrice: 100 });
+    const customer = seedCustomer({ shopId, balance: 30 });
+    for (const [line, cart] of [[100, 0], [20.01, 0], [0, 120.01], [4, 116.01], [20, 100.01]]) {
+      const before = snapshot();
+      await expect(SaleService.create(saleInput({ paymentMethod, customerId: customer.id,
+        amountPaid: 0, discount: cart,
+        items: [{ productId: product.id, quantity: 2, discount: line }, { productId: other.id, quantity: 1 }],
+      }))).rejects.toThrow(/discount.*cannot exceed/i);
+      expect(snapshot()).toEqual(before);
+    }
+  });
+
+  it.each([false, true])('persists reconciled zero, full and boundary discounts; inclusive=%s', async taxInclusive => {
+    await prismaFake.shop.update({ where: { id: shopId }, data: { taxRate: 15, taxInclusive } });
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 100 });
+    for (const [line, cart, base] of [[0, 0, 20], [20, 0, 0], [0, 20, 0], [4, 16, 0], [4, 15.99, 0.01], [4, 6, 10]]) {
+      const sale = await SaleService.create(saleInput({ amountPaid: 100, discount: cart,
+        items: [{ productId: product.id, quantity: 2, discount: line }],
+      }));
+      const stored = table('sale').find(s => s.id === sale.id)!;
+      const items = table('saleItem').filter(i => i.saleId === sale.id);
+      expect(items[0]).toMatchObject({ unitPrice: 10, quantity: 2, discount: line, totalPrice: 20 - line });
+      expect(stored.subtotal).toBe(items.reduce((sum, item) => sum + item.totalPrice, 0));
+      expect(stored.discount).toBe(cart);
+      const expectedTax = Math.round(base * 15 / (taxInclusive ? 115 : 100) * 100) / 100;
+      expect(stored.tax).toBe(expectedTax);
+      expect(stored.totalAmount).toBe(Math.round((base + (taxInclusive ? 0 : expectedTax)) * 100) / 100);
+    }
+  });
+
+  it('accepts decimal full discounts without binary floating point underflow', async () => {
+    const product = seedProduct({ shopId, sellPrice: 0.3, quantity: 10 });
+    const sale = await SaleService.create(saleInput({
+      items: [{ productId: product.id, quantity: 3, discount: 0.9 }],
+    }));
+    expect(sale.items[0].totalPrice).toBe(0);
+    expect(sale.subtotal).toBe(0);
+    expect(sale.totalAmount).toBe(0);
+  });
+});

@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import Joi from 'joi';
-import { SaleService } from '@services/sale.service';
+import { SaleService, SaleDiscountError } from '@services/sale.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { settlePendingCharge } from '@middleware/billing.middleware';
@@ -162,6 +162,11 @@ export class SaleController {
 
       ApiResponse.created(res, sale, 'Sale completed successfully');
     } catch (error: any) {
+      if (error instanceof SaleDiscountError) {
+        ApiResponse.badRequest(res, error.message);
+        return;
+      }
+
       // Over the credit limit → same machine-readable contract POST
       // /customers/:id/credit returns, so the POS can branch on the code in
       // production instead of parsing the message. requiresOverride is false:
