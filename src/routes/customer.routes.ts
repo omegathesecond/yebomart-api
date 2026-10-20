@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   CustomerController,
   createCustomerSchema,
+  updateCustomerSchema,
   addCreditSchema,
   sendStatementSchema,
 } from '@controllers/customer.controller';
@@ -20,7 +21,7 @@ router.get('/:id', CustomerController.getById);
 
 // CRUD
 router.post('/', validateRequest(createCustomerSchema), CustomerController.create);
-router.patch('/:id', managerAuth, CustomerController.update);
+router.patch('/:id', managerAuth, validateRequest(updateCustomerSchema), CustomerController.update);
 
 // Credit management
 router.post('/:id/credit', validateRequest(addCreditSchema), CustomerController.addCredit);
