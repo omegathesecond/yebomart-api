@@ -207,8 +207,8 @@ export class SaleService {
 
           const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
 
-          // Credit check BEFORE any write. Read the customer inside the
-          // transaction so the balance we evaluate is the committed one (the
+          // Customer ownership check BEFORE any write, for every payment method.
+          // Read the customer inside the transaction so the balance we evaluate is the committed one (the
           // same reason the stock guard below lives in here), and so a rejection
           // rolls back cleanly having touched nothing. Reuses evaluateCredit —
           // the single source of truth for the PURCHASE sign and the
@@ -218,15 +218,17 @@ export class SaleService {
             null;
           let creditEvaluation: ReturnType<typeof evaluateCredit> | null = null;
 
-          if (isCredit) {
+          if (input.customerId != null) {
             creditCustomer = await tx.customer.findFirst({
-              where: { id: input.customerId!, shopId: input.shopId },
+              where: { id: input.customerId, shopId: input.shopId },
               select: { id: true, name: true, balance: true, creditLimit: true },
             });
             if (!creditCustomer) {
-              throw new Error('Customer not found for credit sale');
+              throw new Error('Customer not found');
             }
+          }
 
+          if (isCredit && creditCustomer) {
             creditEvaluation = evaluateCredit({
               type: 'PURCHASE',
               amount: totalAmount,

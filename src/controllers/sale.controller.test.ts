@@ -423,3 +423,62 @@ describe('SaleController.create — credit ("on the book") sales', () => {
     expect(table('sale')).toHaveLength(0);
   });
 });
+
+describe('SaleController.create — customer ownership', () => {
+  const paidMethods = ['CASH', 'CARD', 'MOMO', 'EMALI', 'MIXED'];
+  const methods = [...paidMethods, 'CREDIT'];
+  const snapshot = () => structuredClone({
+    sales: table('sale'), items: table('saleItem'), products: table('product'),
+    logs: table('stockLog'), customers: table('customer'), ledger: table('customerCredit'),
+    shops: table('shop'), sessions: table('cashSession'),
+  });
+
+  it.each(methods.flatMap(method => ['foreign', 'missing'].map(kind => [method, kind]))) (
+    'rejects %s with a %s customer without changing any sale state', async (paymentMethod, kind) => {
+      const product = seedProduct({ shopId: 'shop_1', quantity: 10, sellPrice: 20 });
+      seedCustomer({ shopId: 'shop_1', balance: 40 });
+      const foreignShop = seedShop({ id: 'foreign-shop' });
+      const foreign = seedCustomer({ shopId: foreignShop.id, name: 'Private customer', balance: 70 });
+      const before = snapshot();
+      const res = mockRes();
+      await SaleController.create(reqFor({
+        paymentMethod, customerId: kind === 'foreign' ? foreign.id : 'nonexistent',
+        items: [{ productId: product.id, quantity: 2 }], amountPaid: 40,
+      }), res);
+      expect(res.statusCode).toBe(404);
+      expect(res.body.message).toBe('Customer not found');
+      expect(JSON.stringify(res.body)).not.toContain(foreign.name);
+      expect(snapshot()).toEqual(before);
+    },
+  );
+
+  it.each(paidMethods.flatMap(method => [true, false].map(attached => [method, attached] as const)))(
+    'accepts %s with same-shop customer attached=%s', async (paymentMethod, attached) => {
+      const product = seedProduct({ shopId: 'shop_1', quantity: 10, sellPrice: 20 });
+      const customer = seedCustomer({ shopId: 'shop_1', balance: 40 });
+      const res = mockRes();
+      await SaleController.create(reqFor({
+        paymentMethod, ...(attached ? { customerId: customer.id } : {}),
+        items: [{ productId: product.id, quantity: 2 }], amountPaid: 40,
+      }), res);
+      expect(res.statusCode).toBe(201);
+      expect(table('sale')).toHaveLength(1);
+      expect(table('sale')[0].customerId ?? null).toBe(attached ? customer.id : null);
+      expect(table('product')[0].quantity).toBe(8);
+      expect(table('stockLog')).toHaveLength(1);
+      expect(table('customer')[0].balance).toBe(40);
+      expect(table('customerCredit')).toHaveLength(0);
+    },
+  );
+
+  it('requires a customer for CREDIT without writing anything', async () => {
+    const product = seedProduct({ shopId: 'shop_1', quantity: 10, sellPrice: 20 });
+    const before = snapshot();
+    const res = mockRes();
+    await SaleController.create(reqFor({
+      paymentMethod: 'CREDIT', items: [{ productId: product.id, quantity: 2 }], amountPaid: 0,
+    }), res);
+    expect(res.statusCode).toBe(400);
+    expect(snapshot()).toEqual(before);
+  });
+});
