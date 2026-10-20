@@ -369,6 +369,15 @@ describe('cumulative sale entitlement', () => {
     expect((await create(sale.id, 5)).body.data.refundAmount).toBe(50);
     expect(table('stockLog')).toHaveLength(0);
   });
+  it('does not release historical processed returns whose status was changed to rejected', async () => {
+    const sale = seedShopSale();
+    const created = await create(sale.id, 5);
+    expect((await process(created.body.data.id, 'complete')).statusCode).toBe(200);
+    table('return')[0].status = 'REJECTED';
+    expect((await create(sale.id, 1)).statusCode).toBe(400);
+    expect(table('return')).toHaveLength(1);
+    expect(table('stockLog')).toHaveLength(1);
+  });
   it('concurrent full-sale reservations cannot both succeed (serialized transaction fake)', async () => {
     const sale = seedShopSale();
     const results = await Promise.all([create(sale.id, 5), create(sale.id, 5)]);
