@@ -1,5 +1,6 @@
 import { prisma } from '@config/prisma';
 import { Prisma } from '@prisma/client';
+import { round2 } from '@utils/tax';
 
 interface OpenSessionInput {
   shopId: string;
@@ -182,22 +183,33 @@ export class CashSessionService {
     const windowEnd = session.closedAt ?? new Date();
     const createdAt: Prisma.DateTimeFilter = { gte: session.openedAt, lte: windowEnd };
 
-    const [byMethod, totals] = await Promise.all([
-      prisma.sale.groupBy({
-        by: ['paymentMethod'],
-        where: { shopId, status: 'COMPLETED', createdAt },
-        _sum: { totalAmount: true, discount: true },
-        _count: true,
-      }),
-      prisma.sale.aggregate({
-        where: { shopId, status: 'COMPLETED', createdAt },
-        _sum: { totalAmount: true, discount: true },
-        _count: true,
-      }),
-    ]);
-
-    const gross = totals._sum.totalAmount ?? 0;
-    const totalDiscount = totals._sum.discount ?? 0;
+    // One snapshot supplies both the summary and payment breakdown. Never
+    // recompute historical VAT using the shop's current tax configuration.
+    const sales = await prisma.sale.findMany({
+      where: { shopId, status: 'COMPLETED', createdAt },
+      include: { items: { select: { discount: true } } },
+    });
+    const sum = (values: number[]) => round2(values.reduce((a, b) => a + b, 0));
+    const discountOf = (sale: typeof sales[number]) =>
+      sale.discount + sale.items.reduce((total, item) => total + item.discount, 0);
+    const totalDiscount = sum(sales.map(discountOf));
+    // Subtotal already deducts line discounts. Restore those for gross at
+    // recorded prices (VAT-inclusive for inclusive sales, exclusive otherwise).
+    const gross = sum(sales.map(sale =>
+      sale.subtotal + sale.items.reduce((total, item) => total + item.discount, 0)));
+    const totalAmount = sum(sales.map(sale => sale.totalAmount));
+    const tax = sum(sales.map(sale => sale.tax));
+    const net = round2(totalAmount - tax);
+    const methods = [...new Set(sales.map(sale => sale.paymentMethod))];
+    const byPaymentMethod = methods.map(method => {
+      const matching = sales.filter(sale => sale.paymentMethod === method);
+      return {
+        method,
+        total: sum(matching.map(sale => sale.totalAmount)),
+        discount: sum(matching.map(discountOf)),
+        count: matching.length,
+      };
+    });
 
     return {
       session: {
@@ -213,18 +225,14 @@ export class CashSessionService {
         cashier: session.user,
       },
       shop: session.shop,
-      transactionCount: totals._count,
-      // Gross = sum of totalAmount (which already nets line discounts/sale
-      // discount). Net here = gross − sale-level discounts removed at header.
+      transactionCount: sales.length,
       gross,
       totalDiscount,
-      net: gross - totalDiscount,
-      byPaymentMethod: byMethod.map((m) => ({
-        method: m.paymentMethod,
-        total: m._sum.totalAmount ?? 0,
-        discount: m._sum.discount ?? 0,
-        count: m._count,
-      })),
+      // Net revenue excludes persisted VAT; charged total includes it.
+      net,
+      tax,
+      totalAmount,
+      byPaymentMethod,
     };
   }
 }
