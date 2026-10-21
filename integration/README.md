@@ -48,3 +48,14 @@ rollback after a real PostgreSQL trigger rejects the final PO update. Receipts
 and payments both lock the PO before reading it, then update the supplier. No
 migration is needed for this change. The competing-80-payments regression was
 also run against the original controller: both requests incorrectly returned 200.
+
+`stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
+restocks, sale versus restock, and batches supplied in opposite product orders.
+It checks the complete stock-log chain against final stock, concurrent cost-change
+notes, rejected over-removals, ownership, duplicate rejection, and rollback of a
+batch whose later item fails (including cost and log rollback).
+
+Supplier payment requeue verification (2026-10-21): preserved the existing
+implementation and regressions, merged current main, and resolved this document
+by retaining both supplier-payment and stock coverage. All 21 PostgreSQL tests
+passed together on a fresh local database, including forced payment rollback.
