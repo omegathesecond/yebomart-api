@@ -25,3 +25,18 @@ ownership checks and their controller regressions into the credit-locking branch
 Ownership is checked inside the sale transaction before stock or sale writes for
 CASH, CARD, MOMO, EMALI, MIXED and CREDIT; credit evaluation still uses the shared
 locked ledger helper. The six PostgreSQL tests passed on a fresh local database.
+
+Till transition regressions use the same disposable database and shared lock-race
+helper. After `prisma db push`, apply the partial index explicitly (Prisma 5 cannot
+represent partial indexes in its schema):
+
+```sh
+psql "$CREDIT_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/migrations/20261021000000_one_open_cash_session/migration.sql
+npm run test:postgres -- --no-cache
+```
+
+`cash-session.test.ts` verifies overlapping opens and closes, direct-write uniqueness,
+immutable winning cash-up fields, shop isolation, staff attribution and reopening.
+Apply the migration before deploying the API. If existing shops have multiple OPEN
+sessions, index creation intentionally fails; reconcile those drawers deliberately
+before retrying. The migration never invents counted cash or closes legacy sessions.
