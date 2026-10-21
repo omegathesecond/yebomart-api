@@ -81,7 +81,7 @@ let rcpSeq = 0;
 // Sale.receiptNumber is @@unique([shopId, receiptNumber]) and the fake enforces
 // it, so every seeded sale needs its own number.
 function sale(partial: Record<string, any>) {
-  return seedSale({ receiptNumber: `RCP-${++rcpSeq}`, ...partial });
+  return seedSale({ subtotal: (partial.totalAmount ?? 100) + (partial.discount ?? 0), receiptNumber: `RCP-${++rcpSeq}`, ...partial });
 }
 
 beforeEach(() => {
@@ -449,6 +449,37 @@ describe('CashSessionController.zReport', () => {
     });
   }
 
+  it.each([
+    // line discount, header discount, persisted tax, charged amount
+    [0, 0, 0, 100], [0, 10, 0, 90], [10, 0, 0, 90],
+    [10, 10, 0, 80], [0, 100, 0, 0], [40, 60, 0, 0],
+    // Inclusive 15% VAT: 80 charged contains 10.43 VAT.
+    [10, 10, 10.43, 80],
+    // Exclusive 15% VAT: 80 + 12 VAT charged.
+    [10, 10, 12, 92],
+    [0, 0, 13.04, 100], [0, 0, 15, 115],
+  ])('reports line %s / header %s / VAT %s / charged %s exactly once', async (line, header, tax, charged) => {
+    const session = seedClosedShift();
+    sale({
+      createdAt: MID_SHIFT, subtotal: 100 - line, discount: header,
+      tax, totalAmount: charged, amountPaid: charged + 10, change: 10,
+      items: [{ quantity: 1, unitPrice: 100, discount: line, totalPrice: 100 - line }],
+    });
+    sale({ createdAt: MID_SHIFT, paymentMethod: 'CARD', subtotal: 20, totalAmount: 20 });
+    sale({ createdAt: MID_SHIFT, paymentMethod: 'MOMO', subtotal: 30, totalAmount: 30 });
+    const res = mockRes();
+    await CashSessionController.zReport(staffReq({}, { id: session.id }), res);
+    expect(res.statusCode).toBe(200);
+    const r = res.body.data;
+    expect(r).toMatchObject({
+      gross: 150, totalDiscount: line + header, tax,
+      net: Math.round((charged + 50 - tax) * 100) / 100,
+      totalAmount: charged + 50, transactionCount: 3,
+    });
+    expect(r.byPaymentMethod.reduce((sum: number, m: any) => sum + m.total, 0)).toBe(r.totalAmount);
+    expect(r.byPaymentMethod.find((m: any) => m.method === 'CASH')).toMatchObject({ total: charged, discount: line + header });
+  });
+
   it('returns the aggregate totals for a closed session', async () => {
     const session = seedClosedShift();
     sale({ createdAt: MID_SHIFT, paymentMethod: 'CASH', totalAmount: 150, discount: 10, status: 'COMPLETED' });
@@ -462,9 +493,9 @@ describe('CashSessionController.zReport', () => {
     const r = res.body.data;
 
     expect(r.transactionCount).toBe(3);
-    expect(r.gross).toBe(500);
+    expect(r.gross).toBe(515);
     expect(r.totalDiscount).toBe(15);
-    expect(r.net).toBe(485);
+    expect(r.net).toBe(500);
 
     // Cash-up figures come straight off the session.
     expect(r.session).toMatchObject({
@@ -623,7 +654,7 @@ describe('open → sell → close → z-report, end to end', () => {
     const zRes = mockRes();
     await CashSessionController.zReport(staffReq({}, { id: sessionId }), zRes);
     expect(zRes.body.data.transactionCount).toBe(2);
-    expect(zRes.body.data.gross).toBe(400);
+    expect(zRes.body.data.gross).toBe(420);
     expect(zRes.body.data.session.variance).toBe(-20);
 
     const afterClose = mockRes();
