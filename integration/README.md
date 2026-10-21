@@ -40,3 +40,10 @@ immutable winning cash-up fields, shop isolation, staff attribution and reopenin
 Apply the migration before deploying the API. If existing shops have multiple OPEN
 sessions, index creation intentionally fails; reconcile those drawers deliberately
 before retrying. The migration never invents counted cash or closes legacy sessions.
+
+`purchase-order.test.ts` holds the PO row lock until both receipt requests are
+blocked in PostgreSQL, then checks full/partial entitlement, duplicates, shop
+scope, payable balances and BILL entries. Product-row races also exercise a real
+sale and bulk restock against a receipt, checking stock and log continuity. An
+invalid staff foreign key verifies that a stock-log failure rolls back quantity,
+cost and all receipt/payable writes. No schema migration is needed for this fix.

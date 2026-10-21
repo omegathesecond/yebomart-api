@@ -51,32 +51,33 @@ export class StockService {
       throw new Error('Product not found');
     }
 
-    const newQty = product.quantity + input.quantity;
-
-    if (newQty < 0) {
-      throw new Error(`Cannot reduce stock below 0. Current: ${product.quantity}`);
-    }
-
-    const [updatedProduct, stockLog] = await prisma.$transaction([
-      prisma.product.update({
-        where: { id: input.productId },
-        data: { quantity: newQty },
-      }),
-      prisma.stockLog.create({
+    const { updatedProduct, stockLog } = await prisma.$transaction(async (tx) => {
+      const changed = await tx.product.updateMany({
+        where: {
+          id: input.productId,
+          shopId: input.shopId,
+          ...(input.quantity < 0 ? { quantity: { gte: -input.quantity } } : {}),
+        },
+        data: { quantity: { increment: input.quantity } },
+      });
+      if (changed.count !== 1) throw new Error('Cannot reduce stock below 0');
+      const updatedProduct = (await tx.product.findUnique({ where: { id: input.productId } }))!;
+      const stockLog = await tx.stockLog.create({
         data: {
           shopId: input.shopId,
           productId: input.productId,
           userId: input.userId,
           type: input.type,
           quantity: input.quantity,
-          previousQty: product.quantity,
-          newQty,
+          previousQty: updatedProduct.quantity - input.quantity,
+          newQty: updatedProduct.quantity,
           note: input.note,
           reference: input.reference,
           syncedAt: new Date(),
         },
-      }),
-    ]);
+      });
+      return { updatedProduct, stockLog };
+    });
 
     // Increment usage
     await ShopService.incrementUsage(input.shopId, 'stockMove');
@@ -115,7 +116,6 @@ export class StockService {
         }
 
         const product = productMap.get(item.productId)!;
-        const newQty = product.quantity + item.quantity;
 
         // Persist a new supplier cost when supplied so COGS/profit stay accurate
         // after a price change. Without this, every margin figure computed from
@@ -123,33 +123,31 @@ export class StockService {
         const costChanged =
           item.costPrice !== undefined && item.costPrice !== product.costPrice;
 
-        const [updatedProduct, stockLog] = await Promise.all([
-          tx.product.update({
-            where: { id: item.productId },
-            data: {
-              quantity: newQty,
-              ...(item.costPrice !== undefined ? { costPrice: item.costPrice } : {}),
-            },
-          }),
-          tx.stockLog.create({
-            data: {
-              shopId: input.shopId,
-              productId: item.productId,
-              userId: input.userId,
-              type: 'RESTOCK',
-              quantity: item.quantity,
-              previousQty: product.quantity,
-              newQty,
-              note: costChanged
-                ? [item.note, `Cost: ${product.costPrice} → ${item.costPrice}`]
-                    .filter(Boolean)
-                    .join(' — ')
-                : item.note,
-              reference: input.reference,
-              syncedAt: new Date(),
-            },
-          }),
-        ]);
+        const updatedProduct = await tx.product.update({
+          where: { id: item.productId },
+          data: {
+            quantity: { increment: item.quantity },
+            ...(item.costPrice !== undefined ? { costPrice: item.costPrice } : {}),
+          },
+        });
+        const stockLog = await tx.stockLog.create({
+          data: {
+            shopId: input.shopId,
+            productId: item.productId,
+            userId: input.userId,
+            type: 'RESTOCK',
+            quantity: item.quantity,
+            previousQty: updatedProduct.quantity - item.quantity,
+            newQty: updatedProduct.quantity,
+            note: costChanged
+              ? [item.note, `Cost: ${product.costPrice} → ${item.costPrice}`]
+                  .filter(Boolean)
+                  .join(' — ')
+              : item.note,
+            reference: input.reference,
+            syncedAt: new Date(),
+          },
+        });
 
         updates.push({ product: updatedProduct, stockLog });
       }
