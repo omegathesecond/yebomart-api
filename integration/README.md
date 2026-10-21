@@ -56,6 +56,7 @@ and payments both lock the PO before reading it, then update the supplier. No
 migration is needed for this change. The competing-80-payments regression was
 also run against the original controller: both requests incorrectly returned 200.
 
+
 `stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
 restocks, sale versus restock, and batches supplied in opposite product orders.
 It checks the complete stock-log chain against final stock, concurrent cost-change
@@ -79,3 +80,8 @@ stable order before atomic increments. All 31 real PostgreSQL regressions pass,
 including opposite-order receipt/restock batches, cost-change notes, duplicate
 validation, receipt/payment overlap and forced rollback. Build and 463 unit tests
 pass (2 existing TODOs). No schema migration is required for the receipt fix.
+
+Receipt rework verification (2026-10-21): retained main's shipped stock service,
+locked receipt products in stable order, and added an opposite-order multi-product
+receipt/restock regression. Build, sequential receipt tests and all 26 disposable
+Postgres tests passed. The receipt fix requires no additional migration.
