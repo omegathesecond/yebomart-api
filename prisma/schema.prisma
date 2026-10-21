@@ -296,6 +296,8 @@ model SaleItem {
 // shift with a counted cash total. The cash-up reconciles the physical drawer
 // against expectedCash (openingFloat + cash sales rung up during the session),
 // recording any variance (shortage/overage) for loss prevention.
+// One OPEN row per shop is enforced by the partial unique index in
+// 20261021000000_one_open_cash_session (Prisma 5 cannot express its predicate).
 model CashSession {
   id     String  @id @default(cuid())
   shopId String

@@ -32,11 +32,16 @@ export class CashSessionService {
    * cashSessionId alone so that a sale rung up in the tiny window before its
    * cashSessionId was attached (or an offline sale synced late) still counts.
    */
-  private static async cashSalesTotal(shopId: string, openedAt: Date, closedAt?: Date | null) {
+  private static async cashSalesTotal(
+    shopId: string,
+    openedAt: Date,
+    closedAt?: Date | null,
+    db: Prisma.TransactionClient = prisma,
+  ) {
     const createdAt: Prisma.DateTimeFilter = { gte: openedAt };
     if (closedAt) createdAt.lte = closedAt;
 
-    const agg = await prisma.sale.aggregate({
+    const agg = await db.sale.aggregate({
       where: {
         shopId,
         status: 'COMPLETED',
@@ -67,16 +72,34 @@ export class CashSessionService {
       throw err;
     }
 
-    return prisma.cashSession.create({
-      data: {
-        shopId: input.shopId,
-        userId: input.userId ?? undefined,
-        openingFloat: input.openingFloat,
-      },
-      include: {
-        user: { select: { id: true, name: true } },
-      },
-    });
+    try {
+      return await prisma.cashSession.create({
+        data: {
+          shopId: input.shopId,
+          userId: input.userId ?? undefined,
+          openingFloat: input.openingFloat,
+        },
+        include: {
+          user: { select: { id: true, name: true } },
+        },
+      });
+    } catch (error) {
+      // The partial unique index is the authority when concurrent opens both
+      // pass the friendly pre-check above. Do not hide unrelated DB failures.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002' &&
+        Array.isArray(error.meta?.target) &&
+        error.meta.target.includes('shopId')
+      ) {
+        const conflict = new Error(
+          'A till session is already open for this shop',
+        );
+        (conflict as any).code = 'CONFLICT';
+        throw conflict;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -122,40 +145,47 @@ export class CashSessionService {
    * figures commit atomically.
    */
   static async close(input: CloseSessionInput) {
-    const session = await prisma.cashSession.findFirst({
-      where: { id: input.sessionId, shopId: input.shopId },
-    });
-
-    if (!session) {
-      const err = new Error('Cash session not found');
-      (err as any).code = 'NOT_FOUND';
-      throw err;
-    }
-    if (session.status === 'CLOSED') {
-      const err = new Error('Cash session is already closed');
-      (err as any).code = 'CONFLICT';
-      throw err;
-    }
-
-    const now = new Date();
-    const cashSales = await this.cashSalesTotal(input.shopId, session.openedAt, now);
-    const expectedCash = session.openingFloat + cashSales.total;
-    const variance = input.countedCash - expectedCash;
-
     return prisma.$transaction(async (tx) => {
+      const session = await tx.cashSession.findFirst({
+        where: { id: input.sessionId, shopId: input.shopId },
+      });
+      if (!session) {
+        const err = new Error('Cash session not found');
+        (err as any).code = 'NOT_FOUND';
+        throw err;
+      }
+
+      // PostgreSQL rechecks this predicate after waiting on a competing
+      // update. Only the winner may reconcile; rollback releases the claim
+      // if any subsequent query fails. No intermediate CLOSED row is visible.
+      const claimed = await tx.cashSession.updateMany({
+        where: { id: session.id, shopId: input.shopId, status: 'OPEN' },
+        data: { status: 'CLOSED' },
+      });
+      if (claimed.count !== 1) {
+        const err = new Error('Cash session is already closed');
+        (err as any).code = 'CONFLICT';
+        throw err;
+      }
+
+      const now = new Date();
+      const cashSales = await this.cashSalesTotal(
+        input.shopId,
+        session.openedAt,
+        now,
+        tx,
+      );
+      const expectedCash = session.openingFloat + cashSales.total;
       return tx.cashSession.update({
         where: { id: session.id },
         data: {
-          status: 'CLOSED',
           closedAt: now,
           countedCash: input.countedCash,
           expectedCash,
-          variance,
+          variance: input.countedCash - expectedCash,
           notes: input.notes ?? session.notes,
         },
-        include: {
-          user: { select: { id: true, name: true } },
-        },
+        include: { user: { select: { id: true, name: true } } },
       });
     });
   }
@@ -181,7 +211,10 @@ export class CashSessionService {
     }
 
     const windowEnd = session.closedAt ?? new Date();
-    const createdAt: Prisma.DateTimeFilter = { gte: session.openedAt, lte: windowEnd };
+    const createdAt: Prisma.DateTimeFilter = {
+      gte: session.openedAt,
+      lte: windowEnd,
+    };
 
     // One snapshot supplies both the summary and payment breakdown. Never
     // recompute historical VAT using the shop's current tax configuration.

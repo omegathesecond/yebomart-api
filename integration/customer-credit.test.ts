@@ -1,3 +1,5 @@
+import { Prisma } from "@prisma/client";
+import { race as lockedRace } from "./lockedRace";
 import { randomUUID } from "crypto";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/config/prisma";
@@ -110,44 +112,16 @@ async function manual(
   return res;
 }
 
-// Hold the actual customer row while both independent requests reach Postgres.
-// Waiting for two blocked backends proves overlap instead of relying on Promise.all timing.
+// Both requests must reach the locked customer row before either proceeds.
 async function race(operations: (() => Promise<any>)[]) {
-  let release!: () => void;
-  let locked!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    locked = resolve;
-  });
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const blocker = prisma.$transaction(
-    async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${customerId} FOR UPDATE`;
-      locked();
-      await gate;
-    },
-    { timeout: 12000 },
+  const results = await lockedRace(
+    Prisma.sql`SELECT id FROM "Customer" WHERE id = ${customerId} FOR UPDATE`,
+    operations,
   );
-  await ready;
-  const pending = operations.map((operation) => operation());
-  try {
-    const deadline = Date.now() + 8000;
-    let waiting = 0;
-    while (Date.now() < deadline) {
-      const rows = await prisma.$queryRaw<{ count: bigint }[]>`
-        SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
-        AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
-      waiting = Number(rows[0].count);
-      if (waiting >= 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(waiting).toBeGreaterThanOrEqual(2);
-  } finally {
-    release();
-  }
-  await blocker;
-  return Promise.all(pending);
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
 }
 async function consistent(expected: number) {
   const customer = await prisma.customer.findUniqueOrThrow({
