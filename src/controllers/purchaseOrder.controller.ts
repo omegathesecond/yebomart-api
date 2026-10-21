@@ -1,8 +1,16 @@
+import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 import Joi from 'joi';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+
+// Both payable writers acquire PO -> supplier locks, never supplier -> PO.
+async function lockPurchaseOrder(tx: Prisma.TransactionClient, poId: string, shopId: string) {
+  await tx.$queryRaw`
+    SELECT id FROM "PurchaseOrder"
+    WHERE id = ${poId} AND "shopId" = ${shopId} FOR UPDATE`;
+}
 
 // ==================== Validation schemas ====================
 
@@ -227,65 +235,66 @@ export class PurchaseOrderController {
       const poId = req.params.id;
       const { items: receiveItems, updateCost, notes } = req.body;
 
-      const po = await prisma.purchaseOrder.findFirst({
-        where: { id: poId, shopId },
-        include: { items: true },
-      });
-
-      if (!po) {
-        ApiResponse.notFound(res, 'Purchase order not found');
-        return;
-      }
-
-      if (po.status === 'RECEIVED') {
-        ApiResponse.badRequest(res, 'Purchase order is already fully received');
-        return;
-      }
-      if (po.status === 'CANCELLED') {
-        ApiResponse.badRequest(res, 'Cannot receive a cancelled purchase order');
-        return;
-      }
-
-      const itemById = new Map(po.items.map((i) => [i.id, i]));
-
-      // Build the list of (poItem, qtyToReceive) pairs. When no explicit items
-      // are supplied, receive the full outstanding quantity of every line.
-      const toReceive: Array<{ item: (typeof po.items)[number]; qty: number }> = [];
-
-      if (receiveItems && receiveItems.length > 0) {
-        for (const r of receiveItems as Array<{ poItemId: string; quantity: number }>) {
-          const item = itemById.get(r.poItemId);
-          if (!item) {
-            ApiResponse.badRequest(res, `Line item ${r.poItemId} does not belong to this purchase order`);
-            return;
-          }
-          const outstanding = item.quantity - item.receivedQty;
-          if (outstanding <= 0) {
-            ApiResponse.badRequest(res, `Line item ${r.poItemId} is already fully received`);
-            return;
-          }
-          if (r.quantity > outstanding) {
-            ApiResponse.badRequest(
-              res,
-              `Cannot receive ${r.quantity} of "${item.productName}" — only ${outstanding} outstanding`
-            );
-            return;
-          }
-          toReceive.push({ item, qty: r.quantity });
-        }
-      } else {
-        for (const item of po.items) {
-          const outstanding = item.quantity - item.receivedQty;
-          if (outstanding > 0) toReceive.push({ item, qty: outstanding });
-        }
-      }
-
-      if (toReceive.length === 0) {
-        ApiResponse.badRequest(res, 'Nothing to receive — all items already received');
-        return;
-      }
-
       const updatedPo = await prisma.$transaction(async (tx) => {
+        await lockPurchaseOrder(tx, poId, shopId);
+        const po = await tx.purchaseOrder.findFirst({
+          where: { id: poId, shopId },
+          include: { items: true },
+        });
+
+        if (!po) {
+          ApiResponse.notFound(res, 'Purchase order not found');
+          return;
+        }
+
+        if (po.status === 'RECEIVED') {
+          ApiResponse.badRequest(res, 'Purchase order is already fully received');
+          return;
+        }
+        if (po.status === 'CANCELLED') {
+          ApiResponse.badRequest(res, 'Cannot receive a cancelled purchase order');
+          return;
+        }
+
+        const itemById = new Map(po.items.map((i) => [i.id, i]));
+
+        // Build the list of (poItem, qtyToReceive) pairs. When no explicit items
+        // are supplied, receive the full outstanding quantity of every line.
+        const toReceive: Array<{ item: (typeof po.items)[number]; qty: number }> = [];
+
+        if (receiveItems && receiveItems.length > 0) {
+          for (const r of receiveItems as Array<{ poItemId: string; quantity: number }>) {
+            const item = itemById.get(r.poItemId);
+            if (!item) {
+              ApiResponse.badRequest(res, `Line item ${r.poItemId} does not belong to this purchase order`);
+              return;
+            }
+            const outstanding = item.quantity - item.receivedQty;
+            if (outstanding <= 0) {
+              ApiResponse.badRequest(res, `Line item ${r.poItemId} is already fully received`);
+              return;
+            }
+            if (r.quantity > outstanding) {
+              ApiResponse.badRequest(
+                res,
+                `Cannot receive ${r.quantity} of "${item.productName}" — only ${outstanding} outstanding`
+              );
+              return;
+            }
+            toReceive.push({ item, qty: r.quantity });
+          }
+        } else {
+          for (const item of po.items) {
+            const outstanding = item.quantity - item.receivedQty;
+            if (outstanding > 0) toReceive.push({ item, qty: outstanding });
+          }
+        }
+
+        if (toReceive.length === 0) {
+          ApiResponse.badRequest(res, 'Nothing to receive — all items already received');
+          return;
+        }
+
         // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
         // amount booked as a supplier payable so purchases are no longer
         // understated — independent of whether a product row still exists.
@@ -379,6 +388,8 @@ export class PurchaseOrderController {
         });
       });
 
+      if (!updatedPo) return;
+
       ApiResponse.success(
         res,
         { ...updatedPo, balanceDue: updatedPo.amountReceived - updatedPo.amountPaid },
@@ -412,30 +423,31 @@ export class PurchaseOrderController {
       const poId = req.params.id;
       const { amount, note } = req.body;
 
-      const po = await prisma.purchaseOrder.findFirst({
-        where: { id: poId, shopId },
-      });
-      if (!po) {
-        ApiResponse.notFound(res, 'Purchase order not found');
-        return;
-      }
-
-      // Can't pay more than is owed on the PO (amountReceived - amountPaid).
-      // Fail loudly rather than silently clamping — overpayment is a data error.
-      const balanceDue = po.amountReceived - po.amountPaid;
-      if (balanceDue <= 0) {
-        ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
-        return;
-      }
-      if (amount > balanceDue) {
-        ApiResponse.badRequest(
-          res,
-          `Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`
-        );
-        return;
-      }
-
       const updatedPo = await prisma.$transaction(async (tx) => {
+        await lockPurchaseOrder(tx, poId, shopId);
+        const po = await tx.purchaseOrder.findFirst({
+          where: { id: poId, shopId },
+        });
+        if (!po) {
+          ApiResponse.notFound(res, 'Purchase order not found');
+          return;
+        }
+
+        // Can't pay more than is owed on the PO (amountReceived - amountPaid).
+        // Fail loudly rather than silently clamping — overpayment is a data error.
+        const balanceDue = po.amountReceived - po.amountPaid;
+        if (balanceDue <= 0) {
+          ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
+          return;
+        }
+        if (amount > balanceDue) {
+          ApiResponse.badRequest(
+            res,
+            `Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`
+          );
+          return;
+        }
+
         await tx.supplierLedger.create({
           data: {
             shopId,
@@ -462,6 +474,8 @@ export class PurchaseOrderController {
           },
         });
       });
+
+      if (!updatedPo) return;
 
       ApiResponse.success(
         res,

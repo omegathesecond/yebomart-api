@@ -2,7 +2,15 @@ import { prisma } from '@config/prisma';
 import { Prisma } from '@prisma/client';
 import { paginate, paginationMeta } from '@utils/pagination';
 
-interface CreateProductInput {
+interface OptionalProductFields {
+  attributes?: Record<string, string | number> | null;
+  wholesalePrice?: number | null;
+  wholesaleMinQty?: number | null;
+  packPrice?: number | null;
+  packSize?: number | null;
+}
+
+interface CreateProductInput extends OptionalProductFields {
   shopId: string;
   barcode?: string;
   sku?: string;
@@ -18,7 +26,7 @@ interface CreateProductInput {
   localId?: string;
 }
 
-interface UpdateProductInput {
+interface UpdateProductInput extends OptionalProductFields {
   barcode?: string;
   sku?: string;
   name?: string;
@@ -83,6 +91,11 @@ export class ProductService {
           unit: input.unit || 'each',
           imageUrl: input.imageUrl,
           localId: input.localId,
+          attributes: input.attributes === null ? Prisma.DbNull : input.attributes,
+          wholesalePrice: input.wholesalePrice,
+          wholesaleMinQty: input.wholesaleMinQty,
+          packPrice: input.packPrice,
+          packSize: input.packSize,
           syncedAt: new Date(),
         },
       });
@@ -231,6 +244,7 @@ export class ProductService {
       where: { id: productId },
       data: {
         ...data,
+        attributes: data.attributes === null ? Prisma.DbNull : data.attributes,
         syncedAt: new Date(),
       },
     });

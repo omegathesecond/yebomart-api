@@ -41,6 +41,14 @@ Apply the migration before deploying the API. If existing shops have multiple OP
 sessions, index creation intentionally fails; reconcile those drawers deliberately
 before retrying. The migration never invents counted cash or closes legacy sessions.
 
+`supplier-payment.test.ts` uses the shared row-lock race coordinator on the
+purchase order. It verifies competing payments, valid partial settlement,
+payment/receipt overlap, foreign-shop rejection, history and balanceDue, and
+rollback after a real PostgreSQL trigger rejects the final PO update. Receipts
+and payments both lock the PO before reading it, then update the supplier. No
+migration is needed for this change. The competing-80-payments regression was
+also run against the original controller: both requests incorrectly returned 200.
+
 `stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
 restocks, sale versus restock, and batches supplied in opposite product orders.
 It checks the complete stock-log chain against final stock, concurrent cost-change
@@ -54,3 +62,19 @@ the existing delta-based Stock Adjustments flow; its sale race checks final stoc
 and the complete signed log chain. New imports share atomic product + INITIAL log
 creation with ordinary new products. Existing import rows containing quantity are
 reported as row errors; omit that column for metadata imports.
+
+Supplier payment requeue verification (2026-10-21): preserved the existing
+implementation and regressions, merged current main, and resolved this document
+by retaining both supplier-payment and stock coverage. All 21 PostgreSQL tests
+passed together on a fresh local database, including forced payment rollback.
+
+Final supplier-payment verification (2026-10-21): merged main through df68414
+without replacing the shipped stock implementation. Build passed; all 21 real
+PostgreSQL regressions and 463 unit tests passed (2 existing TODOs). The full
+unit suite requires permission to bind its local HTTP test servers.
+
+Product stock-edit requeue verification (2026-10-21): merged current main while
+retaining product attributes/bulk pricing, supplier payment locking and all shipped
+stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
+10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
+run used a fresh local database with the open-till partial index applied.
