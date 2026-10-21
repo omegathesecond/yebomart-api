@@ -40,3 +40,9 @@ immutable winning cash-up fields, shop isolation, staff attribution and reopenin
 Apply the migration before deploying the API. If existing shops have multiple OPEN
 sessions, index creation intentionally fails; reconcile those drawers deliberately
 before retrying. The migration never invents counted cash or closes legacy sessions.
+
+`stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
+restocks, sale versus restock, and batches supplied in opposite product orders.
+It checks the complete stock-log chain against final stock, concurrent cost-change
+notes, rejected over-removals, ownership, duplicate rejection, and rollback of a
+batch whose later item fails (including cost and log rollback).
