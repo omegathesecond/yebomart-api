@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import Joi from 'joi';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
@@ -287,6 +288,14 @@ export class PurchaseOrderController {
         if (toReceive.length === 0) {
           throw new ReceiptError('Nothing to receive — all items already received');
         }
+
+        // Match bulk restock's stable lock order so overlapping multi-product
+        // receipts/restocks cannot lock the same products in opposite orders.
+        const productIds = [...new Set(toReceive.map(({ item }) => item.productId))];
+        await tx.$queryRaw`
+          SELECT id FROM "Product"
+          WHERE id IN (${Prisma.join(productIds)}) AND "shopId" = ${shopId}
+          ORDER BY id FOR UPDATE`;
 
         // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
         // amount booked as a supplier payable so purchases are no longer

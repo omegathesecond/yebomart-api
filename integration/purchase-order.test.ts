@@ -251,6 +251,43 @@ describe('Postgres purchase order receipt entitlement', () => {
         .costPrice,
     ).toBe(5);
   });
+  it('serializes multi-product receipts and restocks supplied in opposite orders', async () => {
+    const other = await prisma.product.create({
+      data: { shopId, name: 'Other widget', quantity: 20, costPrice: 2, sellPrice: 10 },
+    });
+    const otherLine = await prisma.pOItem.create({
+      data: { poId, productId: other.id, productName: other.name,
+        quantity: 10, unitCost: 5, totalCost: 50 },
+    });
+    const lines = [{ poItemId: lineId, productId },
+      { poItemId: otherLine.id, productId: other.id }]
+      .sort((a, b) => a.productId.localeCompare(b.productId));
+    const results = await race<any>(
+      Prisma.sql`SELECT id FROM "Product" WHERE id = ${lines[0].productId} FOR UPDATE`,
+      [
+        () => receive({ items: [...lines].reverse().map(l => ({ poItemId: l.poItemId, quantity: 10 })) }),
+        () => StockService.receive({ shopId, items: lines.map(l => ({ productId: l.productId, quantity: 7 })) }),
+      ],
+    );
+    expect(results.every(r => r.status === 'fulfilled')).toBe(true);
+    expect((results[0] as PromiseFulfilledResult<any>).value.statusCode).toBe(200);
+    const po = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: poId }, include: { items: true } });
+    expect(po.status).toBe('RECEIVED');
+    expect(po.amountReceived).toBe(100);
+    expect(po.items.every(l => l.receivedQty === 10)).toBe(true);
+    expect((await prisma.supplier.findUniqueOrThrow({ where: { id: supplierId } })).balance).toBe(100);
+    const bills = await prisma.supplierLedger.findMany({ where: { poId } });
+    expect(bills).toHaveLength(1);
+    expect(bills[0].amount).toBe(100);
+    for (const [id, initial] of [[productId, 100], [other.id, 20]] as const) {
+      expect((await prisma.product.findUniqueOrThrow({ where: { id } })).quantity).toBe(initial + 17);
+      const logs = await prisma.stockLog.findMany({ where: { productId: id }, orderBy: { previousQty: 'asc' } });
+      expect(logs).toHaveLength(2);
+      expect(logs[0].previousQty).toBe(initial);
+      expect(logs[0].newQty).toBe(logs[1].previousQty);
+      expect(logs[1].newQty).toBe(initial + 17);
+    }
+  });
   it('preserves a simultaneous sale decrement and its audit trail', async () => {
     const results = await race<any>(
       Prisma.sql`SELECT id FROM "Product" WHERE id = ${productId} FOR UPDATE`,

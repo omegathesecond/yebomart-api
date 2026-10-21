@@ -47,3 +47,13 @@ scope, payable balances and BILL entries. Product-row races also exercise a real
 sale and bulk restock against a receipt, checking stock and log continuity. An
 invalid staff foreign key verifies that a stock-log failure rolls back quantity,
 cost and all receipt/payable writes. No schema migration is needed for this fix.
+`stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
+restocks, sale versus restock, and batches supplied in opposite product orders.
+It checks the complete stock-log chain against final stock, concurrent cost-change
+notes, rejected over-removals, ownership, duplicate rejection, and rollback of a
+batch whose later item fails (including cost and log rollback).
+
+Receipt rework verification (2026-10-21): retained main's shipped stock service,
+locked receipt products in stable order, and added an opposite-order multi-product
+receipt/restock regression. Build, sequential receipt tests and all 26 disposable
+Postgres tests passed. The receipt fix requires no additional migration.
