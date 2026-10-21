@@ -105,6 +105,7 @@ const PARENT_RELATIONS: Partial<Record<ModelName, Record<string, [ModelName, str
 // check and the cash-sales time window key off, so a fake that left them
 // undefined would make both code paths silently untestable.
 const MODEL_DEFAULTS: Partial<Record<ModelName, Record<string, () => any>>> = {
+  product: { isActive: () => true, trackStock: () => true },
   cashSession: {
     openedAt: () => new Date(),
     status: () => 'OPEN',
@@ -248,6 +249,11 @@ class FakeDb {
     const rec: Row = {};
     const children: Array<[string, Row | Row[]]> = [];
     for (const [k, v] of Object.entries(data)) {
+      if (v === undefined) continue; // Prisma omits undefined writes.
+      if (k === 'attributes') {
+        rec[k] = v === Prisma.DbNull ? null : v;
+        continue; // JSON keys are data, never Prisma write operators.
+      }
       if (v && typeof v === 'object' && !(v instanceof Date) && !Array.isArray(v)) {
         if ('connect' in v) {
           rec[`${k}Id`] = (v as any).connect.id;
@@ -347,6 +353,11 @@ class FakeDb {
   // the DB would rather than storing the operator object verbatim.
   private applyData(rec: Row, data: Row) {
     for (const [k, v] of Object.entries(data)) {
+      if (v === undefined) continue; // Prisma omits undefined writes.
+      if (k === 'attributes') {
+        rec[k] = v === Prisma.DbNull ? null : v;
+        continue; // JSON keys are data, never Prisma write operators.
+      }
       if (v !== null && typeof v === 'object' && !(v instanceof Date) && !Array.isArray(v)) {
         if ('decrement' in v) {
           rec[k] = (rec[k] ?? 0) - (v as any).decrement;
