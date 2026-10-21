@@ -40,3 +40,11 @@ immutable winning cash-up fields, shop isolation, staff attribution and reopenin
 Apply the migration before deploying the API. If existing shops have multiple OPEN
 sessions, index creation intentionally fails; reconcile those drawers deliberately
 before retrying. The migration never invents counted cash or closes legacy sessions.
+
+`supplier-payment.test.ts` uses the shared row-lock race coordinator on the
+purchase order. It verifies competing payments, valid partial settlement,
+payment/receipt overlap, foreign-shop rejection, history and balanceDue, and
+rollback after a real PostgreSQL trigger rejects the final PO update. Receipts
+and payments both lock the PO before reading it, then update the supplier. No
+migration is needed for this change. The competing-80-payments regression was
+also run against the original controller: both requests incorrectly returned 200.
