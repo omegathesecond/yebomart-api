@@ -26,7 +26,6 @@ interface UpdateProductInput {
   category?: string;
   costPrice?: number;
   sellPrice?: number;
-  quantity?: number;
   reorderAt?: number;
   unit?: string;
   imageUrl?: string;
@@ -44,6 +43,11 @@ interface ListProductsParams {
   isActive?: boolean;
 }
 
+const stockEditError = 'Use Stock Adjustments to change existing stock; product edits and imports cannot set quantity';
+function rejectStockEdit(data: object) {
+  if ('quantity' in data) throw new Error(stockEditError);
+}
+
 export class ProductService {
   /**
    * Create a new product
@@ -54,7 +58,7 @@ export class ProductService {
       const existing = await prisma.product.findFirst({
         where: {
           shopId: input.shopId,
-          barcode: input.barcode,
+          barcode: input.barcode || null,
         },
       });
 
@@ -63,41 +67,43 @@ export class ProductService {
       }
     }
 
-    const product = await prisma.product.create({
-      data: {
-        shopId: input.shopId,
-        barcode: input.barcode,
-        sku: input.sku,
-        name: input.name,
-        description: input.description,
-        category: input.category,
-        costPrice: input.costPrice,
-        sellPrice: input.sellPrice,
-        quantity: input.quantity || 0,
-        reorderAt: input.reorderAt || 10,
-        unit: input.unit || 'each',
-        imageUrl: input.imageUrl,
-        localId: input.localId,
-        syncedAt: new Date(),
-      },
-    });
-
-    // Create initial stock log if quantity > 0
-    if (input.quantity && input.quantity > 0) {
-      await prisma.stockLog.create({
+    return prisma.$transaction(async (tx) => {
+      const product = await tx.product.create({
         data: {
           shopId: input.shopId,
-          productId: product.id,
-          type: 'INITIAL',
-          quantity: input.quantity,
-          previousQty: 0,
-          newQty: input.quantity,
-          note: 'Initial stock',
+          barcode: input.barcode || null,
+          sku: input.sku,
+          name: input.name,
+          description: input.description,
+          category: input.category,
+          costPrice: input.costPrice,
+          sellPrice: input.sellPrice,
+          quantity: input.quantity || 0,
+          reorderAt: input.reorderAt || 10,
+          unit: input.unit || 'each',
+          imageUrl: input.imageUrl,
+          localId: input.localId,
+          syncedAt: new Date(),
         },
       });
-    }
 
-    return product;
+      // Create initial stock log if quantity > 0
+      if (input.quantity && input.quantity > 0) {
+        await tx.stockLog.create({
+          data: {
+            shopId: input.shopId,
+            productId: product.id,
+            type: 'INITIAL',
+            quantity: input.quantity,
+            previousQty: 0,
+            newQty: input.quantity,
+            note: 'Initial stock',
+          },
+        });
+      }
+
+      return product;
+    });
   }
 
   /**
@@ -196,6 +202,7 @@ export class ProductService {
    * Update product
    */
   static async update(productId: string, shopId: string, data: UpdateProductInput) {
+    rejectStockEdit(data);
     // Verify product belongs to shop
     const existing = await prisma.product.findFirst({
       where: { id: productId, shopId },
@@ -306,6 +313,7 @@ export class ProductService {
 
         if (existing) {
           if (updateExisting) {
+            rejectStockEdit(product);
             await prisma.product.update({
               where: { id: existing.id },
               data: {
@@ -313,7 +321,6 @@ export class ProductService {
                 category: product.category,
                 costPrice: product.costPrice,
                 sellPrice: product.sellPrice,
-                quantity: product.quantity ?? existing.quantity,
                 reorderAt: product.reorderAt ?? existing.reorderAt,
                 unit: product.unit ?? existing.unit,
                 syncedAt: new Date(),
@@ -324,20 +331,7 @@ export class ProductService {
             skipped++;
           }
         } else {
-          await prisma.product.create({
-            data: {
-              shopId,
-              barcode: product.barcode || null,
-              name: product.name,
-              category: product.category,
-              costPrice: product.costPrice,
-              sellPrice: product.sellPrice,
-              quantity: product.quantity || 0,
-              reorderAt: product.reorderAt || 10,
-              unit: product.unit || 'each',
-              syncedAt: new Date(),
-            },
-          });
+          await ProductService.create({ ...product, shopId });
           created++;
         }
       } catch (error: any) {
@@ -359,7 +353,6 @@ export class ProductService {
       barcode?: string;
       costPrice?: number;
       sellPrice?: number;
-      quantity?: number;
       isActive?: boolean;
     }>
   ) {
@@ -369,6 +362,7 @@ export class ProductService {
 
     for (const update of updates) {
       try {
+        rejectStockEdit(update);
         let product = null;
 
         if (update.id) {
@@ -390,10 +384,9 @@ export class ProductService {
           continue;
         }
 
-        const updateData: any = { syncedAt: new Date() };
+        const updateData: Prisma.ProductUpdateInput = { syncedAt: new Date() };
         if (update.costPrice !== undefined) updateData.costPrice = update.costPrice;
         if (update.sellPrice !== undefined) updateData.sellPrice = update.sellPrice;
-        if (update.quantity !== undefined) updateData.quantity = update.quantity;
         if (update.isActive !== undefined) updateData.isActive = update.isActive;
 
         await prisma.product.update({

@@ -46,3 +46,11 @@ restocks, sale versus restock, and batches supplied in opposite product orders.
 It checks the complete stock-log chain against final stock, concurrent cost-change
 notes, rejected over-removals, ownership, duplicate rejection, and rollback of a
 batch whose later item fails (including cost and log rollback).
+
+Product metadata regressions in `stock.test.ts` also verify edits after sales,
+imports with omitted quantity, bulk metadata writes racing sales, and explicit
+quantity rejection on all existing-product service paths. Stock corrections use
+the existing delta-based Stock Adjustments flow; its sale race checks final stock
+and the complete signed log chain. New imports share atomic product + INITIAL log
+creation with ordinary new products. Existing import rows containing quantity are
+reported as row errors; omit that column for metadata imports.
