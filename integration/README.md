@@ -59,3 +59,8 @@ Supplier payment requeue verification (2026-10-21): preserved the existing
 implementation and regressions, merged current main, and resolved this document
 by retaining both supplier-payment and stock coverage. All 21 PostgreSQL tests
 passed together on a fresh local database, including forced payment rollback.
+
+Final supplier-payment verification (2026-10-21): merged main through df68414
+without replacing the shipped stock implementation. Build passed; all 21 real
+PostgreSQL regressions and 463 unit tests passed (2 existing TODOs). The full
+unit suite requires permission to bind its local HTTP test servers.
