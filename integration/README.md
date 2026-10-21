@@ -47,3 +47,35 @@ scope, payable balances and BILL entries. Product-row races also exercise a real
 sale and bulk restock against a receipt, checking stock and log continuity. An
 invalid staff foreign key verifies that a stock-log failure rolls back quantity,
 cost and all receipt/payable writes. No schema migration is needed for this fix.
+
+`supplier-payment.test.ts` uses the shared row-lock race coordinator on the
+purchase order. It verifies competing payments, valid partial settlement,
+payment/receipt overlap, foreign-shop rejection, history and balanceDue, and
+rollback after a real PostgreSQL trigger rejects the final PO update. Receipts
+and payments both lock the PO before reading it, then update the supplier. No
+migration is needed for this change. The competing-80-payments regression was
+also run against the original controller: both requests incorrectly returned 200.
+
+`stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
+restocks, sale versus restock, and batches supplied in opposite product orders.
+It checks the complete stock-log chain against final stock, concurrent cost-change
+notes, rejected over-removals, ownership, duplicate rejection, and rollback of a
+batch whose later item fails (including cost and log rollback).
+
+Supplier payment requeue verification (2026-10-21): preserved the existing
+implementation and regressions, merged current main, and resolved this document
+by retaining both supplier-payment and stock coverage. All 21 PostgreSQL tests
+passed together on a fresh local database, including forced payment rollback.
+
+Final supplier-payment verification (2026-10-21): merged main through df68414
+without replacing the shipped stock implementation. Build passed; all 21 real
+PostgreSQL regressions and 463 unit tests passed (2 existing TODOs). The full
+unit suite requires permission to bind its local HTTP test servers.
+
+PO receipt rework verification (2026-10-21): merged main through e8a3c30,
+retained stock.service.ts and integration/stock.test.ts exactly from main, and
+reused the payable PO lock for receipt entitlement. Receipts lock products in
+stable order before atomic increments. All 31 real PostgreSQL regressions pass,
+including opposite-order receipt/restock batches, cost-change notes, duplicate
+validation, receipt/payment overlap and forced rollback. Build and 463 unit tests
+pass (2 existing TODOs). No schema migration is required for the receipt fix.

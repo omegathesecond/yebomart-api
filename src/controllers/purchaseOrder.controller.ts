@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 import Joi from 'joi';
 import { prisma } from '@config/prisma';
@@ -6,6 +7,13 @@ import { AuthRequest } from '@middleware/auth.middleware';
 
 class ReceiptError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
+}
+
+// Both payable writers acquire PO -> supplier locks, never supplier -> PO.
+async function lockPurchaseOrder(tx: Prisma.TransactionClient, poId: string, shopId: string) {
+  await tx.$queryRaw`
+    SELECT id FROM "PurchaseOrder"
+    WHERE id = ${poId} AND "shopId" = ${shopId} FOR UPDATE`;
 }
 
 // ==================== Validation schemas ====================
@@ -237,7 +245,7 @@ export class PurchaseOrderController {
       }
       const updatedPo = await prisma.$transaction(async (tx) => {
         // Serialize receipts before reading entitlement; a waiter sees the committed receipt.
-        await tx.$queryRaw`SELECT id FROM "PurchaseOrder" WHERE id = ${poId} AND "shopId" = ${shopId} FOR UPDATE`;
+        await lockPurchaseOrder(tx, poId, shopId);
         const po = await tx.purchaseOrder.findFirst({
           where: { id: poId, shopId },
           include: { items: true },
@@ -292,6 +300,14 @@ export class PurchaseOrderController {
         // amount booked as a supplier payable so purchases are no longer
         // understated — independent of whether a product row still exists.
         let receivedValue = 0;
+
+        // Match bulk restock's lock order before touching any product. Reads and
+        // stock logs then observe the committed quantity after competing writers.
+        const productIds = [...new Set(toReceive.map(({ item }) => item.productId))];
+        await tx.$queryRaw`
+          SELECT id FROM "Product"
+          WHERE id IN (${Prisma.join(productIds)}) AND "shopId" = ${shopId}
+          ORDER BY id FOR UPDATE`;
 
         for (const { item, qty } of toReceive) {
           receivedValue += qty * item.unitCost;
@@ -380,6 +396,8 @@ export class PurchaseOrderController {
         });
       });
 
+      if (!updatedPo) return;
+
       ApiResponse.success(
         res,
         { ...updatedPo, balanceDue: updatedPo.amountReceived - updatedPo.amountPaid },
@@ -418,30 +436,31 @@ export class PurchaseOrderController {
       const poId = req.params.id;
       const { amount, note } = req.body;
 
-      const po = await prisma.purchaseOrder.findFirst({
-        where: { id: poId, shopId },
-      });
-      if (!po) {
-        ApiResponse.notFound(res, 'Purchase order not found');
-        return;
-      }
-
-      // Can't pay more than is owed on the PO (amountReceived - amountPaid).
-      // Fail loudly rather than silently clamping — overpayment is a data error.
-      const balanceDue = po.amountReceived - po.amountPaid;
-      if (balanceDue <= 0) {
-        ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
-        return;
-      }
-      if (amount > balanceDue) {
-        ApiResponse.badRequest(
-          res,
-          `Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`
-        );
-        return;
-      }
-
       const updatedPo = await prisma.$transaction(async (tx) => {
+        await lockPurchaseOrder(tx, poId, shopId);
+        const po = await tx.purchaseOrder.findFirst({
+          where: { id: poId, shopId },
+        });
+        if (!po) {
+          ApiResponse.notFound(res, 'Purchase order not found');
+          return;
+        }
+
+        // Can't pay more than is owed on the PO (amountReceived - amountPaid).
+        // Fail loudly rather than silently clamping — overpayment is a data error.
+        const balanceDue = po.amountReceived - po.amountPaid;
+        if (balanceDue <= 0) {
+          ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
+          return;
+        }
+        if (amount > balanceDue) {
+          ApiResponse.badRequest(
+            res,
+            `Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`
+          );
+          return;
+        }
+
         await tx.supplierLedger.create({
           data: {
             shopId,
@@ -468,6 +487,8 @@ export class PurchaseOrderController {
           },
         });
       });
+
+      if (!updatedPo) return;
 
       ApiResponse.success(
         res,
