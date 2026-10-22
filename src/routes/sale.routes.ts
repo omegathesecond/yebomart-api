@@ -9,7 +9,7 @@ import {
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
 import { posLimiter } from '@middleware/rateLimit.middleware';
-import { trackUsage, requireCreditBalance } from '@middleware/billing.middleware';
+import { requireCreditBalance } from '@middleware/billing.middleware';
 import { CREDIT_COSTS } from '@config/creditPacks';
 
 const router = Router();
@@ -31,8 +31,8 @@ router.post(
 );
 router.get('/:id', SaleController.getById);
 
-// Create sale (with POS rate limiting and usage tracking)
-router.post('/', posLimiter, trackUsage('transaction'), validateRequest(createSaleSchema), SaleController.create);
+// Create sale (usage is committed atomically by SaleService)
+router.post('/', posLimiter, validateRequest(createSaleSchema), SaleController.create);
 
 // Void sale (managers only)
 router.post('/:id/void', managerAuth, validateRequest(voidSaleSchema), SaleController.voidSale);

@@ -19,12 +19,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // @@unique([shopId, localId]) with a real P2002 so the idempotency backstop
 // runs against the genuine error type.
 
-// incrementUsage is an out-of-band counter bump (its own prisma write) — not
-// part of the sale invariants under test, so stub it.
-vi.mock('./shop.service', () => ({
-  ShopService: { incrementUsage: vi.fn().mockResolvedValue(undefined) },
-}));
-
 import { SaleService } from './sale.service';
 import { CustomerController } from '../controllers/customer.controller';
 import {
@@ -571,5 +565,45 @@ describe('SaleService.create — authoritative discount bounds', () => {
     expect(sale.items[0].totalPrice).toBe(0);
     expect(sale.subtotal).toBe(0);
     expect(sale.totalAmount).toBe(0);
+  });
+});
+
+
+describe('SaleService.create — committed usage accounting', () => {
+  const usage = () => table('shop').find(shop => shop.id === shopId)!.monthlyTransactions ?? 0;
+  const input = () => {
+    const product = seedProduct({ shopId, quantity: 10, sellPrice: 10 });
+    return saleInput({ localId: 'usage-retry', items: [{ productId: product.id, quantity: 1 }], amountPaid: 10 });
+  };
+
+  it('counts a successful sale once and never counts sequential or concurrent localId replays', async () => {
+    const request = input();
+    const results = await Promise.all([SaleService.create(request), SaleService.create(request)]);
+    expect(results[0].id).toBe(results[1].id);
+    expect((await SaleService.create(request)).id).toBe(results[0].id);
+    expect(usage()).toBe(1);
+    expect(table('sale')).toHaveLength(1);
+    expect(table('product')[0].quantity).toBe(9);
+  });
+
+  it('does not count a rejected sale', async () => {
+    await expect(SaleService.create({ ...input(), amountPaid: 0 })).rejects.toThrow();
+    expect(usage()).toBe(0);
+    expect(table('sale')).toHaveLength(0);
+  });
+
+  it('rolls back sale, stock and logs when the counter write fails, then permits a safe retry', async () => {
+    const request = input();
+    vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('counter unavailable'));
+    await expect(SaleService.create(request)).rejects.toThrow('counter unavailable');
+    // A reported error must never leave a committed checkout behind.
+    expect(table('sale')).toHaveLength(0);
+    expect(table('saleItem')).toHaveLength(0);
+    expect(table('stockLog')).toHaveLength(0);
+    expect(table('product')[0].quantity).toBe(10);
+    expect(usage()).toBe(0);
+    await SaleService.create(request);
+    expect(table('sale')).toHaveLength(1);
+    expect(usage()).toBe(1);
   });
 });

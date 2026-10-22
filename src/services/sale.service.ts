@@ -344,6 +344,10 @@ export class SaleService {
             customerBalance = credit.newBalance;
           }
 
+          // Count only a new sale, in the same commit as stock and credit.
+          // Replays return before this point; any failure rolls everything back.
+          await ShopService.incrementUsage(input.shopId, 'transaction', tx);
+
           // customerBalance rides along on the sale so the POS receipt can print
           // the customer's new outstanding balance. undefined for non-credit.
           return { ...sale, customerBalance };
@@ -372,9 +376,6 @@ export class SaleService {
         throw err;
       }
     }
-
-    // Increment usage counter
-    await ShopService.incrementUsage(input.shopId, 'transaction');
 
     return sale;
   }

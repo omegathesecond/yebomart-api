@@ -341,16 +341,20 @@ export class ShopService {
   }
 
   /**
-   * Increment usage counters (for billing)
+   * Increment usage counters. Pass the sale transaction to commit accounting atomically.
    */
-  static async incrementUsage(shopId: string, type: 'transaction' | 'stockMove') {
+  static async incrementUsage(
+    shopId: string,
+    type: 'transaction' | 'stockMove',
+    client: Prisma.TransactionClient = prisma,
+  ) {
     if (type === 'transaction') {
-      await prisma.shop.update({
+      await client.shop.update({
         where: { id: shopId },
         data: { monthlyTransactions: { increment: 1 } },
       });
     } else {
-      await prisma.shop.update({
+      await client.shop.update({
         where: { id: shopId },
         data: { monthlyStockMoves: { increment: 1 } },
       });

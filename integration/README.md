@@ -64,3 +64,12 @@ Final supplier-payment verification (2026-10-21): merged main through df68414
 without replacing the shipped stock implementation. Build passed; all 21 real
 PostgreSQL regressions and 463 unit tests passed (2 existing TODOs). The full
 unit suite requires permission to bind its local HTTP test servers.
+
+`sale-usage.test.ts` verifies monthly transaction accounting with the real shared
+ShopService helper: one increment per committed sale, rejected sales uncounted,
+concurrent/repeated localId replay deduplication, and rollback of sale/items/stock
+logs/stock when an injected counter write fails. Retrying that failure commits
+exactly once. Usage now commits inside the sale transaction; the POST route no
+longer increments before validation. No schema migration is needed. Verification:
+24 PostgreSQL regressions passed; 466 unit tests passed (2 existing TODOs), plus
+the new HTTP validation/replay regression; API build passed.
