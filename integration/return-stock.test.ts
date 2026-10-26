@@ -39,7 +39,7 @@ async function makeReturn(quantity = 2, exchange: { productId: string; quantity:
     items: { create: { productId, productName: 'Stock', quantity: 10, unitPrice: 15, costPrice: 5, totalPrice: 150 } },
   } });
   return prisma.return.create({ data: {
-    shopId, saleId: sale.id, reason: 'Test', type: exchange.length ? 'EXCHANGE' : 'REFUND', refundAmount: quantity * 15,
+    shopId, saleId: sale.id, reason: 'Test', status: 'APPROVED', type: exchange.length ? 'EXCHANGE' : 'REFUND', refundAmount: quantity * 15,
     items: { create: { productId, productName: 'Stock', quantity, unitPrice: 15 } },
     exchangeItems: { create: exchange.map(item => ({ ...item, productName: 'Exchange', unitPrice: 15 })) },
   } });
@@ -47,8 +47,9 @@ async function makeReturn(quantity = 2, exchange: { productId: string; quantity:
 async function complete(id: string, activeShop = shopId) {
   const res: any = { statusCode: 200, status(code: number) { this.statusCode = code; return this; },
     json(body: any) { this.body = body; return this; } };
+  const record = await prisma.return.findUniqueOrThrow({ where: { id } });
   await ReturnController.process({ user: { id: userId, shopId: activeShop, type: 'user', role: 'OWNER' },
-    params: { id }, body: { action: 'complete' } } as any, res);
+    params: { id }, body: { action: 'complete', ...(record.type === 'REFUND' ? { settlement: { method: 'CARD', confirmed: true, reference: 'external-refund-success' } } : {}) } } as any, res);
   return res.statusCode as number;
 }
 const overlap = (operations: (() => Promise<unknown>)[]) =>
@@ -119,7 +120,7 @@ it('a database failure after inventory writes rolls back status, flags, stock an
     expect(await complete(record.id)).toBe(500);
     await consistent(10, 0);
     expect(await prisma.return.findUniqueOrThrow({ where: { id: record.id }, include: { items: true } }))
-      .toMatchObject({ status: 'PENDING', processedAt: null, items: [{ restocked: false }] });
+      .toMatchObject({ status: 'APPROVED', processedAt: null, items: [{ restocked: false }] });
   } finally {
     await prisma.$executeRawUnsafe(`DROP TRIGGER ${fn} ON "Return"`);
     await prisma.$executeRawUnsafe(`DROP FUNCTION ${fn}()`);

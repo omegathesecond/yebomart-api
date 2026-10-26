@@ -79,6 +79,30 @@ stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
 
+Refund settlement (2026-10-26): apply
+`20261026000000_record_refund_settlement` to dev and prod **before** deploying
+this API, then deploy the app. REFUND completion requires an APPROVED return and `settlement: { method, confirmed: true,
+reference? }`. CASH uses the shop's current OPEN till (including prior-day sales),
+locked against close. CARD/MOMO/EMALI record an externally completed payout with
+a required successful refund reference; this endpoint never calls or claims
+success from a provider. Only full settlement of the server-derived refund is
+supported. Store-credit and exchange returns cannot record a cash payout.
+CREDIT-sale money payouts are unsupported. Use STORE_CREDIT/account adjustment
+to reverse debt through the shared settleCreditReturn helper; approval alone
+never pays cash or changes debt.
+
+Existing completed returns retain null settlement fields. There is no inferred
+historical payout or recalculation of stored closed-session expected/variance.
+The Z report adds cash refunds as a separate drawer outflow and preserves gross,
+discounts, VAT, charged total and payment-method sales semantics.
+
+`refund-cash.test.ts` verifies 100+50-20=130, prior-day attribution, noncash and
+store-credit exclusion, pending/rejected/legacy exclusion, explicit confirmation,
+no-open/foreign till rejection, unpaid CREDIT refusal, concurrent retries and
+close/refund serialization, immutable closed figures, and full stock/payout
+rollback under a forced PostgreSQL completion failure. Run against the disposable
+local database after applying the migration's CHECK constraint as well as the
+open-till partial index.
 `return-stock.test.ts` coordinates return completion against sales, restocks and
 returns from different original sales using `lockedRace.ts`. Exchange deductions
 and reversed exchange product orders use the same product-lock barrier. Shared
@@ -109,9 +133,24 @@ Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
 payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
 payment/completion and competing completions, and a real trigger proves rollback.
 
+Refund requeue verification (2026-10-26): merged current main including
+validateCreditReturn/settleCreditReturn and all ten debt-settlement regressions.
+Credit tests now explicitly approve before completion; completed account adjustments
+reverse debt without cash outflows in either live cash-up or the Z report.
+Both builds, 465 API unit tests (2 TODOs), 125 app tests and all 46 real PostgreSQL
+regressions passed, including close/refund races and forced transaction rollback.
 Return inventory rework verification (2026-10-26): merged current main, retaining
 `settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
 sale entitlement lock. Customer settlement precedes product locks to match sale
 lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real PostgreSQL
 regressions passed on a fresh disposable local database. This includes all 17
 return-stock and return-credit tests run together, plus the full Postgres suite.
+
+Final refund requeue verification (2026-10-26): merged origin/main at 94fc13d,
+including ordered product locks and all current credit-debt helpers/regressions.
+Updated the newly merged return-stock fixtures to approve refunds and explicitly
+record successful external settlement; their inventory assertions remain intact.
+API and app builds passed; 465 API unit tests (2 TODOs), 125 app tests, and all
+53 real PostgreSQL regressions passed on a fresh local database with both the
+open-session index and refund settlement constraint applied. All ten credit-return
+regressions passed, including balance reversal, retries, contention and rollback.
