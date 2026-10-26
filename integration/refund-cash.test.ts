@@ -71,8 +71,16 @@ describe('recorded refund cash outflows', () => {
     for (const method of ['MOMO', 'EMALI'])
       expect((await process((await refund()).id, 'complete', { method, confirmed: true, reference: 'confirmed' })).statusCode).toBe(200);
     expect((await process((await refund({ type: 'STORE_CREDIT', refundAmount: 0 })).id)).statusCode).toBe(400); // Reject a money payout on store credit.
-    const credit = await refund({ type: 'STORE_CREDIT', refundAmount: 0 });
+    const customer = await prisma.customer.create({ data: { shopId, name: 'Credit recipient' } });
+    const sale = await prisma.sale.create({ data: {
+      shopId, subtotal: 20, totalAmount: 20, amountPaid: 20, paymentMethod: 'CARD',
+      items: { create: { productId, productName: 'Item', quantity: 1, unitPrice: 20, costPrice: 5, totalPrice: 20 } },
+    } });
+    const credit = await refund({ type: 'STORE_CREDIT', refundAmount: 20, customerId: customer.id, saleId: sale.id });
     expect((await process(credit.id, 'complete', null)).statusCode).toBe(200);
+    expect(await prisma.customerCredit.findUnique({ where: { returnId: credit.id } }))
+      .toMatchObject({ customerId: customer.id, type: 'REFUND', amount: 20 });
+    expect(await prisma.customer.findUnique({ where: { id: customer.id } })).toMatchObject({ balance: -20 });
     for (const status of ['PENDING', 'APPROVED', 'REJECTED', 'COMPLETED']) await refund({ status });
     expect(await tills.getCurrent(shopId)).toMatchObject({ cashRefundsTotal: 0, expectedCash: 100 });
   });

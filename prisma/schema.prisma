@@ -574,7 +574,7 @@ model Return {
 
   // Resolution
   type         ReturnType
-  refundAmount Float      @default(0) // For REFUND type
+  refundAmount Float      @default(0) // Authoritative REFUND / STORE_CREDIT entitlement
 
   settlementMethod PaymentMethod?
   settlementReference String?
@@ -592,6 +592,7 @@ model Return {
 
   // Relationships
   shop          Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  customer      Customer? @relation(fields: [customerId], references: [id])
   items         ReturnItem[]
   creditReversal CustomerCredit?
   exchangeItems ReturnExchangeItem[] // Items given in exchange
@@ -850,6 +851,7 @@ model Customer {
 
   // Relationships
   shop    Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  returns Return[]
   credits CustomerCredit[]
   sales   Sale[]           @relation("CustomerSales")
 

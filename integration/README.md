@@ -154,3 +154,26 @@ API and app builds passed; 465 API unit tests (2 TODOs), 125 app tests, and all
 53 real PostgreSQL regressions passed on a fresh local database with both the
 open-session index and refund settlement constraint applied. All ten credit-return
 regressions passed, including balance reversal, retries, contention and rollback.
+
+Store-credit returns (`store-credit-return.test.ts`): paid receipts require a
+shop-local recipient and a positive reserved entitlement from the shared VAT and
+discount allocation. Completion posts one REFUND through `applyCustomerCredit`
+in the stock/status transaction. Retries and competing completions cannot post
+twice; the shared unique `CustomerCredit.returnId` links the ledger to the return.
+CREDIT-sale returns retain `validateCreditReturn`/`settleCreditReturn` and post
+only their negative debt ADJUSTMENT, never a second REFUND or cash payout.
+
+Apply `20261026000000_return_account_credit` before deploying this API: it adds
+only the return/customer relation; the shipped reversal migration owns returnId.
+The migration does not credit historical returns. Details expose recipient,
+amount and ledger entry; customer statements include the return-reference note.
+Tests cover full/partial VAT/discount allocation, mixed cash-return reservations,
+missing/foreign/moved recipients, retries, competing completions, concurrent ledger
+writes, and injected ledger/final-status failures proving complete rollback.
+
+Requeue verification (2026-10-26): merged current main and preserved the shipped
+pay-later helpers, their ten PostgreSQL regressions and Returns.test.tsx. Both
+component builds, 465 API unit tests (2 TODOs), 7 return UI tests and all 63 real
+PostgreSQL regressions passed on a fresh local database with the open-till index
+and refund settlement check applied. Cash-up exclusion now uses a valid paid
+store-credit receipt and verifies the persisted ledger and negative balance.
