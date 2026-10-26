@@ -573,7 +573,7 @@ model Return {
 
   // Resolution
   type         ReturnType
-  refundAmount Float      @default(0) // For REFUND type
+  refundAmount Float      @default(0) // Authoritative REFUND / STORE_CREDIT entitlement
 
   // Status
   status ReturnStatus @default(PENDING)
@@ -585,6 +585,8 @@ model Return {
 
   // Relationships
   shop          Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  accountCredit CustomerCredit?
+  customer      Customer? @relation(fields: [customerId], references: [id])
   items         ReturnItem[]
   exchangeItems ReturnExchangeItem[] // Items given in exchange
 
@@ -841,6 +843,7 @@ model Customer {
 
   // Relationships
   shop    Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  returns Return[]
   credits CustomerCredit[]
   sales   Sale[]           @relation("CustomerSales")
 
@@ -858,6 +861,8 @@ model CustomerCredit {
 
   type   CreditType
   amount Float
+  returnId String? @unique
+  returnRecord Return? @relation(fields: [returnId], references: [id])
   saleId String? // If credit was from a sale
   note   String?
 

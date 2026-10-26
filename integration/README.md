@@ -78,3 +78,22 @@ retaining product attributes/bulk pricing, supplier payment locking and all ship
 stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
+
+`return-credit.test.ts` covers paid-sale store credit using the existing return
+entitlement allocation (including line/order discounts, VAT, product boundaries,
+partial/final returns and shared cash-refund reservations). It checks shop-scoped
+recipients, paid-receipt revalidation, rejection of receiptless/CREDIT/exchange
+combinations, retries, forced competing completions, concurrent customer ledger
+writes and rollback after injected ledger and final-status failures.
+
+Apply `20261026000000_return_account_credit` before deploying this API. It adds
+an optional unique `CustomerCredit.returnId` foreign key and the return's customer
+relation. Existing returns are not credited or revalued by the migration; an old
+zero-value STORE_CREDIT reservation fails validation instead of silently posting
+an invented amount. CREDIT-sale debt settlement remains a separate operation.
+
+Store-credit verification (2026-10-26): API and app builds passed; 465 API unit
+tests passed (2 existing TODOs), and all 38 PostgreSQL tests passed, including
+10 store-credit regressions. Applied the new SQL migration to a second disposable
+database built from the original main schema; Prisma migrate diff reported no
+difference against the updated schema.

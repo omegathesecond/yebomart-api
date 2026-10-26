@@ -1,34 +1,88 @@
-import { Prisma } from '@prisma/client';
-import { round2 } from '@utils/tax';
+import { Prisma } from "@prisma/client";
+import { applyCustomerCredit } from "@services/customerCredit.service";
+import { round2 } from "@utils/tax";
 import {
   lockSale,
   loadEntitlement,
   refundCents,
   ReturnEligibilityError,
-} from '@services/return-entitlement';
-import { Response } from 'express';
-import Joi from 'joi';
-import { prisma } from '@config/prisma';
-import { ApiResponse } from '@utils/ApiResponse';
-import { AuthRequest } from '@middleware/auth.middleware';
+} from "@services/return-entitlement";
+import { Response } from "express";
+import Joi from "joi";
+import { prisma } from "@config/prisma";
+import { ApiResponse } from "@utils/ApiResponse";
+import { AuthRequest } from "@middleware/auth.middleware";
+
+const returnDetails = Prisma.validator<Prisma.ReturnInclude>()({
+  items: true,
+  exchangeItems: true,
+  customer: { select: { id: true, name: true } },
+  accountCredit: true,
+});
 
 // Shared by creation and completion; validate even lines that do not move stock.
 async function validateReturnProducts(
-  db: Pick<Prisma.TransactionClient, 'product'>,
+  db: Pick<Prisma.TransactionClient, "product">,
   shopId: string,
-  lines: Array<{ productId: string }>
+  lines: Array<{ productId: string }>,
 ) {
   for (const productId of new Set(lines.map((line) => line.productId))) {
-    const product = await db.product.findFirst({ where: { id: productId, shopId } });
-    if (!product) throw new ReturnEligibilityError(`Product ${productId} not found in this shop`);
+    const product = await db.product.findFirst({
+      where: { id: productId, shopId },
+    });
+    if (!product)
+      throw new ReturnEligibilityError(
+        `Product ${productId} not found in this shop`,
+      );
   }
+}
+
+// Store credit is a new entitlement from a paid receipt, never CREDIT debt settlement.
+async function validateStoreCredit(
+  tx: Prisma.TransactionClient,
+  record: {
+    type: string;
+    saleId?: string | null;
+    customerId?: string | null;
+    exchangeItems?: unknown[];
+  },
+  shopId: string,
+) {
+  if (record.type !== "STORE_CREDIT") return;
+  if (!record.customerId)
+    throw new ReturnEligibilityError("Store credit requires a customer");
+  const customer = await tx.customer.findFirst({
+    where: { id: record.customerId, shopId },
+  });
+  if (!customer)
+    throw new ReturnEligibilityError("Customer not found in this shop");
+  if (!record.saleId)
+    throw new ReturnEligibilityError(
+      "Store credit requires a paid sale receipt",
+    );
+  const sale = await tx.sale.findFirst({
+    where: { id: record.saleId, shopId },
+  });
+  if (
+    !sale ||
+    sale.status !== "COMPLETED" ||
+    sale.paymentMethod === "CREDIT" ||
+    round2(sale.amountPaid) < round2(sale.totalAmount)
+  )
+    throw new ReturnEligibilityError(
+      "Store credit requires a fully paid non-CREDIT sale; debt settlement is separate",
+    );
+  if (record.exchangeItems?.length)
+    throw new ReturnEligibilityError(
+      "Store credit cannot also provide exchange items",
+    );
 }
 
 export const createReturnSchema = Joi.object({
   saleId: Joi.string().optional(),
   customerId: Joi.string().optional(),
   reason: Joi.string().required().min(3).max(500),
-  type: Joi.string().required().valid('REFUND', 'EXCHANGE', 'STORE_CREDIT'),
+  type: Joi.string().required().valid("REFUND", "EXCHANGE", "STORE_CREDIT"),
   items: Joi.array()
     .items(
       Joi.object({
@@ -62,14 +116,14 @@ export const listReturnsSchema = Joi.object({
   limit: Joi.number().optional().integer().min(1).max(100).default(20),
   status: Joi.string()
     .optional()
-    .valid('PENDING', 'APPROVED', 'COMPLETED', 'REJECTED'),
-  type: Joi.string().optional().valid('REFUND', 'EXCHANGE', 'STORE_CREDIT'),
+    .valid("PENDING", "APPROVED", "COMPLETED", "REJECTED"),
+  type: Joi.string().optional().valid("REFUND", "EXCHANGE", "STORE_CREDIT"),
   startDate: Joi.date().optional(),
   endDate: Joi.date().optional(),
 });
 
 export const processReturnSchema = Joi.object({
-  action: Joi.string().required().valid('approve', 'reject', 'complete'),
+  action: Joi.string().required().valid("approve", "reject", "complete"),
   notes: Joi.string().optional().max(1000),
 });
 
@@ -80,7 +134,7 @@ export class ReturnController {
   static async create(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        ApiResponse.unauthorized(res, 'Unauthorized');
+        ApiResponse.unauthorized(res, "Unauthorized");
         return;
       }
 
@@ -98,7 +152,7 @@ export class ReturnController {
           where: { id: customerId, shopId },
         });
         if (!customer) {
-          ApiResponse.badRequest(res, 'Customer not found in this shop');
+          ApiResponse.badRequest(res, "Customer not found in this shop");
           return;
         }
       }
@@ -117,16 +171,24 @@ export class ReturnController {
       }>;
 
       const returnRecord = await prisma.$transaction(async (tx) => {
-        await validateReturnProducts(tx, shopId, [...items, ...(exchangeItems ?? [])]);
+        if (saleId) await lockSale(tx, saleId);
+        await validateStoreCredit(
+          tx,
+          { type, saleId, customerId, exchangeItems },
+          shopId,
+        );
+        await validateReturnProducts(tx, shopId, [
+          ...items,
+          ...(exchangeItems ?? []),
+        ]);
         if (saleId) {
-          await lockSale(tx, saleId);
           const remaining = await loadEntitlement(tx, saleId, shopId);
           const requested = new Map<string, any>();
           for (const item of items) {
             const existing = requested.get(item.productId);
             if (existing && existing.restockable !== (item.restockable ?? true))
               throw new ReturnEligibilityError(
-                'Duplicate lines must agree on restocking',
+                "Duplicate lines must agree on restocking",
               );
             requested.set(item.productId, {
               ...item,
@@ -137,7 +199,7 @@ export class ReturnController {
           returnLines = [...requested.values()].map((item) => {
             const p = remaining.find((p) => p.productId === item.productId);
             if (!p)
-              throw new ReturnEligibilityError('Item was not part of the sale');
+              throw new ReturnEligibilityError("Item was not part of the sale");
             const cents = refundCents(p, item.quantity);
             return {
               productId: p.productId,
@@ -169,17 +231,22 @@ export class ReturnController {
           ),
         );
 
+        if (type === "STORE_CREDIT" && calculatedRefund <= 0)
+          throw new ReturnEligibilityError(
+            "Store credit entitlement must be positive",
+          );
+
         // Create the return
         return tx.return.create({
           data: {
             shopId,
             saleId: saleId ?? undefined,
             customerId: customerId ?? undefined,
-            userId: req.user!.type === 'user' ? req.user!.id : undefined,
+            userId: req.user!.type === "user" ? req.user!.id : undefined,
             reason,
             type,
-            refundAmount: type === 'REFUND' ? calculatedRefund : 0,
-            status: 'PENDING',
+            refundAmount: type === "EXCHANGE" ? 0 : calculatedRefund,
+            status: "PENDING",
             notes,
             items: {
               create: returnLines.map((item) => ({
@@ -201,14 +268,11 @@ export class ReturnController {
                 }
               : undefined,
           },
-          include: {
-            items: true,
-            exchangeItems: true,
-          },
+          include: returnDetails,
         });
       });
 
-      ApiResponse.created(res, returnRecord, 'Return created successfully');
+      ApiResponse.created(res, returnRecord, "Return created successfully");
     } catch (error: any) {
       if (error instanceof ReturnEligibilityError) {
         ApiResponse.badRequest(res, error.message);
@@ -221,7 +285,7 @@ export class ReturnController {
   static async remaining(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        ApiResponse.unauthorized(res, 'Unauthorized');
+        ApiResponse.unauthorized(res, "Unauthorized");
         return;
       }
       const data = await prisma.$transaction(async (tx) => {
@@ -244,7 +308,7 @@ export class ReturnController {
   static async list(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        ApiResponse.unauthorized(res, 'Unauthorized');
+        ApiResponse.unauthorized(res, "Unauthorized");
         return;
       }
 
@@ -272,11 +336,8 @@ export class ReturnController {
           where,
           skip,
           take: parseInt(limit),
-          orderBy: { createdAt: 'desc' },
-          include: {
-            items: true,
-            exchangeItems: true,
-          },
+          orderBy: { createdAt: "desc" },
+          include: returnDetails,
         }),
         prisma.return.count({ where }),
       ]);
@@ -303,7 +364,7 @@ export class ReturnController {
   static async getById(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        ApiResponse.unauthorized(res, 'Unauthorized');
+        ApiResponse.unauthorized(res, "Unauthorized");
         return;
       }
 
@@ -312,14 +373,11 @@ export class ReturnController {
           id: req.params.id,
           shopId: req.user!.shopId,
         },
-        include: {
-          items: true,
-          exchangeItems: true,
-        },
+        include: returnDetails,
       });
 
       if (!returnRecord) {
-        ApiResponse.notFound(res, 'Return not found');
+        ApiResponse.notFound(res, "Return not found");
         return;
       }
 
@@ -339,7 +397,7 @@ export class ReturnController {
   static async process(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        ApiResponse.unauthorized(res, 'Unauthorized');
+        ApiResponse.unauthorized(res, "Unauthorized");
         return;
       }
 
@@ -350,7 +408,7 @@ export class ReturnController {
         const reference = await tx.return.findFirst({
           where: { id: returnId, shopId: req.user!.shopId },
         });
-        if (!reference) throw new ReturnEligibilityError('Return not found');
+        if (!reference) throw new ReturnEligibilityError("Return not found");
         if (reference.saleId) await lockSale(tx, reference.saleId);
         await tx.$queryRaw`SELECT id FROM "Return" WHERE id = ${returnId} FOR UPDATE`;
         const returnRecord = await tx.return.findFirst({
@@ -362,11 +420,13 @@ export class ReturnController {
         });
 
         if (!returnRecord) {
-          throw new ReturnEligibilityError('Return not found');
+          throw new ReturnEligibilityError("Return not found");
         }
-        if (!['PENDING', 'APPROVED'].includes(returnRecord.status))
-          throw new ReturnEligibilityError('Return is already final');
-        if (action !== 'reject' && returnRecord.saleId) {
+        if (!["PENDING", "APPROVED"].includes(returnRecord.status))
+          throw new ReturnEligibilityError("Return is already final");
+        if (action !== "reject")
+          await validateStoreCredit(tx, returnRecord, req.user!.shopId);
+        if (action !== "reject" && returnRecord.saleId) {
           const remaining = await loadEntitlement(
             tx,
             returnRecord.saleId,
@@ -393,40 +453,63 @@ export class ReturnController {
               value.quantity > p.remainingQuantity ||
               Math.round(value.cents) > p.remainingCents
             )
-              throw new ReturnEligibilityError('Return is no longer eligible');
+              throw new ReturnEligibilityError("Return is no longer eligible");
           }
           if (
-            returnRecord.type === 'REFUND' &&
+            ["REFUND", "STORE_CREDIT"].includes(returnRecord.type) &&
             Math.round(returnRecord.refundAmount * 100) !==
               Math.round([...grouped.values()].reduce((n, v) => n + v.cents, 0))
           )
             throw new ReturnEligibilityError(
-              'Return refund does not match reserved value',
+              "Return refund does not match reserved value",
             );
         }
 
         // Rejection only releases the reservation; missing or moved inventory
         // must not prevent cancelling a pending return.
-        if (action !== 'reject') {
-          await validateReturnProducts(tx, req.user!.shopId, [...returnRecord.items, ...returnRecord.exchangeItems]);
+        if (action !== "reject") {
+          await validateReturnProducts(tx, req.user!.shopId, [
+            ...returnRecord.items,
+            ...returnRecord.exchangeItems,
+          ]);
         }
 
         let newStatus: string;
         let updateData: any = { notes: notes || returnRecord.notes };
 
         switch (action) {
-          case 'approve':
-            newStatus = 'APPROVED';
+          case "approve":
+            newStatus = "APPROVED";
             break;
-          case 'reject':
-            newStatus = 'REJECTED';
+          case "reject":
+            newStatus = "REJECTED";
             break;
-          case 'complete': {
-            newStatus = 'COMPLETED';
+          case "complete": {
+            newStatus = "COMPLETED";
             updateData.processedAt = new Date();
 
-            const userId = req.user!.type === 'user' ? req.user!.id : undefined;
+            const userId = req.user!.type === "user" ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
+
+            if (returnRecord.type === "STORE_CREDIT") {
+              if (returnRecord.refundAmount <= 0)
+                throw new ReturnEligibilityError(
+                  "Store credit entitlement must be positive",
+                );
+              await applyCustomerCredit(
+                tx,
+                {
+                  shopId,
+                  customerId: returnRecord.customerId!,
+                  type: "REFUND",
+                  amount: returnRecord.refundAmount,
+                  returnId,
+                  userId,
+                  note: `Store credit for return #${returnId}`,
+                },
+                { currencySymbol: "" },
+              );
+            }
 
             // Restock returned items and deduct exchanged-out items atomically so
             // the product quantity and the StockLog audit trail stay consistent.
@@ -439,7 +522,7 @@ export class ReturnController {
                   });
                   if (!product || product.shopId !== shopId)
                     throw new ReturnEligibilityError(
-                      'Return product not found in this shop',
+                      "Return product not found in this shop",
                     );
 
                   if (!product.trackStock) continue;
@@ -461,7 +544,7 @@ export class ReturnController {
                       shopId,
                       productId: item.productId,
                       userId,
-                      type: 'RETURN',
+                      type: "RETURN",
                       quantity: item.quantity,
                       previousQty,
                       newQty,
@@ -480,7 +563,7 @@ export class ReturnController {
                   });
                   if (!product || product.shopId !== shopId)
                     throw new ReturnEligibilityError(
-                      'Return product not found in this shop',
+                      "Return product not found in this shop",
                     );
 
                   if (!product.trackStock) continue;
@@ -498,7 +581,7 @@ export class ReturnController {
                       shopId,
                       productId: item.productId,
                       userId,
-                      type: 'SALE',
+                      type: "SALE",
                       quantity: -item.quantity,
                       previousQty,
                       newQty,
@@ -512,7 +595,7 @@ export class ReturnController {
             break;
           }
           default:
-            throw new ReturnEligibilityError('Invalid action');
+            throw new ReturnEligibilityError("Invalid action");
         }
 
         updateData.status = newStatus;
@@ -520,7 +603,7 @@ export class ReturnController {
         return tx.return.update({
           where: { id: returnId },
           data: updateData,
-          include: { items: true, exchangeItems: true },
+          include: returnDetails,
         });
       });
       ApiResponse.success(res, updated, `Return ${action}d successfully`);
