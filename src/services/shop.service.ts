@@ -1,5 +1,4 @@
 import { prisma } from '@config/prisma';
-import { Prisma } from '@prisma/client';
 
 interface UpdateShopInput {
   name?: string;
@@ -341,20 +340,19 @@ export class ShopService {
   }
 
   /**
-   * Increment usage counters. Pass the sale transaction to commit accounting atomically.
+   * Increment usage counters (sale callers treat this as best-effort analytics).
    */
   static async incrementUsage(
     shopId: string,
     type: 'transaction' | 'stockMove',
-    client: Prisma.TransactionClient = prisma,
   ) {
     if (type === 'transaction') {
-      await client.shop.update({
+      await prisma.shop.update({
         where: { id: shopId },
         data: { monthlyTransactions: { increment: 1 } },
       });
     } else {
-      await client.shop.update({
+      await prisma.shop.update({
         where: { id: shopId },
         data: { monthlyStockMoves: { increment: 1 } },
       });

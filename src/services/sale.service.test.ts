@@ -576,9 +576,9 @@ describe('SaleService.create — committed usage accounting', () => {
     return saleInput({ localId: 'usage-retry', items: [{ productId: product.id, quantity: 1 }], amountPaid: 10 });
   };
 
-  it('counts a successful sale once and never counts sequential or concurrent localId replays', async () => {
+  it('counts a successful sale once and never counts sequential localId replays', async () => {
     const request = input();
-    const results = await Promise.all([SaleService.create(request), SaleService.create(request)]);
+    const results = [await SaleService.create(request), await SaleService.create(request)];
     expect(results[0].id).toBe(results[1].id);
     expect((await SaleService.create(request)).id).toBe(results[0].id);
     expect(usage()).toBe(1);
@@ -592,18 +592,20 @@ describe('SaleService.create — committed usage accounting', () => {
     expect(table('sale')).toHaveLength(0);
   });
 
-  it('rolls back sale, stock and logs when the counter write fails, then permits a safe retry', async () => {
+  it('returns a committed sale despite counter failure and deduplicates its retry', async () => {
     const request = input();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('counter unavailable'));
-    await expect(SaleService.create(request)).rejects.toThrow('counter unavailable');
-    // A reported error must never leave a committed checkout behind.
-    expect(table('sale')).toHaveLength(0);
-    expect(table('saleItem')).toHaveLength(0);
-    expect(table('stockLog')).toHaveLength(0);
-    expect(table('product')[0].quantity).toBe(10);
-    expect(usage()).toBe(0);
-    await SaleService.create(request);
+    const sale = await SaleService.create(request);
     expect(table('sale')).toHaveLength(1);
-    expect(usage()).toBe(1);
+    expect(table('saleItem')).toHaveLength(1);
+    expect(table('stockLog')).toHaveLength(1);
+    expect(table('product')[0].quantity).toBe(9);
+    expect(usage()).toBe(0);
+    expect(log).toHaveBeenCalledWith('Sale usage accounting failed', expect.objectContaining({ saleId: sale.id }));
+    expect((await SaleService.create(request)).id).toBe(sale.id);
+    expect(table('sale')).toHaveLength(1);
+    expect(usage()).toBe(0);
+    log.mockRestore();
   });
 });

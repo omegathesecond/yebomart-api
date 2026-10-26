@@ -35,8 +35,8 @@ afterAll(async () => {
 });
 const input = () => ({ shopId, userId, localId: randomUUID(), paymentMethod: 'CASH' as const,
   amountPaid: 10, items: [{ productId, quantity: 1 }] });
-async function state(count: number, stock: number) {
-  expect((await prisma.shop.findUniqueOrThrow({ where: { id: shopId } })).monthlyTransactions).toBe(count);
+async function state(count: number, stock: number, usage = count) {
+  expect((await prisma.shop.findUniqueOrThrow({ where: { id: shopId } })).monthlyTransactions).toBe(usage);
   expect(await prisma.sale.count({ where: { shopId } })).toBe(count);
   expect(await prisma.saleItem.count({ where: { sale: { shopId } } })).toBe(count);
   expect(await prisma.stockLog.count({ where: { shopId } })).toBe(count);
@@ -55,12 +55,12 @@ it('concurrent and repeated localId requests return one sale and one usage incre
   expect((await SaleService.create(request)).id).toBe(results[0].id);
   await state(1, 9);
 });
-it('counter failure never leaves a committed sale reported as failed; retry commits once', async () => {
+it('counter failure returns the committed sale and replay never duplicates it', async () => {
   const request = input();
   failCounterFor = shopId;
-  await expect(SaleService.create(request)).rejects.toThrow('injected counter-write failure');
-  await state(0, 10);
+  const sale = await SaleService.create(request);
+  await state(1, 9, 0);
   failCounterFor = undefined;
-  await SaleService.create(request);
-  await state(1, 9);
+  expect((await SaleService.create(request)).id).toBe(sale.id);
+  await state(1, 9, 0);
 });

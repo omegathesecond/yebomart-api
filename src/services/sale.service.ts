@@ -344,10 +344,6 @@ export class SaleService {
             customerBalance = credit.newBalance;
           }
 
-          // Count only a new sale, in the same commit as stock and credit.
-          // Replays return before this point; any failure rolls everything back.
-          await ShopService.incrementUsage(input.shopId, 'transaction', tx);
-
           // customerBalance rides along on the sale so the POS receipt can print
           // the customer's new outstanding balance. undefined for non-credit.
           return { ...sale, customerBalance };
@@ -377,6 +373,13 @@ export class SaleService {
       }
     }
 
+    // Best-effort analytics: only the transaction winner reaches this point.
+    // Never report an already committed checkout as failed due to accounting.
+    try {
+      await ShopService.incrementUsage(input.shopId, 'transaction');
+    } catch (error) {
+      console.error('Sale usage accounting failed', { shopId: input.shopId, saleId: sale.id, error });
+    }
     return sale;
   }
 
