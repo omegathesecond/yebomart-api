@@ -296,18 +296,18 @@ export class PurchaseOrderController {
           throw new ReceiptError('Nothing to receive — all items already received');
         }
 
-        // Match bulk restock's stable lock order so overlapping multi-product
-        // receipts/restocks cannot lock the same products in opposite orders.
+        // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
+        // amount booked as a supplier payable so purchases are no longer
+        // understated — independent of whether a product row still exists.
+        let receivedValue = 0;
+
+        // Match bulk restock's lock order before touching any product. Reads and
+        // stock logs then observe the committed quantity after competing writers.
         const productIds = [...new Set(toReceive.map(({ item }) => item.productId))];
         await tx.$queryRaw`
           SELECT id FROM "Product"
           WHERE id IN (${Prisma.join(productIds)}) AND "shopId" = ${shopId}
           ORDER BY id FOR UPDATE`;
-
-        // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
-        // amount booked as a supplier payable so purchases are no longer
-        // understated — independent of whether a product row still exists.
-        let receivedValue = 0;
 
         for (const { item, qty } of toReceive) {
           receivedValue += qty * item.unitCost;

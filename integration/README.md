@@ -56,6 +56,8 @@ and payments both lock the PO before reading it, then update the supplier. No
 migration is needed for this change. The competing-80-payments regression was
 also run against the original controller: both requests incorrectly returned 200.
 
+
+
 `stock.test.ts` uses the same row-lock barrier to coordinate manual removals,
 restocks, sale versus restock, and batches supplied in opposite product orders.
 It checks the complete stock-log chain against final stock, concurrent cost-change
@@ -74,6 +76,7 @@ the existing delta-based Stock Adjustments flow; its sale race checks final stoc
 and the complete signed log chain. New imports share atomic product + INITIAL log
 creation with ordinary new products. Existing import rows containing quantity are
 reported as row errors; omit that column for metadata imports.
+
 
 Supplier payment requeue verification (2026-10-21): preserved the existing
 implementation and regressions, merged current main, and resolved this document
@@ -199,3 +202,23 @@ fresh disposable database with the open-till index and refund CHECK applied.
 The competing payments of 80 against 100 return [200,400], with one PAYMENT,
 amountPaid 80 and supplier balance 20. All ten receipt races and rollback tests pass.
 No new migration is required.
+
+PO receipt rework verification (2026-10-21): merged main through e8a3c30,
+retained stock.service.ts and integration/stock.test.ts exactly from main, and
+reused the payable PO lock for receipt entitlement. Receipts lock products in
+stable order before atomic increments. All 31 real PostgreSQL regressions pass,
+including opposite-order receipt/restock batches, cost-change notes, duplicate
+validation, receipt/payment overlap and forced rollback. Build and 463 unit tests
+pass (2 existing TODOs). No schema migration is required for the receipt fix.
+
+Receipt rework verification (2026-10-21): retained main's shipped stock service,
+locked receipt products in stable order, and added an opposite-order multi-product
+receipt/restock regression. Build, sequential receipt tests and all 26 disposable
+Postgres tests passed. The receipt fix requires no additional migration.
+
+Receipt requeue verification (2026-10-26): merged current main through db85fc7
+into the existing receipt branch, retaining the shipped supplier-payment locking,
+`integration/supplier-payment.test.ts`, `integration/stock.test.ts` and
+`stock.service.ts`. Build and all 31 coordinated PostgreSQL regressions passed
+on a fresh local database, including concurrent payments of 80 against 100.
+No additional schema migration is required.
