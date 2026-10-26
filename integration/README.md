@@ -79,6 +79,20 @@ stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
 
+`return-stock.test.ts` coordinates return completion against sales, restocks and
+returns from different original sales using `lockedRace.ts`. Exchange deductions
+and reversed exchange product orders use the same product-lock barrier. Shared
+`stockHistory.ts` assertions verify the signed movements and full previous/new
+quantity chain. A real PostgreSQL trigger rejects the final return status update
+to verify rollback of inventory, logs, restocked flags and completion status.
+All five inventory race regressions fail against the original return controller
+(including stock 12 instead of 9 for return versus sale). No migration is required.
+Verification: build and 465 unit tests passed (2 existing TODOs); all 35 Postgres
+tests passed with a client freshly generated from this branch's schema. The
+workspace's shared generated client had an unrelated CustomerCredit.returnId
+field, so the verification client was generated separately under /tmp and aliased
+only for the test run; shared dependencies and product schema were unchanged.
+
 Credit sale returns (`return-credit.test.ts`): apply migration
 `20261026000000_return_credit_reversal` before deploying this API. Each completed
 CREDIT-sale return appends one uniquely return-linked negative ADJUSTMENT through
@@ -94,3 +108,10 @@ ledger link and must not award additional account credit for CREDIT-sale returns
 Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
 payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
 payment/completion and competing completions, and a real trigger proves rollback.
+
+Return inventory rework verification (2026-10-26): merged current main, retaining
+`settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
+sale entitlement lock. Customer settlement precedes product locks to match sale
+lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real PostgreSQL
+regressions passed on a fresh disposable local database. This includes all 17
+return-stock and return-credit tests run together, plus the full Postgres suite.
