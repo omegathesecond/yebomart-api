@@ -85,3 +85,10 @@ Receipt rework verification (2026-10-21): retained main's shipped stock service,
 locked receipt products in stable order, and added an opposite-order multi-product
 receipt/restock regression. Build, sequential receipt tests and all 26 disposable
 Postgres tests passed. The receipt fix requires no additional migration.
+
+Receipt requeue verification (2026-10-26): merged current main through db85fc7
+into the existing receipt branch, retaining the shipped supplier-payment locking,
+`integration/supplier-payment.test.ts`, `integration/stock.test.ts` and
+`stock.service.ts`. Build and all 31 coordinated PostgreSQL regressions passed
+on a fresh local database, including concurrent payments of 80 against 100.
+No additional schema migration is required.
