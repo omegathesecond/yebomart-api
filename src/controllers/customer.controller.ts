@@ -66,6 +66,7 @@ function shortDate(date: Date): string {
 }
 
 interface StatementCredit {
+  note?: string | null;
   type: string;
   amount: number;
   createdAt: Date;
@@ -116,7 +117,7 @@ function buildStatementMessage(
     lines.push('Recent activity:');
     recent.forEach((c) => {
       const label = CREDIT_TYPE_LABEL[c.type] ?? c.type;
-      lines.push(`• ${shortDate(c.createdAt)} ${label} ${money(currencySymbol, c.amount)}`);
+      lines.push(`• ${shortDate(c.createdAt)} ${label} ${money(currencySymbol, c.amount)}${c.note ? ` — ${c.note}` : ''}`);
     });
   }
 

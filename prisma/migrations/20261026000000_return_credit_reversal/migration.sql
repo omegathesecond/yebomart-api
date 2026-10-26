@@ -1,0 +1,3 @@
+ALTER TABLE "CustomerCredit" ADD COLUMN "returnId" TEXT;
+CREATE UNIQUE INDEX "CustomerCredit_returnId_key" ON "CustomerCredit"("returnId");
+ALTER TABLE "CustomerCredit" ADD CONSTRAINT "CustomerCredit_returnId_fkey" FOREIGN KEY ("returnId") REFERENCES "Return"("id") ON DELETE SET NULL ON UPDATE CASCADE;
