@@ -357,7 +357,14 @@ describe('cumulative sale entitlement', () => {
   }
   async function process(id: string, action: string) {
     const res = mockRes();
-    await ReturnController.process({ ...req({ action }), params: { id } }, res);
+    if (action === 'complete') {
+      const record = table('return').find(r => r.id === id);
+      if (record?.type === 'REFUND' && record.status === 'PENDING')
+        await ReturnController.process({ ...req({ action: 'approve' }), params: { id } }, mockRes());
+    }
+    const settlement = action === 'complete' && table('return').find(r => r.id === id)?.type === 'REFUND'
+      ? { settlementMethod: 'CARD', settlementReference: 'confirmed-test', paymentConfirmed: true } : {};
+    await ReturnController.process({ ...req({ action, ...settlement }), params: { id } }, res);
     return res;
   }
   it('reserves pending quantities, rejects sequential over-return, and releases rejected reservations', async () => {
@@ -538,7 +545,11 @@ describe('return inventory isolation', () => {
   }
   async function complete(id: string) {
     const res = mockRes();
-    await ReturnController.process({ ...req({ action: 'complete' }), params: { id } }, res);
+    const record = table('return').find(r => r.id === id);
+    if (record?.type === 'REFUND' && record.status === 'PENDING')
+      await ReturnController.process({ ...req({ action: 'approve' }), params: { id } }, mockRes());
+    const settlement = record?.type === 'REFUND' ? { settlementMethod: 'CARD', settlementReference: 'confirmed-test', paymentConfirmed: true } : {};
+    await ReturnController.process({ ...req({ action: 'complete', ...settlement }), params: { id } }, res);
     return res;
   }
   const snapshot = () => structuredClone({

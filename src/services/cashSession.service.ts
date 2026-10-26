@@ -26,6 +26,14 @@ interface CloseSessionInput {
  * offline-synced sale never desyncs the expected total.
  */
 export class CashSessionService {
+  private static async cashRefundTotal(shopId: string, sessionId: string, db: Prisma.TransactionClient = prisma) {
+    const refunds = await db.return.aggregate({
+      where: { shopId, cashSessionId: sessionId, status: 'COMPLETED', type: 'REFUND', settlementMethod: 'CASH', settledAt: { not: null } },
+      _sum: { refundAmount: true },
+    });
+    return round2(refunds._sum.refundAmount ?? 0);
+  }
+
   /**
    * Sum of cash taken during a session: COMPLETED sales paid with CASH for this
    * shop since the session opened. We match on createdAt >= openedAt rather than
@@ -118,12 +126,14 @@ export class CashSessionService {
 
     const cashSales = await this.cashSalesTotal(shopId, session.openedAt);
 
+    const cashRefundsTotal = await this.cashRefundTotal(shopId, session.id);
     return {
       ...session,
+      cashRefundsTotal,
       cashSalesTotal: cashSales.total,
       cashSalesCount: cashSales.count,
-      // Live expected drawer = float + cash taken so far.
-      expectedCash: session.openingFloat + cashSales.total,
+      // Live drawer = float + cash taken - confirmed cash paid out.
+      expectedCash: round2(session.openingFloat + cashSales.total - cashRefundsTotal),
     };
   }
 
@@ -175,14 +185,15 @@ export class CashSessionService {
         now,
         tx,
       );
-      const expectedCash = session.openingFloat + cashSales.total;
+      const cashRefundsTotal = await this.cashRefundTotal(input.shopId, session.id, tx);
+      const expectedCash = round2(session.openingFloat + cashSales.total - cashRefundsTotal);
       return tx.cashSession.update({
         where: { id: session.id },
         data: {
           closedAt: now,
           countedCash: input.countedCash,
           expectedCash,
-          variance: input.countedCash - expectedCash,
+          variance: round2(input.countedCash - expectedCash),
           notes: input.notes ?? session.notes,
         },
         include: { user: { select: { id: true, name: true } } },
@@ -244,7 +255,9 @@ export class CashSessionService {
       };
     });
 
+    const cashRefundsTotal = await this.cashRefundTotal(shopId, session.id);
     return {
+      cashRefundsTotal,
       session: {
         id: session.id,
         status: session.status,
@@ -252,7 +265,7 @@ export class CashSessionService {
         openedAt: session.openedAt,
         closedAt: session.closedAt,
         countedCash: session.countedCash,
-        expectedCash: session.expectedCash,
+        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(p => p.method === 'CASH')?.total ?? 0) - cashRefundsTotal),
         variance: session.variance,
         notes: session.notes,
         cashier: session.user,

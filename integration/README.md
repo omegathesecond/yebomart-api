@@ -94,3 +94,18 @@ ledger link and must not award additional account credit for CREDIT-sale returns
 Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
 payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
 payment/completion and competing completions, and a real trigger proves rollback.
+
+Cash refund settlement (`refund-cash.test.ts`): apply migration
+`20261026010000_return_cash_settlement` before deploying API and app. Approval
+never proves payment. REFUND completion requires explicit payment confirmation
+and the actual CASH/CARD/MOMO/EMALI tender; noncash requires a confirmed payment
+reference. This records an operator-attested payment, it does not call a provider
+or assume a provider succeeded. Cash locks this shop's current OPEN till, even
+when the sale was made on another day; no open till is a hard error. Split-tender
+payouts are unsupported. Closed tills cannot receive new payouts. Settlement,
+completion and stock changes commit together, and final returns reject retries.
+Expected cash and close variance deduct only completed, confirmed CASH refunds
+attributed to that session. Z reports show cash refunds separately without changing
+gross, discount or VAT totals. Legacy completed returns have no recorded payment
+and are not guessed/backfilled as cash. CREDIT returns retain validateCreditReturn
+and settleCreditReturn: account debt reversals only, with no money paid out.
