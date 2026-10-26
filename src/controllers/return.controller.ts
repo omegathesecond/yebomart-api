@@ -1,3 +1,4 @@
+import { validateCreditReturn, settleCreditReturn } from '@services/return-credit';
 import { Prisma } from '@prisma/client';
 import { round2 } from '@utils/tax';
 import {
@@ -117,9 +118,12 @@ export class ReturnController {
       }>;
 
       const returnRecord = await prisma.$transaction(async (tx) => {
+        let debtorId = customerId;
         await validateReturnProducts(tx, shopId, [...items, ...(exchangeItems ?? [])]);
         if (saleId) {
           await lockSale(tx, saleId);
+          const debt = await validateCreditReturn(tx, { saleId, shopId, customerId, type, exchangeItems: exchangeItems ?? [] });
+          if (debt) debtorId = debt.customerId;
           const remaining = await loadEntitlement(tx, saleId, shopId);
           const requested = new Map<string, any>();
           for (const item of items) {
@@ -174,7 +178,7 @@ export class ReturnController {
           data: {
             shopId,
             saleId: saleId ?? undefined,
-            customerId: customerId ?? undefined,
+            customerId: debtorId ?? undefined,
             userId: req.user!.type === 'user' ? req.user!.id : undefined,
             reason,
             type,
@@ -358,7 +362,7 @@ export class ReturnController {
             id: returnId,
             shopId: req.user!.shopId,
           },
-          include: { items: true, exchangeItems: true },
+          include: { items: true, exchangeItems: true, creditReversal: true },
         });
 
         if (!returnRecord) {
@@ -427,6 +431,8 @@ export class ReturnController {
 
             const userId = req.user!.type === 'user' ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
+
+            await settleCreditReturn(tx, returnRecord, userId);
 
             // Restock returned items and deduct exchanged-out items atomically so
             // the product quantity and the StockLog audit trail stay consistent.
@@ -520,7 +526,7 @@ export class ReturnController {
         return tx.return.update({
           where: { id: returnId },
           data: updateData,
-          include: { items: true, exchangeItems: true },
+          include: { items: true, exchangeItems: true, creditReversal: true },
         });
       });
       ApiResponse.success(res, updated, `Return ${action}d successfully`);
