@@ -4,7 +4,36 @@ import { ProductService } from '@services/product.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 
+// Optional rules are replaced as a pair; null/null clears them. Omission retains them.
+const optionalProductFields = {
+  attributes: Joi.object().unknown(true).max(50).allow(null).custom((value, helpers) => {
+    for (const [key, entry] of Object.entries(value)) {
+      if (!key.trim() || key.length > 80 || ['__proto__', 'constructor', 'prototype'].includes(key) ||
+          !(typeof entry === 'string' && entry.length <= 500 || typeof entry === 'number' && Number.isFinite(entry))) {
+        return helpers.error('any.invalid');
+      }
+    }
+    return Buffer.byteLength(JSON.stringify(value), 'utf8') <= 16384 ? value : helpers.error('any.invalid');
+  }),
+  wholesalePrice: Joi.number().strict().min(0).allow(null),
+  wholesaleMinQty: Joi.number().strict().integer().min(1).max(2147483647).allow(null),
+  packPrice: Joi.number().strict().min(0).allow(null),
+  packSize: Joi.number().strict().integer().min(1).max(2147483647).allow(null),
+};
+
+function validatePricingPairs(value: Record<string, unknown>, helpers: Joi.CustomHelpers) {
+  for (const [price, quantity] of [['wholesalePrice', 'wholesaleMinQty'], ['packPrice', 'packSize']]) {
+    const p = value[price];
+    const q = value[quantity];
+    if ((p === undefined) !== (q === undefined) || (p === null) !== (q === null)) {
+      return helpers.message({ 'custom': `${price} and ${quantity} must both be supplied, or both be null to clear` });
+    }
+  }
+  return value;
+}
+
 export const createProductSchema = Joi.object({
+  ...optionalProductFields,
   barcode: Joi.string().optional().trim(),
   sku: Joi.string().optional().trim(),
   name: Joi.string().required().trim().min(1).max(200),
@@ -17,9 +46,10 @@ export const createProductSchema = Joi.object({
   unit: Joi.string().optional().valid('each', 'kg', 'litre', 'pack', 'box').default('each'),
   imageUrl: Joi.string().optional().uri(),
   localId: Joi.string().optional(), // For offline sync
-});
+}).custom(validatePricingPairs);
 
 export const updateProductSchema = Joi.object({
+  ...optionalProductFields,
   barcode: Joi.string().optional().trim().allow(''),
   sku: Joi.string().optional().trim().allow(''),
   name: Joi.string().optional().trim().min(1).max(200),
@@ -27,13 +57,13 @@ export const updateProductSchema = Joi.object({
   category: Joi.string().optional().trim().allow(''),
   costPrice: Joi.number().optional().min(0),
   sellPrice: Joi.number().optional().min(0),
-  quantity: Joi.number().optional().integer().min(0),
+  quantity: Joi.forbidden().messages({ 'any.unknown': 'Use Stock Adjustments to change existing stock' }),
   reorderAt: Joi.number().optional().integer().min(0),
   unit: Joi.string().optional().valid('each', 'kg', 'litre', 'pack', 'box'),
   imageUrl: Joi.string().optional().uri().allow(''),
   isActive: Joi.boolean().optional(),
   trackStock: Joi.boolean().optional(),
-});
+}).custom(validatePricingPairs);
 
 export const listProductsSchema = Joi.object({
   page: Joi.number().optional().integer().min(1).default(1),
@@ -53,7 +83,7 @@ export const bulkImportSchema = Joi.object({
       category: Joi.string().optional().trim(),
       costPrice: Joi.number().required().min(0),
       sellPrice: Joi.number().required().min(0),
-      quantity: Joi.number().optional().integer().min(0).default(0),
+      quantity: Joi.number().optional().integer().min(0),
       reorderAt: Joi.number().optional().integer().min(0).default(10),
       unit: Joi.string().optional().valid('each', 'kg', 'litre', 'pack', 'box').default('each'),
     })
@@ -69,7 +99,7 @@ export const bulkUpdateSchema = Joi.object({
       barcode: Joi.string().optional(),
       costPrice: Joi.number().optional().min(0),
       sellPrice: Joi.number().optional().min(0),
-      quantity: Joi.number().optional().integer().min(0),
+      quantity: Joi.forbidden().messages({ 'any.unknown': 'Use Stock Adjustments to change existing stock' }),
       isActive: Joi.boolean().optional(),
     }).or('id', 'barcode') // Must have either id or barcode
   ).min(1).max(500).required(),
@@ -259,7 +289,7 @@ export class ProductController {
   }
 
   /**
-   * Bulk update products (prices, quantities, status)
+   * Bulk update product metadata (prices, status)
    */
   static async bulkUpdate(req: AuthRequest, res: Response): Promise<void> {
     try {

@@ -23,6 +23,7 @@ import {
   seedSale,
   seedCustomer,
   seedProduct,
+  seedCashSession,
   table,
 } from '../test/prismaFake';
 
@@ -357,7 +358,7 @@ describe('cumulative sale entitlement', () => {
   }
   async function process(id: string, action: string) {
     const res = mockRes();
-    await ReturnController.process({ ...req({ action }), params: { id } }, res);
+    await ReturnController.process({ ...req({ action, ...(action === 'complete' ? { settlement: { method: 'CASH', confirmed: true } } : {}) }), params: { id } }, res);
     return res;
   }
   it('reserves pending quantities, rejects sequential over-return, and releases rejected reservations', async () => {
@@ -403,6 +404,8 @@ describe('cumulative sale entitlement', () => {
   it('does not release historical processed returns whose status was changed to rejected', async () => {
     const sale = seedShopSale();
     const created = await create(sale.id, 5);
+    expect((await process(created.body.data.id, 'approve')).statusCode).toBe(200);
+    seedCashSession();
     expect((await process(created.body.data.id, 'complete')).statusCode).toBe(200);
     table('return')[0].status = 'REJECTED';
     expect((await create(sale.id, 1)).statusCode).toBe(400);
@@ -494,6 +497,8 @@ describe('cumulative sale entitlement', () => {
     table('product')[0].quantity = 10;
     const sale = seedShopSale();
     const created = await create(sale.id, 5);
+    expect((await process(created.body.data.id, 'approve')).statusCode).toBe(200);
+    seedCashSession();
     expect((await process(created.body.data.id, 'complete')).statusCode).toBe(200);
     expect(table('product')[0].quantity).toBe(15);
     expect((await create(sale.id, 1)).statusCode).toBe(400);
@@ -534,11 +539,18 @@ describe('return inventory isolation', () => {
   async function create(payload: any) {
     const res = mockRes();
     await ReturnController.create(req(payload), res);
+    if (res.statusCode === 201) {
+      const approved = mockRes();
+      await ReturnController.process({ ...req({ action: 'approve' }), params: { id: res.body.data.id } }, approved);
+      expect(approved.statusCode).toBe(200);
+    }
     return res;
   }
   async function complete(id: string) {
     const res = mockRes();
-    await ReturnController.process({ ...req({ action: 'complete' }), params: { id } }, res);
+    seedCashSession();
+    const record = table('return').find(r => r.id === id);
+    await ReturnController.process({ ...req({ action: 'complete', ...(record?.type === 'REFUND' ? { settlement: { method: 'CASH', confirmed: true } } : {}) }), params: { id } }, res);
     return res;
   }
   const snapshot = () => structuredClone({
