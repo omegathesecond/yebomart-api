@@ -5,6 +5,11 @@ interface DateRange {
   endDate: Date;
 }
 
+// All historical COGS use the immutable sale-line snapshot.
+function saleItemCost(item: { costPrice: number; quantity: number }): number {
+  return item.costPrice * item.quantity;
+}
+
 export class ReportService {
   /**
    * Get daily report
@@ -69,7 +74,7 @@ export class ReportService {
 
       // Product stats
       for (const item of sale.items) {
-        totalCost += item.costPrice * item.quantity;
+        totalCost += saleItemCost(item);
         
         const existing = productSales.get(item.productId) || { name: item.productName, quantity: 0, revenue: 0 };
         existing.quantity += item.quantity;
@@ -207,7 +212,7 @@ export class ReportService {
       }
 
       for (const item of sale.items) {
-        totalCost += item.costPrice * item.quantity;
+        totalCost += saleItemCost(item);
 
         const existing = productSales.get(item.productId) || { name: item.productName, quantity: 0, revenue: 0 };
         existing.quantity += item.quantity;
@@ -337,8 +342,7 @@ export class ReportService {
    * Get product performance report
    */
   static async getProductReport(shopId: string, range: DateRange) {
-    const saleItems = await prisma.saleItem.groupBy({
-      by: ['productId', 'productName'],
+    const saleItems = await prisma.saleItem.findMany({
       where: {
         sale: {
           shopId,
@@ -346,35 +350,53 @@ export class ReportService {
           createdAt: { gte: range.startDate, lte: range.endDate },
         },
       },
-      _sum: { quantity: true, totalPrice: true },
-      _avg: { unitPrice: true },
+      select: {
+        productId: true, productName: true, quantity: true,
+        totalPrice: true, unitPrice: true, costPrice: true,
+      },
     });
 
-    // Get product details including cost
+    // Current product data is descriptive only; historical costs belong to sale lines.
     const productIds = saleItems.map(item => item.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
-      select: { id: true, costPrice: true, category: true },
+      select: { id: true, category: true },
     });
 
     const productMap = new Map(products.map(p => [p.id, p]));
 
-    const productPerformance = saleItems.map(item => {
-      const product = productMap.get(item.productId);
-      const revenue = item._sum.totalPrice || 0;
-      const quantity = item._sum.quantity || 0;
-      const cost = (product?.costPrice || 0) * quantity;
-      
+    // Preserve grouping by both id and sale-time name, including the existing
+    // unweighted average unit price across lines (not across units).
+    const groups = new Map<string, {
+      id: string; name: string; quantity: number; revenue: number;
+      cost: number; unitPriceTotal: number; lines: number;
+    }>();
+    for (const item of saleItems) {
+      const key = JSON.stringify([item.productId, item.productName]);
+      const group = groups.get(key) || {
+        id: item.productId, name: item.productName, quantity: 0,
+        revenue: 0, cost: 0, unitPriceTotal: 0, lines: 0,
+      };
+      group.quantity += item.quantity;
+      group.revenue += item.totalPrice;
+      group.cost += saleItemCost(item);
+      group.unitPriceTotal += item.unitPrice;
+      group.lines++;
+      groups.set(key, group);
+    }
+
+    const productPerformance = Array.from(groups.values()).map(group => {
+      const { revenue, cost } = group;
       return {
-        id: item.productId,
-        name: item.productName,
-        category: product?.category || 'Uncategorized',
-        quantitySold: quantity,
+        id: group.id,
+        name: group.name,
+        category: productMap.get(group.id)?.category || 'Uncategorized',
+        quantitySold: group.quantity,
         revenue,
         cost,
         profit: revenue - cost,
         margin: revenue > 0 ? ((revenue - cost) / revenue) * 100 : 0,
-        averagePrice: item._avg.unitPrice || 0,
+        averagePrice: group.unitPriceTotal / group.lines,
       };
     });
 
