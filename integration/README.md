@@ -231,3 +231,15 @@ into the existing receipt branch, retaining the shipped supplier-payment locking
 `stock.service.ts`. Build and all 31 coordinated PostgreSQL regressions passed
 on a fresh local database, including concurrent payments of 80 against 100.
 No additional schema migration is required.
+
+Sale usage rework (2026-10-26): preserved the existing best-effort shared
+accounting path and merged current main. The replay test now uses lockedRace to
+prove both requests overlap before the unique localId constraint resolves them.
+A real invalid-staff foreign key proves rollback restores stock without counting
+usage. HTTP tests prove counter failure still returns 201 and replay counts no
+second sale. API build and 470 unit/HTTP tests pass (2 existing TODOs); all four
+sale-usage PostgreSQL tests pass on an isolated fresh database. The app now keeps
+its scoped payload's localId across failed retries, blocks overlapping attempts,
+and retires the key after successful online/offline completion. Counter outages
+remain logged analytics loss rather than failed checkout; stock-move accounting
+is unchanged. No migration is required.

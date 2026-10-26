@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { Prisma } from '@prisma/client';
+import { race } from './lockedRace';
 import { afterAll, beforeEach, expect, it } from 'vitest';
 import { prisma } from '../src/config/prisma';
 import { SaleService } from '../src/services/sale.service';
@@ -50,7 +52,10 @@ it('counts a newly committed sale once and leaves rejected sales uncounted', asy
 });
 it('concurrent and repeated localId requests return one sale and one usage increment', async () => {
   const request = input();
-  const results = await Promise.all([SaleService.create(request), SaleService.create(request)]);
+  const settled = await race(Prisma.sql`SELECT id FROM "Product" WHERE id = ${productId} FOR UPDATE`,
+    [() => SaleService.create(request), () => SaleService.create(request)]);
+  expect(settled.map(result => result.status)).toEqual(['fulfilled', 'fulfilled']);
+  const results = settled.map(result => (result as PromiseFulfilledResult<Awaited<ReturnType<typeof SaleService.create>>>).value);
   expect(results[0].id).toBe(results[1].id);
   expect((await SaleService.create(request)).id).toBe(results[0].id);
   await state(1, 9);
@@ -63,4 +68,10 @@ it('counter failure returns the committed sale and replay never duplicates it', 
   failCounterFor = undefined;
   expect((await SaleService.create(request)).id).toBe(sale.id);
   await state(1, 9, 0);
+});
+
+it('does not count a transaction rolled back after its stock update', async () => {
+  // Invalid staff FK fails the sale insert after the real stock update.
+  await expect(SaleService.create({ ...input(), userId: randomUUID() })).rejects.toThrow();
+  await state(0, 10);
 });

@@ -3,7 +3,7 @@ import express from 'express';
 import type { Server } from 'http';
 import router from './sale.routes';
 import { JWTUtil } from '../utils/jwt';
-import { resetDb, seedShop, seedProduct, table } from '../test/prismaFake';
+import { resetDb, seedShop, seedProduct, table, prismaFake } from '../test/prismaFake';
 
 vi.mock('@yebo/mcp-server', () => ({
   extractBearerToken: (header?: string) => header?.replace(/^Bearer /, ''),
@@ -41,4 +41,20 @@ it('rejects invalid requests without usage and counts only one sale across HTTP 
   expect((await request('POST', '', payload)).status).toBe(201);
   expect(table('sale')).toHaveLength(1);
   expect(table('shop')[0].monthlyTransactions).toBe(1);
+});
+
+it('returns HTTP success after commit even if the usage write fails', async () => {
+  const product = seedProduct({ shopId: 'shop_1', quantity: 10, sellPrice: 10 });
+  const counter = vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('counter unavailable'));
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const payload = { paymentMethod: 'CASH', localId: 'counter-failure', amountPaid: 10,
+      items: [{ productId: product.id, quantity: 1 }] };
+    expect((await request('POST', '', payload)).status).toBe(201);
+    expect((await request('POST', '', payload)).status).toBe(201);
+    expect(table('sale')).toHaveLength(1);
+    expect(table('product')[0].quantity).toBe(9);
+    expect(counter).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalled();
+  } finally { counter.mockRestore(); log.mockRestore(); }
 });

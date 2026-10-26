@@ -31,7 +31,7 @@ router.post(
 );
 router.get('/:id', SaleController.getById);
 
-// Create sale (usage is committed atomically by SaleService)
+// Create sale (SaleService accounts for newly committed sales)
 router.post('/', posLimiter, validateRequest(createSaleSchema), SaleController.create);
 
 // Void sale (managers only)
