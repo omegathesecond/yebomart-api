@@ -294,7 +294,7 @@ model SaleItem {
 
 // A cashier's till session: opened with a starting float, closed at end of
 // shift with a counted cash total. The cash-up reconciles the physical drawer
-// against expectedCash (openingFloat + cash sales - confirmed cash refunds),
+// against expectedCash (openingFloat + cash sales rung up during the session),
 // recording any variance (shortage/overage) for loss prevention.
 // One OPEN row per shop is enforced by the partial unique index in
 // 20261021000000_one_open_cash_session (Prisma 5 cannot express its predicate).
@@ -313,7 +313,7 @@ model CashSession {
   // Populated at cash-up (close):
   closedAt     DateTime?
   countedCash  Float? // Physical cash counted in the drawer
-  expectedCash Float? // openingFloat + cash sales - confirmed cash refunds
+  expectedCash Float? // openingFloat + Σ cash sales during the session
   variance     Float? // countedCash - expectedCash (negative = short)
 
   status CashSessionStatus @default(OPEN)
@@ -323,7 +323,7 @@ model CashSession {
   shop  Shop   @relation(fields: [shopId], references: [id], onDelete: Cascade)
   user  User?  @relation(fields: [userId], references: [id])
   sales Sale[]
-  refunds Return[]
+  cashRefunds Return[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -575,19 +575,12 @@ model Return {
   // Resolution
   type         ReturnType
   refundAmount Float      @default(0) // For REFUND type
-  // Actual payout, recorded only with successful completion. Legacy returns
-  // remain unrecorded: merchandise approval is not evidence of money paid.
-  settlementMethod PaymentMethod?
-  settlementReference String?
-  settledAt DateTime?
-  cashSessionId String?
-  cashSession CashSession? @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
 
   settlementMethod PaymentMethod?
   settlementReference String?
   settledAt DateTime?
   cashSessionId String?
-  cashSession CashSession? @relation(fields: [cashSessionId], references: [id])
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
 
   // Status
   status ReturnStatus @default(PENDING)

@@ -79,17 +79,34 @@ stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
 
+Credit sale returns (`return-credit.test.ts`): apply migration
+`20261026000000_return_credit_reversal` before deploying this API. Each completed
+CREDIT-sale return appends one uniquely return-linked negative ADJUSTMENT through
+`applyCustomerCredit`. Only STORE_CREDIT/account adjustment is supported; REFUND,
+EXCHANGE and exchange lines are rejected. The recipient is the original purchase
+debtor, and value comes from the existing sale entitlement, including tax/discount
+allocation. Repayments are account-wide, so partial/full repayment does not change
+the reversal: all payments remain intact and a negative balance is account credit,
+with no cash paid out. Missing/duplicate purchases, incompatible sale corrections,
+unsettled historical completions and ledger/balance drift require reconciliation.
+Other STORE_CREDIT return implementations must reuse the same `returnId` unique
+ledger link and must not award additional account credit for CREDIT-sale returns.
+Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
+payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
+payment/completion and competing completions, and a real trigger proves rollback.
+
 Refund settlement (2026-10-26): apply
 `20261026000000_record_refund_settlement` to dev and prod **before** deploying
-this API, then deploy the app. Completion now requires an APPROVED return;
-REFUND completion additionally requires `settlement: { method, confirmed: true,
+this API, then deploy the app. REFUND completion requires an APPROVED return and `settlement: { method, confirmed: true,
 reference? }`. CASH uses the shop's current OPEN till (including prior-day sales),
 locked against close. CARD/MOMO/EMALI record an externally completed payout with
 a required successful refund reference; this endpoint never calls or claims
 success from a provider. Only full settlement of the server-derived refund is
 supported. Store-credit and exchange returns cannot record a cash payout.
-CREDIT-sale REFUND completion is explicitly unsupported until a sale-attributed
-customer-debt settlement exists; approval alone never pays cash or changes debt.
+CREDIT-sale REFUND payouts remain unsupported. CREDIT-sale STORE_CREDIT returns
+reuse validateCreditReturn/settleCreditReturn to reverse the original debtor's
+purchase entitlement atomically, retaining repayments and creating no cash outflow.
+Approval alone never pays cash or changes debt.
 
 Existing completed returns retain null settlement fields. There is no inferred
 historical payout or recalculation of stored closed-session expected/variance.

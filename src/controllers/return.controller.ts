@@ -69,8 +69,6 @@ export const listReturnsSchema = Joi.object({
   endDate: Joi.date().optional(),
 });
 
-const refundMethods = ['CASH', 'CARD', 'MOMO', 'EMALI'];
-
 export const processReturnSchema = Joi.object({
   action: Joi.string().required().valid('approve', 'reject', 'complete'),
   settlement: Joi.object({
@@ -437,7 +435,7 @@ export class ReturnController {
           case 'complete': {
             newStatus = 'COMPLETED';
             updateData.processedAt = new Date();
-            if (returnRecord.status !== 'APPROVED')
+            if (returnRecord.type === 'REFUND' && returnRecord.status !== 'APPROVED')
               throw new ReturnEligibilityError('Approve the return before completing it');
             if (returnRecord.type === 'REFUND') {
               // Credit repayments are customer-ledger entries, not proof that
@@ -478,32 +476,7 @@ export class ReturnController {
 
             const userId = req.user!.type === 'user' ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
-
             await settleCreditReturn(tx, returnRecord, userId);
-            if (returnRecord.type === 'REFUND' && returnRecord.status !== 'APPROVED')
-              throw new ReturnEligibilityError('Approve the return before confirming settlement');
-            if (returnRecord.type === 'REFUND') {
-              const { settlementMethod, settlementReference, paymentConfirmed } = req.body;
-              if (paymentConfirmed !== true || !refundMethods.includes(settlementMethod))
-                throw new ReturnEligibilityError('Confirm actual refund payment and select its settlement method');
-              if (settlementMethod !== 'CASH' && !settlementReference?.trim())
-                throw new ReturnEligibilityError('A confirmed noncash payment reference is required');
-              if (settlementMethod === 'CASH') {
-                // Serialize with close: after waiting, recheck OPEN rather than
-                // attributing a payout to an immutable closed drawer.
-                const sessions = await tx.$queryRaw<Array<{id: string}>>`
-                  SELECT id FROM "CashSession" WHERE "shopId" = ${shopId}
-                  AND status = 'OPEN' FOR UPDATE`;
-                if (sessions.length !== 1)
-                  throw new ReturnEligibilityError('Cash payout requires exactly one open till in this shop');
-                updateData.cashSessionId = sessions[0].id;
-              }
-              updateData.settlementMethod = settlementMethod;
-              updateData.settlementReference = settlementReference?.trim() || null;
-              updateData.settledAt = new Date();
-            } else if (req.body.settlementMethod || req.body.paymentConfirmed) {
-              throw new ReturnEligibilityError('Only refund returns can record money paid');
-            }
 
             // Restock returned items and deduct exchanged-out items atomically so
             // the product quantity and the StockLog audit trail stay consistent.
