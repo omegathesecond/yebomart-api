@@ -428,6 +428,16 @@ export class ReturnController {
             const userId = req.user!.type === 'user' ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
 
+            // Lock the entire return/exchange batch in the same stable order as
+            // StockService.receive, before reading any inventory snapshots.
+            const productIds = [...new Set(
+              [...returnRecord.items, ...returnRecord.exchangeItems].map(item => item.productId),
+            )];
+            if (productIds.length) await tx.$queryRaw`
+              SELECT id FROM "Product"
+              WHERE id IN (${Prisma.join(productIds)}) AND "shopId" = ${shopId}
+              ORDER BY id FOR UPDATE`;
+
             // Restock returned items and deduct exchanged-out items atomically so
             // the product quantity and the StockLog audit trail stay consistent.
             {
@@ -449,7 +459,7 @@ export class ReturnController {
 
                   await tx.product.update({
                     where: { id: item.productId },
-                    data: { quantity: newQty },
+                    data: { quantity: { increment: item.quantity } },
                   });
                   await tx.returnItem.update({
                     where: { id: item.id },
@@ -490,7 +500,7 @@ export class ReturnController {
 
                   await tx.product.update({
                     where: { id: item.productId },
-                    data: { quantity: newQty },
+                    data: { quantity: { decrement: item.quantity } },
                   });
                   // Log stock movement (negative quantity = stock removed)
                   await tx.stockLog.create({

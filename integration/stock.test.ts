@@ -7,6 +7,7 @@ import { bulkImportSchema, updateProductSchema, bulkUpdateSchema } from '../src/
 import { StockService } from '../src/services/stock.service';
 import { SaleService } from '../src/services/sale.service';
 import { race } from './lockedRace';
+import { expectStockHistory } from './stockHistory';
 
 vi.mock('../src/services/shop.service', () => ({
   ShopService: { incrementUsage: vi.fn().mockResolvedValue(undefined) },
@@ -36,23 +37,8 @@ const receive = (quantity: number) => StockService.receive({ shopId, userId, ite
 async function overlap(operations: (() => Promise<unknown>)[]) {
   return race(Prisma.sql`SELECT id FROM "Product" WHERE id = ${productId} FOR UPDATE`, operations);
 }
-async function consistent(expected: number, count: number) {
-  expect((await prisma.product.findUniqueOrThrow({ where: { id: productId } })).quantity).toBe(expected);
-  const logs = await prisma.stockLog.findMany({ where: { productId } });
-  expect(logs).toHaveLength(count);
-  expect(10 + logs.reduce((sum, log) => sum + log.quantity, 0)).toBe(expected);
-  // Reconstruct the serialized history without relying on transaction timestamps.
-  let current = 10;
-  const remaining = [...logs];
-  while (remaining.length) {
-    const index = remaining.findIndex(log => log.previousQty === current);
-    expect(index).toBeGreaterThanOrEqual(0);
-    const [log] = remaining.splice(index, 1);
-    expect(log.newQty - log.previousQty).toBe(log.quantity);
-    current = log.newQty;
-  }
-  expect(current).toBe(expected);
-}
+const consistent = (expected: number, count: number, id = productId) =>
+  expectStockHistory(id, expected, count);
 it('overlapping removals reject one request without negative stock', async () => {
   const results = await overlap([() => adjust(-7), () => adjust(-7)]);
   expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
