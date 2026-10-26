@@ -435,7 +435,7 @@ export class ReturnController {
           case 'complete': {
             newStatus = 'COMPLETED';
             updateData.processedAt = new Date();
-            if (returnRecord.status !== 'APPROVED')
+            if (returnRecord.type === 'REFUND' && returnRecord.status !== 'APPROVED')
               throw new ReturnEligibilityError('Approve the return before completing it');
             if (returnRecord.type === 'REFUND') {
               // Credit repayments are customer-ledger entries, not proof that
@@ -476,7 +476,6 @@ export class ReturnController {
 
             const userId = req.user!.type === 'user' ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
-
             await settleCreditReturn(tx, returnRecord, userId);
 
             // Restock returned items and deduct exchanged-out items atomically so

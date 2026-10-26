@@ -81,8 +81,7 @@ run used a fresh local database with the open-till partial index applied.
 
 Refund settlement (2026-10-26): apply
 `20261026000000_record_refund_settlement` to dev and prod **before** deploying
-this API, then deploy the app. Completion now requires an APPROVED return;
-REFUND completion additionally requires `settlement: { method, confirmed: true,
+this API, then deploy the app. REFUND completion requires an APPROVED return and `settlement: { method, confirmed: true,
 reference? }`. CASH uses the shop's current OPEN till (including prior-day sales),
 locked against close. CARD/MOMO/EMALI record an externally completed payout with
 a required successful refund reference; this endpoint never calls or claims

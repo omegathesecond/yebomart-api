@@ -323,7 +323,7 @@ model CashSession {
   shop  Shop   @relation(fields: [shopId], references: [id], onDelete: Cascade)
   user  User?  @relation(fields: [userId], references: [id])
   sales Sale[]
-  refunds Return[]
+  cashRefunds Return[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -575,8 +575,7 @@ model Return {
   // Resolution
   type         ReturnType
   refundAmount Float      @default(0) // For REFUND type
-  // Actual payout, recorded only with successful completion. Legacy returns
-  // remain unrecorded: merchandise approval is not evidence of money paid.
+
   settlementMethod PaymentMethod?
   settlementReference String?
   settledAt DateTime?
