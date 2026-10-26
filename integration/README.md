@@ -92,3 +92,26 @@ tests passed with a client freshly generated from this branch's schema. The
 workspace's shared generated client had an unrelated CustomerCredit.returnId
 field, so the verification client was generated separately under /tmp and aliased
 only for the test run; shared dependencies and product schema were unchanged.
+
+Credit sale returns (`return-credit.test.ts`): apply migration
+`20261026000000_return_credit_reversal` before deploying this API. Each completed
+CREDIT-sale return appends one uniquely return-linked negative ADJUSTMENT through
+`applyCustomerCredit`. Only STORE_CREDIT/account adjustment is supported; REFUND,
+EXCHANGE and exchange lines are rejected. The recipient is the original purchase
+debtor, and value comes from the existing sale entitlement, including tax/discount
+allocation. Repayments are account-wide, so partial/full repayment does not change
+the reversal: all payments remain intact and a negative balance is account credit,
+with no cash paid out. Missing/duplicate purchases, incompatible sale corrections,
+unsettled historical completions and ledger/balance drift require reconciliation.
+Other STORE_CREDIT return implementations must reuse the same `returnId` unique
+ledger link and must not award additional account credit for CREDIT-sale returns.
+Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
+payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
+payment/completion and competing completions, and a real trigger proves rollback.
+
+Return inventory rework verification (2026-10-26): merged current main, retaining
+`settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
+sale entitlement lock. Customer settlement precedes product locks to match sale
+lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real PostgreSQL
+regressions passed on a fresh disposable local database. This includes all 17
+return-stock and return-credit tests run together, plus the full Postgres suite.
