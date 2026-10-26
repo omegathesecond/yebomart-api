@@ -78,3 +78,28 @@ retaining product attributes/bulk pricing, supplier payment locking and all ship
 stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
+
+Refund settlement (2026-10-26): apply
+`20261026000000_record_refund_settlement` to dev and prod **before** deploying
+this API, then deploy the app. Completion now requires an APPROVED return;
+REFUND completion additionally requires `settlement: { method, confirmed: true,
+reference? }`. CASH uses the shop's current OPEN till (including prior-day sales),
+locked against close. CARD/MOMO/EMALI record an externally completed payout with
+a required successful refund reference; this endpoint never calls or claims
+success from a provider. Only full settlement of the server-derived refund is
+supported. Store-credit and exchange returns cannot record a cash payout.
+CREDIT-sale REFUND completion is explicitly unsupported until a sale-attributed
+customer-debt settlement exists; approval alone never pays cash or changes debt.
+
+Existing completed returns retain null settlement fields. There is no inferred
+historical payout or recalculation of stored closed-session expected/variance.
+The Z report adds cash refunds as a separate drawer outflow and preserves gross,
+discounts, VAT, charged total and payment-method sales semantics.
+
+`refund-cash.test.ts` verifies 100+50-20=130, prior-day attribution, noncash and
+store-credit exclusion, pending/rejected/legacy exclusion, explicit confirmation,
+no-open/foreign till rejection, unpaid CREDIT refusal, concurrent retries and
+close/refund serialization, immutable closed figures, and full stock/payout
+rollback under a forced PostgreSQL completion failure. Run against the disposable
+local database after applying the migration's CHECK constraint as well as the
+open-till partial index.

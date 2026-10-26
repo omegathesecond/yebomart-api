@@ -70,6 +70,13 @@ export const listReturnsSchema = Joi.object({
 
 export const processReturnSchema = Joi.object({
   action: Joi.string().required().valid('approve', 'reject', 'complete'),
+  settlement: Joi.object({
+    method: Joi.string().required().valid('CASH', 'CARD', 'MOMO', 'EMALI'),
+    confirmed: Joi.boolean().valid(true).required(),
+    reference: Joi.string().trim().min(1).max(200).when('method', {
+      is: 'CASH', then: Joi.optional(), otherwise: Joi.required(),
+    }),
+  }).when('action', { is: 'complete', then: Joi.optional(), otherwise: Joi.forbidden() }),
   notes: Joi.string().optional().max(1000),
 });
 
@@ -343,7 +350,7 @@ export class ReturnController {
         return;
       }
 
-      const { action, notes } = req.body;
+      const { action, notes, settlement } = req.body;
       const returnId = req.params.id;
 
       const updated = await prisma.$transaction(async (tx) => {
@@ -424,6 +431,44 @@ export class ReturnController {
           case 'complete': {
             newStatus = 'COMPLETED';
             updateData.processedAt = new Date();
+            if (returnRecord.status !== 'APPROVED')
+              throw new ReturnEligibilityError('Approve the return before completing it');
+            if (returnRecord.type === 'REFUND') {
+              // Credit repayments are customer-ledger entries, not proof that
+              // this sale was paid. Never manufacture a payout from unpaid debt.
+              if (returnRecord.saleId) {
+                const sale = await tx.sale.findFirst({ where: { id: returnRecord.saleId, shopId: req.user!.shopId } });
+                if (!sale || sale.paymentMethod === 'CREDIT')
+                  throw new ReturnEligibilityError('CREDIT-sale refunds require debt settlement; payout is unsupported');
+              }
+              if (!settlement || settlement.confirmed !== true ||
+                  !['CASH', 'CARD', 'MOMO', 'EMALI'].includes(settlement.method))
+                throw new ReturnEligibilityError('Confirm the actual refund payment and settlement method');
+              if (settlement.method !== 'CASH' && !settlement.reference?.trim())
+                throw new ReturnEligibilityError('Record the successful external refund reference');
+              updateData.settlementMethod = settlement.method;
+              updateData.settlementReference = settlement.reference?.trim() || null;
+              if (settlement.method === 'CASH') {
+                // Same row lock as close(): a payout either commits before the
+                // closing tally or is refused after close. Prior-sale dates do
+                // not affect attribution; cash leaves the current drawer.
+                const session = await tx.cashSession.findFirst({
+                  where: { shopId: req.user!.shopId, status: 'OPEN' },
+                });
+                if (!session)
+                  throw new ReturnEligibilityError('Open a till before confirming a cash refund');
+                const locked = await tx.cashSession.updateMany({
+                  where: { id: session.id, shopId: req.user!.shopId, status: 'OPEN' },
+                  data: { status: 'OPEN' },
+                });
+                if (locked.count !== 1)
+                  throw new ReturnEligibilityError('Till closed before refund confirmation; no payout recorded');
+                updateData.cashSessionId = session.id;
+              }
+              updateData.settledAt = new Date();
+            } else if (settlement) {
+              throw new ReturnEligibilityError('Only REFUND returns can record a money payout');
+            }
 
             const userId = req.user!.type === 'user' ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
