@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { applyCustomerCredit } from "@services/customerCredit.service";
 import { round2 } from "@utils/tax";
+import { validateCreditReturn, settleCreditReturn } from '@services/return-credit';
 import {
   lockSale,
   loadEntitlement,
@@ -17,7 +18,7 @@ const returnDetails = Prisma.validator<Prisma.ReturnInclude>()({
   items: true,
   exchangeItems: true,
   customer: { select: { id: true, name: true } },
-  accountCredit: true,
+  creditReversal: true,
 });
 
 // Shared by creation and completion; validate even lines that do not move stock.
@@ -171,17 +172,14 @@ export class ReturnController {
       }>;
 
       const returnRecord = await prisma.$transaction(async (tx) => {
+        let debtorId = customerId;
+        if (!saleId) await validateStoreCredit(tx, { type, saleId, customerId, exchangeItems }, shopId);
         if (saleId) await lockSale(tx, saleId);
-        await validateStoreCredit(
-          tx,
-          { type, saleId, customerId, exchangeItems },
-          shopId,
-        );
-        await validateReturnProducts(tx, shopId, [
-          ...items,
-          ...(exchangeItems ?? []),
-        ]);
+        await validateReturnProducts(tx, shopId, [...items, ...(exchangeItems ?? [])]);
         if (saleId) {
+          const debt = await validateCreditReturn(tx, { saleId, shopId, customerId, type, exchangeItems: exchangeItems ?? [] });
+          if (debt) debtorId = debt.customerId;
+          else await validateStoreCredit(tx, { type, saleId, customerId, exchangeItems }, shopId);
           const remaining = await loadEntitlement(tx, saleId, shopId);
           const requested = new Map<string, any>();
           for (const item of items) {
@@ -241,8 +239,8 @@ export class ReturnController {
           data: {
             shopId,
             saleId: saleId ?? undefined,
-            customerId: customerId ?? undefined,
-            userId: req.user!.type === "user" ? req.user!.id : undefined,
+            customerId: debtorId ?? undefined,
+            userId: req.user!.type === 'user' ? req.user!.id : undefined,
             reason,
             type,
             refundAmount: type === "EXCHANGE" ? 0 : calculatedRefund,
@@ -416,7 +414,7 @@ export class ReturnController {
             id: returnId,
             shopId: req.user!.shopId,
           },
-          include: { items: true, exchangeItems: true },
+          include: { items: true, exchangeItems: true, creditReversal: true },
         });
 
         if (!returnRecord) {
@@ -424,8 +422,10 @@ export class ReturnController {
         }
         if (!["PENDING", "APPROVED"].includes(returnRecord.status))
           throw new ReturnEligibilityError("Return is already final");
-        if (action !== "reject")
-          await validateStoreCredit(tx, returnRecord, req.user!.shopId);
+        if (action !== "reject") {
+          const debt = returnRecord.saleId ? await validateCreditReturn(tx, { ...returnRecord, saleId: returnRecord.saleId }) : null;
+          if (!debt) await validateStoreCredit(tx, returnRecord, req.user!.shopId);
+        }
         if (action !== "reject" && returnRecord.saleId) {
           const remaining = await loadEntitlement(
             tx,
@@ -491,7 +491,9 @@ export class ReturnController {
             const userId = req.user!.type === "user" ? req.user!.id : undefined;
             const shopId = req.user!.shopId;
 
-            if (returnRecord.type === "STORE_CREDIT") {
+            await settleCreditReturn(tx, returnRecord, userId);
+            const sale = returnRecord.saleId ? await tx.sale.findUnique({ where: { id: returnRecord.saleId } }) : null;
+            if (returnRecord.type === "STORE_CREDIT" && sale?.paymentMethod !== "CREDIT") {
               if (returnRecord.refundAmount <= 0)
                 throw new ReturnEligibilityError(
                   "Store credit entitlement must be positive",

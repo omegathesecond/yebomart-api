@@ -585,9 +585,9 @@ model Return {
 
   // Relationships
   shop          Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  accountCredit CustomerCredit?
   customer      Customer? @relation(fields: [customerId], references: [id])
   items         ReturnItem[]
+  creditReversal CustomerCredit?
   exchangeItems ReturnExchangeItem[] // Items given in exchange
 
   @@index([shopId, createdAt])

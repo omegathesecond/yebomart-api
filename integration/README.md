@@ -79,16 +79,16 @@ stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
 
-`return-credit.test.ts` covers paid-sale store credit using the existing return
+`store-credit-return.test.ts` covers paid-sale store credit using the existing return
 entitlement allocation (including line/order discounts, VAT, product boundaries,
 partial/final returns and shared cash-refund reservations). It checks shop-scoped
-recipients, paid-receipt revalidation, rejection of receiptless/CREDIT/exchange
+recipients, paid-receipt revalidation, rejection of receiptless/unbooked-CREDIT/exchange
 combinations, retries, forced competing completions, concurrent customer ledger
 writes and rollback after injected ledger and final-status failures.
 
 Apply `20261026000000_return_account_credit` before deploying this API. It adds
-an optional unique `CustomerCredit.returnId` foreign key and the return's customer
-relation. Existing returns are not credited or revalued by the migration; an old
+the return's customer relation; the shared unique `CustomerCredit.returnId` link
+is added by `20261026000000_return_credit_reversal`. Existing returns are not credited or revalued by the migration; an old
 zero-value STORE_CREDIT reservation fails validation instead of silently posting
 an invented amount. CREDIT-sale debt settlement remains a separate operation.
 
@@ -97,3 +97,26 @@ tests passed (2 existing TODOs), and all 38 PostgreSQL tests passed, including
 10 store-credit regressions. Applied the new SQL migration to a second disposable
 database built from the original main schema; Prisma migrate diff reported no
 difference against the updated schema.
+Credit sale returns (`return-credit.test.ts`): apply migration
+`20261026000000_return_credit_reversal` before deploying this API. Each completed
+CREDIT-sale return appends one uniquely return-linked negative ADJUSTMENT through
+`applyCustomerCredit`. Only STORE_CREDIT/account adjustment is supported; REFUND,
+EXCHANGE and exchange lines are rejected. The recipient is the original purchase
+debtor, and value comes from the existing sale entitlement, including tax/discount
+allocation. Repayments are account-wide, so partial/full repayment does not change
+the reversal: all payments remain intact and a negative balance is account credit,
+with no cash paid out. Missing/duplicate purchases, incompatible sale corrections,
+unsettled historical completions and ledger/balance drift require reconciliation.
+Other STORE_CREDIT return implementations must reuse the same `returnId` unique
+ledger link and must not award additional account credit for CREDIT-sale returns.
+Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
+payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
+payment/completion and competing completions, and a real trigger proves rollback.
+
+Store-credit rework verification (2026-10-26): merged current main and retained
+`validateCreditReturn`/`settleCreditReturn` and its complete PostgreSQL suite.
+Paid-sale refunds reuse main's `creditReversal` relation and unique returnId;
+CREDIT-sale completions post only the existing negative debt ADJUSTMENT. Both
+component builds, 465 API unit tests (2 TODOs), 20 PostgreSQL return regressions
+and both paid/pay-later UI regressions passed. The account-credit migration now
+adds only the customer relation; the existing reversal migration owns returnId.
