@@ -149,6 +149,7 @@ export async function applyCustomerCredit(
     userId?: string;
     note?: string;
     saleId?: string;
+    returnId?: string;
   },
   options: { currencySymbol: string; override?: boolean; role?: string },
 ) {

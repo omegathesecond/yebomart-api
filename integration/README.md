@@ -88,8 +88,9 @@ locked against close. CARD/MOMO/EMALI record an externally completed payout with
 a required successful refund reference; this endpoint never calls or claims
 success from a provider. Only full settlement of the server-derived refund is
 supported. Store-credit and exchange returns cannot record a cash payout.
-CREDIT-sale REFUND completion is explicitly unsupported until a sale-attributed
-customer-debt settlement exists; approval alone never pays cash or changes debt.
+CREDIT-sale money payouts are unsupported. Use STORE_CREDIT/account adjustment
+to reverse debt through the shared settleCreditReturn helper; approval alone
+never pays cash or changes debt.
 
 Existing completed returns retain null settlement fields. There is no inferred
 historical payout or recalculation of stored closed-session expected/variance.
@@ -103,3 +104,25 @@ close/refund serialization, immutable closed figures, and full stock/payout
 rollback under a forced PostgreSQL completion failure. Run against the disposable
 local database after applying the migration's CHECK constraint as well as the
 open-till partial index.
+Credit sale returns (`return-credit.test.ts`): apply migration
+`20261026000000_return_credit_reversal` before deploying this API. Each completed
+CREDIT-sale return appends one uniquely return-linked negative ADJUSTMENT through
+`applyCustomerCredit`. Only STORE_CREDIT/account adjustment is supported; REFUND,
+EXCHANGE and exchange lines are rejected. The recipient is the original purchase
+debtor, and value comes from the existing sale entitlement, including tax/discount
+allocation. Repayments are account-wide, so partial/full repayment does not change
+the reversal: all payments remain intact and a negative balance is account credit,
+with no cash paid out. Missing/duplicate purchases, incompatible sale corrections,
+unsettled historical completions and ledger/balance drift require reconciliation.
+Other STORE_CREDIT return implementations must reuse the same `returnId` unique
+ledger link and must not award additional account credit for CREDIT-sale returns.
+Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
+payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
+payment/completion and competing completions, and a real trigger proves rollback.
+
+Refund requeue verification (2026-10-26): merged current main including
+validateCreditReturn/settleCreditReturn and all ten debt-settlement regressions.
+Credit tests now explicitly approve before completion; completed account adjustments
+reverse debt without cash outflows in either live cash-up or the Z report.
+Both builds, 465 API unit tests (2 TODOs), 125 app tests and all 46 real PostgreSQL
+regressions passed, including close/refund races and forced transaction rollback.

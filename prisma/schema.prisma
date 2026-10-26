@@ -594,6 +594,7 @@ model Return {
   // Relationships
   shop          Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
   items         ReturnItem[]
+  creditReversal CustomerCredit?
   exchangeItems ReturnExchangeItem[] // Items given in exchange
 
   @@index([shopId, createdAt])
@@ -867,6 +868,8 @@ model CustomerCredit {
 
   type   CreditType
   amount Float
+  returnId String? @unique
+  returnRecord Return? @relation(fields: [returnId], references: [id])
   saleId String? // If credit was from a sale
   note   String?
 
