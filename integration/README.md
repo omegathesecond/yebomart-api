@@ -82,7 +82,7 @@ run used a fresh local database with the open-till partial index applied.
 `store-credit-return.test.ts` covers paid-sale store credit using the existing return
 entitlement allocation (including line/order discounts, VAT, product boundaries,
 partial/final returns and shared cash-refund reservations). It checks shop-scoped
-recipients, paid-receipt revalidation, rejection of receiptless/CREDIT/exchange
+recipients, paid-receipt revalidation, rejection of receiptless, invalid CREDIT-recipient and exchange
 combinations, retries, forced competing completions, concurrent customer ledger
 writes and rollback after injected ledger and final-status failures.
 
@@ -92,6 +92,19 @@ the unique `CustomerCredit.returnId` link shared by both return paths. Existing
 returns are not credited or revalued by migration. Paid-sale STORE_CREDIT requires
 a positive reserved entitlement; CREDIT sales exclusively use the shipped debt
 settlement path, never an additional REFUND entry.
+`return-stock.test.ts` coordinates return completion against sales, restocks and
+returns from different original sales using `lockedRace.ts`. Exchange deductions
+and reversed exchange product orders use the same product-lock barrier. Shared
+`stockHistory.ts` assertions verify the signed movements and full previous/new
+quantity chain. A real PostgreSQL trigger rejects the final return status update
+to verify rollback of inventory, logs, restocked flags and completion status.
+All five inventory race regressions fail against the original return controller
+(including stock 12 instead of 9 for return versus sale). No migration is required.
+Verification: build and 465 unit tests passed (2 existing TODOs); all 35 Postgres
+tests passed with a client freshly generated from this branch's schema. The
+workspace's shared generated client had an unrelated CustomerCredit.returnId
+field, so the verification client was generated separately under /tmp and aliased
+only for the test run; shared dependencies and product schema were unchanged.
 
 Credit sale returns (`return-credit.test.ts`): apply migration
 `20261026000000_return_credit_reversal` before deploying this API. Each completed
@@ -116,3 +129,16 @@ negative ADJUSTMENT and keep refundAmount=0. Both paths share the unique returnI
 API and app builds passed, 465 API unit tests passed (2 existing TODOs), all 48
 PostgreSQL tests passed, and all 3 Returns UI regressions passed. Prisma migrate
 diff from current main confirms the incremental SQL adds only Return_customerId_fkey.
+Return inventory rework verification (2026-10-26): merged current main, retaining
+`settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
+sale entitlement lock. Customer settlement precedes product locks to match sale
+lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real PostgreSQL
+regressions passed on a fresh disposable local database. This includes all 17
+return-stock and return-credit tests run together, plus the full Postgres suite.
+
+Store-credit final requeue verification (2026-10-26): preserved local unpublished
+rework and merged origin/main through 94fc13d, including ordered inventory locks.
+Both builds passed; 465 API unit tests passed (2 TODOs), all 55 real PostgreSQL
+tests passed on a fresh disposable database, and all 4 Returns UI tests passed.
+The shipped validateCreditReturn/settleCreditReturn paths and pay-later UI
+regression remain intact; paid STORE_CREDIT posts only its return-linked REFUND.
