@@ -79,25 +79,30 @@ stock protections. Both component builds, 463 API unit tests (2 existing TODOs),
 10 ProductForm payload tests and all 28 real PostgreSQL tests passed. The Postgres
 run used a fresh local database with the open-till partial index applied.
 
-`store-credit-return.test.ts` covers paid-sale store credit using the existing return
-entitlement allocation (including line/order discounts, VAT, product boundaries,
-partial/final returns and shared cash-refund reservations). It checks shop-scoped
-recipients, paid-receipt revalidation, rejection of receiptless, invalid CREDIT-recipient and exchange
-combinations, retries, forced competing completions, concurrent customer ledger
-writes and rollback after injected ledger and final-status failures.
+Refund settlement (2026-10-26): apply
+`20261026000000_record_refund_settlement` to dev and prod **before** deploying
+this API, then deploy the app. REFUND completion requires an APPROVED return and `settlement: { method, confirmed: true,
+reference? }`. CASH uses the shop's current OPEN till (including prior-day sales),
+locked against close. CARD/MOMO/EMALI record an externally completed payout with
+a required successful refund reference; this endpoint never calls or claims
+success from a provider. Only full settlement of the server-derived refund is
+supported. Store-credit and exchange returns cannot record a cash payout.
+CREDIT-sale money payouts are unsupported. Use STORE_CREDIT/account adjustment
+to reverse debt through the shared settleCreditReturn helper; approval alone
+never pays cash or changes debt.
 
-Apply `20261026000000_return_account_credit` before deploying this API. It adds
-only the return's customer relation; the shipped credit-reversal migration owns
-the unique `CustomerCredit.returnId` link shared by both return paths. Existing
-returns are not credited or revalued by migration. Paid-sale STORE_CREDIT requires
-a positive reserved entitlement; CREDIT sales exclusively use the shipped debt
-settlement path, never an additional REFUND entry.
+Existing completed returns retain null settlement fields. There is no inferred
+historical payout or recalculation of stored closed-session expected/variance.
+The Z report adds cash refunds as a separate drawer outflow and preserves gross,
+discounts, VAT, charged total and payment-method sales semantics.
 
-Store-credit verification (2026-10-26): API and app builds passed; 465 API unit
-tests passed (2 existing TODOs), and all 38 PostgreSQL tests passed, including
-10 store-credit regressions. Applied the new SQL migration to a second disposable
-database built from the original main schema; Prisma migrate diff reported no
-difference against the updated schema.
+`refund-cash.test.ts` verifies 100+50-20=130, prior-day attribution, noncash and
+store-credit exclusion, pending/rejected/legacy exclusion, explicit confirmation,
+no-open/foreign till rejection, unpaid CREDIT refusal, concurrent retries and
+close/refund serialization, immutable closed figures, and full stock/payout
+rollback under a forced PostgreSQL completion failure. Run against the disposable
+local database after applying the migration's CHECK constraint as well as the
+open-till partial index.
 `return-stock.test.ts` coordinates return completion against sales, restocks and
 returns from different original sales using `lockedRace.ts`. Exchange deductions
 and reversed exchange product orders use the same product-lock barrier. Shared
@@ -128,13 +133,12 @@ Sale locks use NO KEY UPDATE to retain serialization while allowing sale-linked
 payment FK checks; this avoids a sale/customer lock cycle. Tests force overlapping
 payment/completion and competing completions, and a real trigger proves rollback.
 
-Store-credit rework verification (2026-10-26): merged current main and retained
-`validateCreditReturn`/`settleCreditReturn` and its complete PostgreSQL suite.
-Paid-sale refunds reuse main's `creditReversal` relation and unique returnId;
-CREDIT-sale completions post only the existing negative debt ADJUSTMENT. Both
-component builds, 465 API unit tests (2 TODOs), 20 PostgreSQL return regressions
-and both paid/pay-later UI regressions passed. The account-credit migration now
-adds only the customer relation; the existing reversal migration owns returnId.
+Refund requeue verification (2026-10-26): merged current main including
+validateCreditReturn/settleCreditReturn and all ten debt-settlement regressions.
+Credit tests now explicitly approve before completion; completed account adjustments
+reverse debt without cash outflows in either live cash-up or the Z report.
+Both builds, 465 API unit tests (2 TODOs), 125 app tests and all 46 real PostgreSQL
+regressions passed, including close/refund races and forced transaction rollback.
 Return inventory rework verification (2026-10-26): merged current main, retaining
 `settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
 sale entitlement lock. Customer settlement precedes product locks to match sale
@@ -142,30 +146,34 @@ lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real Postgre
 regressions passed on a fresh disposable local database. This includes all 17
 return-stock and return-credit tests run together, plus the full Postgres suite.
 
-Final store-credit requeue verification (2026-10-26): merged current main through
-94fc13d, preserving validateCreditReturn/settleCreditReturn, Returns.test.tsx,
-and ordered concurrent return inventory movements. API and app builds passed,
-465 API unit tests passed (2 existing TODOs), both return UI regressions passed,
-and all 55 PostgreSQL regressions passed together after applying the documented
-open-till partial index to the disposable database. Paid-sale credit and pay-later
-debt adjustments share the unique returnId link and remain mutually exclusive.
-Store-credit requeue verification (2026-10-26): merged current main and preserved
-`validateCreditReturn`/`settleCreditReturn` plus its entire integration suite.
-Paid receipts post one REFUND effect; CREDIT receipts post only their existing
-negative ADJUSTMENT and keep refundAmount=0. Both paths share the unique returnId.
-API and app builds passed, 465 API unit tests passed (2 existing TODOs), all 48
-PostgreSQL tests passed, and all 3 Returns UI regressions passed. Prisma migrate
-diff from current main confirms the incremental SQL adds only Return_customerId_fkey.
-Return inventory rework verification (2026-10-26): merged current main, retaining
-`settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
-sale entitlement lock. Customer settlement precedes product locks to match sale
-lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real PostgreSQL
-regressions passed on a fresh disposable local database. This includes all 17
-return-stock and return-credit tests run together, plus the full Postgres suite.
+Final refund requeue verification (2026-10-26): merged origin/main at 94fc13d,
+including ordered product locks and all current credit-debt helpers/regressions.
+Updated the newly merged return-stock fixtures to approve refunds and explicitly
+record successful external settlement; their inventory assertions remain intact.
+API and app builds passed; 465 API unit tests (2 TODOs), 125 app tests, and all
+53 real PostgreSQL regressions passed on a fresh local database with both the
+open-session index and refund settlement constraint applied. All ten credit-return
+regressions passed, including balance reversal, retries, contention and rollback.
 
-Store-credit final requeue verification (2026-10-26): preserved local unpublished
-rework and merged origin/main through 94fc13d, including ordered inventory locks.
-Both builds passed; 465 API unit tests passed (2 TODOs), all 55 real PostgreSQL
-tests passed on a fresh disposable database, and all 4 Returns UI tests passed.
-The shipped validateCreditReturn/settleCreditReturn paths and pay-later UI
-regression remain intact; paid STORE_CREDIT posts only its return-linked REFUND.
+Store-credit returns (`store-credit-return.test.ts`): paid receipts require a
+shop-local recipient and a positive reserved entitlement from the shared VAT and
+discount allocation. Completion posts one REFUND through `applyCustomerCredit`
+in the stock/status transaction. Retries and competing completions cannot post
+twice; the shared unique `CustomerCredit.returnId` links the ledger to the return.
+CREDIT-sale returns retain `validateCreditReturn`/`settleCreditReturn` and post
+only their negative debt ADJUSTMENT, never a second REFUND or cash payout.
+
+Apply `20261026000000_return_account_credit` before deploying this API: it adds
+only the return/customer relation; the shipped reversal migration owns returnId.
+The migration does not credit historical returns. Details expose recipient,
+amount and ledger entry; customer statements include the return-reference note.
+Tests cover full/partial VAT/discount allocation, mixed cash-return reservations,
+missing/foreign/moved recipients, retries, competing completions, concurrent ledger
+writes, and injected ledger/final-status failures proving complete rollback.
+
+Requeue verification (2026-10-26): merged current main and preserved the shipped
+pay-later helpers, their ten PostgreSQL regressions and Returns.test.tsx. Both
+component builds, 465 API unit tests (2 TODOs), 7 return UI tests and all 63 real
+PostgreSQL regressions passed on a fresh local database with the open-till index
+and refund settlement check applied. Cash-up exclusion now uses a valid paid
+store-credit receipt and verifies the persisted ledger and negative balance.

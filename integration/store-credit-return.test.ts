@@ -184,7 +184,11 @@ describe("completed store-credit returns (real PostgreSQL)", () => {
     const refund = await request("create", payload(2, { type: "REFUND" }));
     expect(refund.statusCode).toBe(201);
     expect(refund.body.data.refundAmount).toBe(19.05);
-    expect((await complete(refund.body.data.id)).statusCode).toBe(200);
+    expect((await request("process", { action: "approve" }, refund.body.data.id)).statusCode).toBe(200);
+    expect((await request("process", {
+      action: "complete",
+      settlement: { method: "CARD", confirmed: true, reference: "external-refund-success" },
+    }, refund.body.data.id)).statusCode).toBe(200);
     expect((await request("create", payload(1))).statusCode).toBe(400);
     const last = await request(
       "create",

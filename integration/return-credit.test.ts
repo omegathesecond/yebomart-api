@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/config/prisma";
+import { CashSessionService } from "../src/services/cashSession.service";
 import { SaleService } from "../src/services/sale.service";
 import { ReturnController } from "../src/controllers/return.controller";
 import { CustomerController } from "../src/controllers/customer.controller";
@@ -62,7 +63,10 @@ async function create(quantity = 2, extra = {}) {
 async function pending(quantity = 2) {
   const r = await create(quantity);
   expect(r.statusCode).toBe(201);
-  return r.body.data.id as string;
+  const id = r.body.data.id as string;
+  const approved = await call(ReturnController.process, { action: "approve" }, id);
+  expect(approved.statusCode).toBe(200);
+  return id;
 }
 const complete = (id: string) =>
   call(ReturnController.process, { action: "complete" }, id);
@@ -133,6 +137,7 @@ afterAll(async () => {
 });
 describe("Credit return settlement on real PostgreSQL", () => {
   it("partial then remaining full return reverse exactly the original debt", async () => {
+    const till = await CashSessionService.open({ shopId, openingFloat: 100 });
     const first = await pending();
     expect((await complete(first)).statusCode).toBe(200);
     const ledger = await consistent(60);
@@ -144,6 +149,12 @@ describe("Credit return settlement on real PostgreSQL", () => {
     });
     expect((await complete(await pending(3))).statusCode).toBe(200);
     await consistent(0);
+    expect(await CashSessionService.getCurrent(shopId)).toMatchObject({
+      expectedCash: 100, cashRefundsTotal: 0, cashRefundsCount: 0,
+    });
+    expect(await CashSessionService.zReport(till.id, shopId)).toMatchObject({
+      cashRefundsTotal: 0, session: { expectedCash: 100 },
+    });
     expect(
       (await prisma.product.findUniqueOrThrow({ where: { id: productId } }))
         .quantity,
@@ -271,7 +282,7 @@ describe("Credit return settlement on real PostgreSQL", () => {
       ).toBe(0);
       expect(
         (await prisma.return.findUniqueOrThrow({ where: { id } })).status,
-      ).toBe("PENDING");
+      ).toBe("APPROVED");
       expect(
         (await prisma.product.findUniqueOrThrow({ where: { id: productId } }))
           .quantity,
