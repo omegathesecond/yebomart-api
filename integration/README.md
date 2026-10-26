@@ -103,6 +103,20 @@ close/refund serialization, immutable closed figures, and full stock/payout
 rollback under a forced PostgreSQL completion failure. Run against the disposable
 local database after applying the migration's CHECK constraint as well as the
 open-till partial index.
+`return-stock.test.ts` coordinates return completion against sales, restocks and
+returns from different original sales using `lockedRace.ts`. Exchange deductions
+and reversed exchange product orders use the same product-lock barrier. Shared
+`stockHistory.ts` assertions verify the signed movements and full previous/new
+quantity chain. A real PostgreSQL trigger rejects the final return status update
+to verify rollback of inventory, logs, restocked flags and completion status.
+All five inventory race regressions fail against the original return controller
+(including stock 12 instead of 9 for return versus sale). No migration is required.
+Verification: build and 465 unit tests passed (2 existing TODOs); all 35 Postgres
+tests passed with a client freshly generated from this branch's schema. The
+workspace's shared generated client had an unrelated CustomerCredit.returnId
+field, so the verification client was generated separately under /tmp and aliased
+only for the test run; shared dependencies and product schema were unchanged.
+
 Credit sale returns (`return-credit.test.ts`): apply migration
 `20261026000000_return_credit_reversal` before deploying this API. Each completed
 CREDIT-sale return appends one uniquely return-linked negative ADJUSTMENT through
@@ -125,3 +139,18 @@ Credit tests now explicitly approve before completion; completed account adjustm
 reverse debt without cash outflows in either live cash-up or the Z report.
 Both builds, 465 API unit tests (2 TODOs), 125 app tests and all 46 real PostgreSQL
 regressions passed, including close/refund races and forced transaction rollback.
+Return inventory rework verification (2026-10-26): merged current main, retaining
+`settleCreditReturn` before ordered product locks and the shipped `NO KEY UPDATE`
+sale entitlement lock. Customer settlement precedes product locks to match sale
+lock ordering. Build, 465 unit tests (2 existing TODOs), and all 45 real PostgreSQL
+regressions passed on a fresh disposable local database. This includes all 17
+return-stock and return-credit tests run together, plus the full Postgres suite.
+
+Final refund requeue verification (2026-10-26): merged origin/main at 94fc13d,
+including ordered product locks and all current credit-debt helpers/regressions.
+Updated the newly merged return-stock fixtures to approve refunds and explicitly
+record successful external settlement; their inventory assertions remain intact.
+API and app builds passed; 465 API unit tests (2 TODOs), 125 app tests, and all
+53 real PostgreSQL regressions passed on a fresh local database with both the
+open-session index and refund settlement constraint applied. All ten credit-return
+regressions passed, including balance reversal, retries, contention and rollback.
