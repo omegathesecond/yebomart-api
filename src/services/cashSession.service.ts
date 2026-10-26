@@ -21,7 +21,7 @@ interface CloseSessionInput {
  *
  * A CashSession represents one cashier's till from open (starting float) to
  * close (end-of-day cash-up). The reconciliation is intentionally computed from
- * the authoritative Sale rows — cash, COMPLETED, created during the session —
+ * authoritative cash Sale rows and confirmed Return payouts for this session —
  * rather than trusting a running counter, so a power-cut mid-shift or an
  * offline-synced sale never desyncs the expected total.
  */
@@ -64,6 +64,16 @@ export class CashSessionService {
       total: agg._sum.totalAmount ?? 0,
       count: agg._count,
     };
+  }
+
+  private static async cashRefundsTotal(shopId: string, sessionId: string, db: Prisma.TransactionClient = prisma) {
+    const refunds = await db.return.aggregate({
+      where: { shopId, cashSessionId: sessionId, status: 'COMPLETED',
+        type: 'REFUND', settlementMethod: 'CASH', settledAt: { not: null } },
+      _sum: { refundAmount: true },
+      _count: true,
+    });
+    return { total: round2(refunds._sum.refundAmount ?? 0), count: refunds._count };
   }
 
   /**
@@ -126,14 +136,15 @@ export class CashSessionService {
 
     const cashSales = await this.cashSalesTotal(shopId, session.openedAt);
 
-    const cashRefundsTotal = await this.cashRefundTotal(shopId, session.id);
+    const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
       ...session,
-      cashRefundsTotal,
+      cashRefundsTotal: refunds.total,
+      cashRefundsCount: refunds.count,
       cashSalesTotal: cashSales.total,
       cashSalesCount: cashSales.count,
-      // Live drawer = float + cash taken - confirmed cash paid out.
-      expectedCash: round2(session.openingFloat + cashSales.total - cashRefundsTotal),
+      // Live drawer = float + cash sales - confirmed cash payouts.
+      expectedCash: round2(session.openingFloat + cashSales.total - refunds.total),
     };
   }
 
@@ -151,7 +162,7 @@ export class CashSessionService {
 
   /**
    * Cash up: close the session, compute expectedCash from cash sales during the
-   * shift, record the variance. Done in a transaction so the close + computed
+   * shift less recorded cash refunds, record the variance. Done in a transaction so the close + computed
    * figures commit atomically.
    */
   static async close(input: CloseSessionInput) {
@@ -185,8 +196,8 @@ export class CashSessionService {
         now,
         tx,
       );
-      const cashRefundsTotal = await this.cashRefundTotal(input.shopId, session.id, tx);
-      const expectedCash = round2(session.openingFloat + cashSales.total - cashRefundsTotal);
+      const refunds = await this.cashRefundsTotal(input.shopId, session.id, tx);
+      const expectedCash = round2(session.openingFloat + cashSales.total - refunds.total);
       return tx.cashSession.update({
         where: { id: session.id },
         data: {
@@ -255,9 +266,10 @@ export class CashSessionService {
       };
     });
 
-    const cashRefundsTotal = await this.cashRefundTotal(shopId, session.id);
+    const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
-      cashRefundsTotal,
+      cashRefundsTotal: refunds.total,
+      cashRefundsCount: refunds.count,
       session: {
         id: session.id,
         status: session.status,
@@ -265,7 +277,7 @@ export class CashSessionService {
         openedAt: session.openedAt,
         closedAt: session.closedAt,
         countedCash: session.countedCash,
-        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(p => p.method === 'CASH')?.total ?? 0) - cashRefundsTotal),
+        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) - refunds.total),
         variance: session.variance,
         notes: session.notes,
         cashier: session.user,
