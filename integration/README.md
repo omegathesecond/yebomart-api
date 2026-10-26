@@ -82,15 +82,16 @@ run used a fresh local database with the open-till partial index applied.
 `store-credit-return.test.ts` covers paid-sale store credit using the existing return
 entitlement allocation (including line/order discounts, VAT, product boundaries,
 partial/final returns and shared cash-refund reservations). It checks shop-scoped
-recipients, paid-receipt revalidation, rejection of receiptless/unbooked-CREDIT/exchange
+recipients, paid-receipt revalidation, rejection of receiptless/CREDIT/exchange
 combinations, retries, forced competing completions, concurrent customer ledger
 writes and rollback after injected ledger and final-status failures.
 
 Apply `20261026000000_return_account_credit` before deploying this API. It adds
-the return's customer relation; the shared unique `CustomerCredit.returnId` link
-is added by `20261026000000_return_credit_reversal`. Existing returns are not credited or revalued by the migration; an old
-zero-value STORE_CREDIT reservation fails validation instead of silently posting
-an invented amount. CREDIT-sale debt settlement remains a separate operation.
+only the return's customer relation; the shipped credit-reversal migration owns
+the unique `CustomerCredit.returnId` link shared by both return paths. Existing
+returns are not credited or revalued by migration. Paid-sale STORE_CREDIT requires
+a positive reserved entitlement; CREDIT sales exclusively use the shipped debt
+settlement path, never an additional REFUND entry.
 
 Store-credit verification (2026-10-26): API and app builds passed; 465 API unit
 tests passed (2 existing TODOs), and all 38 PostgreSQL tests passed, including
@@ -148,3 +149,10 @@ and ordered concurrent return inventory movements. API and app builds passed,
 and all 55 PostgreSQL regressions passed together after applying the documented
 open-till partial index to the disposable database. Paid-sale credit and pay-later
 debt adjustments share the unique returnId link and remain mutually exclusive.
+Store-credit requeue verification (2026-10-26): merged current main and preserved
+`validateCreditReturn`/`settleCreditReturn` plus its entire integration suite.
+Paid receipts post one REFUND effect; CREDIT receipts post only their existing
+negative ADJUSTMENT and keep refundAmount=0. Both paths share the unique returnId.
+API and app builds passed, 465 API unit tests passed (2 existing TODOs), all 48
+PostgreSQL tests passed, and all 3 Returns UI regressions passed. Prisma migrate
+diff from current main confirms the incremental SQL adds only Return_customerId_fkey.
