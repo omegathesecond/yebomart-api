@@ -2,6 +2,8 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { prisma } from '../src/config/prisma';
+import { ProductService } from '../src/services/product.service';
+import { bulkImportSchema, updateProductSchema, bulkUpdateSchema } from '../src/controllers/product.controller';
 import { StockService } from '../src/services/stock.service';
 import { SaleService } from '../src/services/sale.service';
 import { race } from './lockedRace';
@@ -97,4 +99,84 @@ it('opposite batch orders serialize without deadlocking', async () => {
   expect(results.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']);
   await consistent(12, 2);
   expect((await prisma.product.findUniqueOrThrow({ where: { id: other.id } })).quantity).toBe(12);
+});
+
+it('saving metadata after a sale preserves the live stock and sale log', async () => {
+  const loaded = await ProductService.getById(productId, shopId);
+  expect(loaded.quantity).toBe(10);
+  await SaleService.create({ shopId, userId, paymentMethod: 'CASH', amountPaid: 30,
+    items: [{ productId, quantity: 2 }] });
+  await ProductService.update(productId, shopId, { name: 'Renamed', sellPrice: 16 });
+  await consistent(8, 1);
+});
+it('price-only import does not default quantity or overwrite stock sold since loading', async () => {
+  await prisma.product.update({ where: { id: productId }, data: { barcode: productId } });
+  const { value, error } = bulkImportSchema.validate({ updateExisting: true, products: [
+    { barcode: productId, name: 'Imported name', costPrice: 6, sellPrice: 16 },
+  ] });
+  expect(error).toBeUndefined();
+  expect(value.products[0]).not.toHaveProperty('quantity');
+  await SaleService.create({ shopId, userId, paymentMethod: 'CASH', amountPaid: 30,
+    items: [{ productId, quantity: 2 }] });
+  expect(await ProductService.bulkImport(shopId, value.products, true)).toMatchObject({ updated: 1, errors: [] });
+  await consistent(8, 1);
+});
+it('metadata bulk updates racing a sale preserve live stock', async () => {
+  const results = await overlap([
+    () => SaleService.create({ shopId, userId, paymentMethod: 'CASH', amountPaid: 30, items: [{ productId, quantity: 2 }] }),
+    () => ProductService.bulkUpdate(shopId, [{ id: productId, sellPrice: 15 }]),
+  ]);
+  expect(results.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']);
+  await consistent(8, 1);
+});
+it('rejects absolute quantities on every existing-product service path without partial metadata changes', async () => {
+  const data = { name: 'Must not save', quantity: 99 };
+  expect(updateProductSchema.validate(data).error).toBeDefined();
+  expect(bulkUpdateSchema.validate({ updates: [{ id: productId, quantity: 99 }] }).error).toBeDefined();
+  await expect(ProductService.update(productId, shopId, data)).rejects.toThrow('Stock Adjustments');
+  await prisma.product.update({ where: { id: productId }, data: { barcode: productId } });
+  expect(await ProductService.bulkImport(shopId, [{ ...data, barcode: productId, costPrice: 1, sellPrice: 1 }], true))
+    .toMatchObject({ updated: 0, skipped: 1, errors: [{ row: 1, error: expect.stringContaining('Stock Adjustments') }] });
+  expect(await ProductService.bulkUpdate(shopId, [{ id: productId, sellPrice: 1, quantity: 99 } as any]))
+    .toMatchObject({ updated: 0, failed: 1, errors: [{ identifier: productId, error: expect.stringContaining('Stock Adjustments') }] });
+  expect((await ProductService.getById(productId, shopId)).name).toBe('Stock');
+  await consistent(10, 0);
+});
+it('intentional corrections through Stock Adjustments racing a sale retain both audited deltas', async () => {
+  const results = await overlap([
+    () => SaleService.create({ shopId, userId, paymentMethod: 'CASH', amountPaid: 30, items: [{ productId, quantity: 2 }] }),
+    () => adjust(-3),
+  ]);
+  expect(results.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']);
+  await consistent(5, 2);
+  expect(await prisma.stockLog.findFirst({ where: { productId, type: 'ADJUSTMENT' } }))
+    .toMatchObject({ quantity: -3, userId });
+});
+it('new products and new import rows retain initial stock with INITIAL logs', async () => {
+  const created = await ProductService.create({ shopId, name: 'New', costPrice: 5, sellPrice: 15, quantity: 7 });
+  expect(await prisma.stockLog.findFirst({ where: { productId: created.id } }))
+    .toMatchObject({ type: 'INITIAL', quantity: 7, previousQty: 0, newQty: 7 });
+  expect(await ProductService.bulkImport(shopId, [
+    { barcode: 'new', name: 'Imported', costPrice: 5, sellPrice: 15, quantity: 4 },
+    { barcode: 'zero', name: 'No initial stock', costPrice: 5, sellPrice: 15 },
+    { barcode: '', name: 'No barcode one', costPrice: 5, sellPrice: 15 },
+    { barcode: '', name: 'No barcode two', costPrice: 5, sellPrice: 15 },
+  ], true)).toMatchObject({ created: 4, errors: [] });
+  const imported = await prisma.product.findFirstOrThrow({ where: { shopId, barcode: 'new' } });
+  expect(imported.quantity).toBe(4);
+  expect(await prisma.stockLog.findFirst({ where: { productId: imported.id } }))
+    .toMatchObject({ type: 'INITIAL', quantity: 4, previousQty: 0, newQty: 4 });
+  expect((await prisma.product.findFirstOrThrow({ where: { shopId, barcode: 'zero' } })).quantity).toBe(0);
+});
+
+it('an attempted stale absolute count racing a sale is rejected clearly and cannot resurrect units', async () => {
+  const staleCount = { quantity: 10, name: 'Stale count' };
+  const results = await Promise.allSettled([
+    SaleService.create({ shopId, userId, paymentMethod: 'CASH', amountPaid: 30, items: [{ productId, quantity: 2 }] }),
+    ProductService.update(productId, shopId, staleCount),
+  ]);
+  expect(results[0].status).toBe('fulfilled');
+  expect(results[1].status).toBe('rejected');
+  expect((results[1] as PromiseRejectedResult).reason.message).toContain('Stock Adjustments');
+  await consistent(8, 1);
 });

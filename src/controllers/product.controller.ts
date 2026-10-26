@@ -57,7 +57,7 @@ export const updateProductSchema = Joi.object({
   category: Joi.string().optional().trim().allow(''),
   costPrice: Joi.number().optional().min(0),
   sellPrice: Joi.number().optional().min(0),
-  quantity: Joi.number().optional().integer().min(0),
+  quantity: Joi.forbidden().messages({ 'any.unknown': 'Use Stock Adjustments to change existing stock' }),
   reorderAt: Joi.number().optional().integer().min(0),
   unit: Joi.string().optional().valid('each', 'kg', 'litre', 'pack', 'box'),
   imageUrl: Joi.string().optional().uri().allow(''),
@@ -83,7 +83,7 @@ export const bulkImportSchema = Joi.object({
       category: Joi.string().optional().trim(),
       costPrice: Joi.number().required().min(0),
       sellPrice: Joi.number().required().min(0),
-      quantity: Joi.number().optional().integer().min(0).default(0),
+      quantity: Joi.number().optional().integer().min(0),
       reorderAt: Joi.number().optional().integer().min(0).default(10),
       unit: Joi.string().optional().valid('each', 'kg', 'litre', 'pack', 'box').default('each'),
     })
@@ -99,7 +99,7 @@ export const bulkUpdateSchema = Joi.object({
       barcode: Joi.string().optional(),
       costPrice: Joi.number().optional().min(0),
       sellPrice: Joi.number().optional().min(0),
-      quantity: Joi.number().optional().integer().min(0),
+      quantity: Joi.forbidden().messages({ 'any.unknown': 'Use Stock Adjustments to change existing stock' }),
       isActive: Joi.boolean().optional(),
     }).or('id', 'barcode') // Must have either id or barcode
   ).min(1).max(500).required(),
@@ -289,7 +289,7 @@ export class ProductController {
   }
 
   /**
-   * Bulk update products (prices, quantities, status)
+   * Bulk update product metadata (prices, status)
    */
   static async bulkUpdate(req: AuthRequest, res: Response): Promise<void> {
     try {
