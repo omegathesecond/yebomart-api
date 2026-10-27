@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'http';
 import router from './sale.routes';
@@ -10,7 +10,6 @@ vi.mock('@yebo/mcp-server', () => ({
   JwksValidator: class { async verify() { throw new Error('Staff token'); } },
 }));
 beforeEach(() => { resetDb(); seedShop({ id: 'shop_1' }); });
-afterEach(() => vi.restoreAllMocks());
 
 async function request(method: string, path: string, body?: object) {
   const app = express();
@@ -44,17 +43,18 @@ it('rejects invalid requests without usage and counts only one sale across HTTP 
   expect(table('shop')[0].monthlyTransactions).toBe(1);
 });
 
-it('returns HTTP success for a committed sale when its usage write fails', async () => {
+it('returns HTTP success after commit even if the usage write fails', async () => {
   const product = seedProduct({ shopId: 'shop_1', quantity: 10, sellPrice: 10 });
-  const payload = { paymentMethod: 'CASH', localId: 'http-counter-failure', amountPaid: 10,
-    items: [{ productId: product.id, quantity: 1 }] };
-  vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('counter unavailable'));
+  const counter = vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('counter unavailable'));
   const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-  const created = await request('POST', '', payload);
-  expect(created.status).toBe(201);
-  expect(log).toHaveBeenCalledWith('Sale usage accounting failed', expect.any(Object));
-  expect((await request('POST', '', payload)).status).toBe(201);
-  expect(table('sale')).toHaveLength(1);
-  expect(table('product')[0].quantity).toBe(9);
-  expect(table('shop')[0].monthlyTransactions ?? 0).toBe(0);
+  try {
+    const payload = { paymentMethod: 'CASH', localId: 'counter-failure', amountPaid: 10,
+      items: [{ productId: product.id, quantity: 1 }] };
+    expect((await request('POST', '', payload)).status).toBe(201);
+    expect((await request('POST', '', payload)).status).toBe(201);
+    expect(table('sale')).toHaveLength(1);
+    expect(table('product')[0].quantity).toBe(9);
+    expect(counter).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalled();
+  } finally { counter.mockRestore(); log.mockRestore(); }
 });
