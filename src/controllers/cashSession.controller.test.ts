@@ -662,3 +662,33 @@ describe('open → sell → close → z-report, end to end', () => {
     expect(afterClose.body.data).toBeNull();
   });
 });
+
+describe('cash session history', () => {
+  it('isolates shops, filters opening dates/status and paginates ties deterministically', async () => {
+    seedCashSession({ id: 'hist-a', shopId: 'shop_1', status: 'CLOSED', openedAt: OPENED_AT, expectedCash: 123, countedCash: 120, variance: -3 });
+    seedCashSession({ id: 'hist-b', shopId: 'shop_1', status: 'CLOSED', openedAt: OPENED_AT });
+    seedCashSession({ id: 'hist-foreign', shopId: 'shop_2', status: 'CLOSED', openedAt: OPENED_AT });
+    seedCashSession({ id: 'hist-open', shopId: 'shop_1', status: 'OPEN', openedAt: OPENED_AT });
+    seedCashSession({ id: 'hist-old', shopId: 'shop_1', status: 'CLOSED', openedAt: BEFORE_OPEN });
+    const query = { status: 'CLOSED', from: OPENED_AT.toISOString(), to: CLOSED_AT.toISOString(), limit: 1 };
+    const first = mockRes();
+    await CashSessionController.history({ ...ownerReq(), query: { ...query, page: 1 } }, first);
+    expect(first.body.data.sessions.map((s: any) => s.id)).toEqual(['hist-b']);
+    expect(first.body.data.pagination).toMatchObject({ total: 2, hasNext: true, hasPrev: false });
+    const second = mockRes();
+    await CashSessionController.history({ ...ownerReq(), query: { ...query, page: 2 } }, second);
+    expect(second.body.data.sessions).toMatchObject([{ id: 'hist-a', expectedCash: 123, countedCash: 120, variance: -3 }]);
+    expect(second.body.data.pagination).toMatchObject({ hasNext: false, hasPrev: true });
+  });
+
+  it('rejects invalid filters and unauthenticated history requests', async () => {
+    for (const query of [{ page: 0 }, { status: 'invalid' }, { from: 'bad' }, { from: CLOSED_AT.toISOString(), to: OPENED_AT.toISOString() }]) {
+      const res = mockRes();
+      await CashSessionController.history({ ...ownerReq(), query }, res);
+      expect(res.statusCode).toBe(400);
+    }
+    const res = mockRes();
+    await CashSessionController.history({ query: {} } as any, res);
+    expect(res.statusCode).toBe(401);
+  });
+});

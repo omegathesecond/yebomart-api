@@ -15,7 +15,27 @@ export const closeCashSessionSchema = Joi.object({
   notes: Joi.string().optional().max(1000),
 });
 
+export const cashSessionHistorySchema = Joi.object({
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(100).default(20),
+  status: Joi.string().valid('OPEN', 'CLOSED'),
+  from: Joi.string().isoDate(),
+  to: Joi.string().isoDate(),
+}).custom((value, helpers) => {
+  if (value.from && value.to && new Date(value.from) >= new Date(value.to)) return helpers.error('any.invalid');
+  return value;
+});
+
 export class CashSessionController {
+  static async history(req: AuthRequest, res: Response): Promise<void> {
+    if (!req.user) { ApiResponse.unauthorized(res); return; }
+    try {
+      const { value, error } = cashSessionHistorySchema.validate(req.query);
+      if (error) { ApiResponse.badRequest(res, error.message); return; }
+      ApiResponse.success(res, await CashSessionService.history(req.user.shopId, value));
+    } catch (error: any) { ApiResponse.serverError(res, error.message, error); }
+  }
+
   /**
    * Open a till for the authenticated shop with a starting float.
    * 409 if one is already open.

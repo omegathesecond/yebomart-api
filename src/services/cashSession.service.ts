@@ -1,5 +1,6 @@
 import { prisma } from '@config/prisma';
 import { Prisma } from '@prisma/client';
+import { paginate, paginationMeta } from '@utils/pagination';
 import { round2 } from '@utils/tax';
 
 interface OpenSessionInput {
@@ -26,6 +27,21 @@ interface CloseSessionInput {
  * offline-synced sale never desyncs the expected total.
  */
 export class CashSessionService {
+  static async history(shopId: string, filters: { page?: number; limit?: number; status?: 'OPEN' | 'CLOSED'; from?: string; to?: string }) {
+    const { skip, take, page, limit } = paginate(filters);
+    // Date filters apply to opening time; the upper boundary is exclusive.
+    const where: Prisma.CashSessionWhereInput = {
+      shopId,
+      status: filters.status,
+      openedAt: { ...(filters.from ? { gte: new Date(filters.from) } : {}), ...(filters.to ? { lt: new Date(filters.to) } : {}) },
+    };
+    const [sessions, total] = await prisma.$transaction([
+      prisma.cashSession.findMany({ where, skip, take, orderBy: [{ openedAt: 'desc' }, { id: 'desc' }], include: { user: { select: { id: true, name: true } } } }),
+      prisma.cashSession.count({ where }),
+    ]);
+    return { sessions, pagination: paginationMeta(total, page, limit) };
+  }
+
   /**
    * Sum of cash taken during a session: COMPLETED sales paid with CASH for this
    * shop since the session opened. We match on createdAt >= openedAt rather than

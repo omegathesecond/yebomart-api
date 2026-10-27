@@ -12,6 +12,8 @@ const router = Router();
 // All routes require authentication (shop owner or staff).
 router.use(authMiddleware);
 
+router.get('/', CashSessionController.history);
+
 // Open a till with a starting float (409 if one is already open).
 router.post('/open', validateRequest(openCashSessionSchema), CashSessionController.open);
 
