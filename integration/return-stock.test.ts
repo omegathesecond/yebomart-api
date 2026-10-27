@@ -91,24 +91,24 @@ it('returns from different sales serialize on their shared product', async () =>
   await completed(b.id);
 });
 it('exchange deductions racing a restock use the locked current quantity', async () => {
-  const record = await makeReturn(2, [{ productId, quantity: 4 }]);
+  const record = await makeReturn(4, [{ productId, quantity: 4 }]);
   const results = await overlap([() => complete(record.id),
     () => StockService.receive({ shopId, userId, items: [{ productId, quantity: 5 }] })]);
   expect(results.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']);
   expect((results[0] as PromiseFulfilledResult<unknown>).value).toBe(200);
-  await consistent(13, 3);
+  await consistent(15, 3);
 });
 it('opposite exchange product orders finish without deadlocks', async () => {
   const other = await prisma.product.create({ data: { shopId, name: 'Other', quantity: 10, costPrice: 5, sellPrice: 15 } });
   const a = await makeReturn(2, [{ productId: other.id, quantity: 1 }, { productId, quantity: 1 }]);
-  const b = await makeReturn(3, [{ productId, quantity: 1 }, { productId: other.id, quantity: 1 }]);
+  const b = await makeReturn(2, [{ productId, quantity: 1 }, { productId: other.id, quantity: 1 }]);
   expect(await overlap([() => complete(a.id), () => complete(b.id)]))
     .toEqual([{ status: 'fulfilled', value: 200 }, { status: 'fulfilled', value: 200 }]);
-  await consistent(13, 4);
+  await consistent(12, 4);
   await consistent(8, 2, other.id);
 });
 it('a database failure after inventory writes rolls back status, flags, stock and logs', async () => {
-  const record = await makeReturn(2, [{ productId, quantity: 1 }]);
+  const record = await makeReturn(1, [{ productId, quantity: 1 }]);
   // A real database trigger fails the final status write, after all inventory work.
   const suffix = randomUUID().replace(/-/g, '');
   const fn = `fail_return_${suffix}`;
@@ -128,7 +128,7 @@ it('a database failure after inventory writes rolls back status, flags, stock an
 });
 it('untracked and non-restockable lines do not move inventory', async () => {
   await prisma.product.update({ where: { id: productId }, data: { trackStock: false } });
-  const record = await makeReturn(2, [{ productId, quantity: 1 }]);
+  const record = await makeReturn(1, [{ productId, quantity: 1 }]);
   expect(await complete(record.id)).toBe(200);
   await consistent(10, 0);
   expect(await prisma.returnItem.findFirst({ where: { returnId: record.id } })).toMatchObject({ restocked: false });
@@ -137,4 +137,48 @@ it('untracked and non-restockable lines do not move inventory', async () => {
   await prisma.returnItem.updateMany({ where: { returnId: second.id }, data: { restockable: false } });
   expect(await complete(second.id)).toBe(200);
   await consistent(10, 0);
+});
+
+it('concurrent completion and a retry issue replacement merchandise exactly once', async () => {
+  const other = await prisma.product.create({ data: { shopId, name: 'Replacement', quantity: 2, costPrice: 5, sellPrice: 15 } });
+  const record = await makeReturn(2, [{ productId: other.id, quantity: 2 }]);
+  const results = await overlap([() => complete(record.id), () => complete(record.id)]);
+  expect(results.map(r => (r as PromiseFulfilledResult<number>).value).sort()).toEqual([200, 400]);
+  expect(await complete(record.id)).toBe(400);
+  await consistent(12, 1);
+  await expectStockHistory(other.id, 0, 1, 2);
+  await completed(record.id);
+});
+it('two exchanges competing for replacement stock cannot oversell', async () => {
+  const other = await prisma.product.create({ data: { shopId, name: 'Last replacement', quantity: 2, costPrice: 5, sellPrice: 15 } });
+  const a = await makeReturn(2, [{ productId: other.id, quantity: 2 }]);
+  const b = await makeReturn(2, [{ productId: other.id, quantity: 2 }]);
+  const results = await race(Prisma.sql`SELECT id FROM "Product" WHERE id = ${other.id} FOR UPDATE`, [() => complete(a.id), () => complete(b.id)]);
+  expect(results.map(r => (r as PromiseFulfilledResult<number>).value).sort()).toEqual([200, 400]);
+  await consistent(12, 1);
+  await expectStockHistory(other.id, 0, 1, 2);
+  expect(await prisma.return.count({ where: { id: { in: [a.id, b.id] }, status: 'COMPLETED' } })).toBe(1);
+  expect(await prisma.returnItem.count({ where: { returnId: { in: [a.id, b.id] }, restocked: true } })).toBe(1);
+});
+it('duplicate replacement lines are one stock demand and log, including same-product restocking', async () => {
+  await prisma.product.update({ where: { id: productId }, data: { quantity: 0 } });
+  const record = await makeReturn(2, [{ productId, quantity: 1 }, { productId, quantity: 1 }]);
+  expect(await complete(record.id)).toBe(200);
+  await expectStockHistory(productId, 0, 2, 0);
+});
+it('insufficient combined replacement stock leaves returned stock, logs and status untouched', async () => {
+  const other = await prisma.product.create({ data: { shopId, name: 'Short replacement', quantity: 1, costPrice: 5, sellPrice: 15 } });
+  const record = await makeReturn(2, [{ productId: other.id, quantity: 1 }, { productId: other.id, quantity: 1 }]);
+  expect(await complete(record.id)).toBe(400);
+  await consistent(10, 0);
+  await expectStockHistory(other.id, 1, 0, 1);
+  expect(await prisma.return.findUniqueOrThrow({ where: { id: record.id }, include: { items: true } }))
+    .toMatchObject({ status: 'APPROVED', processedAt: null, items: [{ restocked: false }] });
+});
+it('historical empty exchanges cannot complete or restock', async () => {
+  const record = await makeReturn();
+  await prisma.return.update({ where: { id: record.id }, data: { type: 'EXCHANGE', refundAmount: 0 } });
+  expect(await complete(record.id)).toBe(400);
+  await consistent(10, 0);
+  expect(await prisma.return.findUniqueOrThrow({ where: { id: record.id } })).toMatchObject({ status: 'APPROVED', processedAt: null });
 });

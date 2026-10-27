@@ -257,6 +257,16 @@ TODOs), and all four sale-usage PostgreSQL regressions passed on a fresh disposa
 local database. Coverage includes a lock-coordinated localId race, replay,
 validation rejection, post-stock transaction rollback, and injected counter-write
 failure returning the committed sale successfully. Stock-move accounting is unchanged.
+`return-stock.test.ts` also covers equal-value exchange replacement issuance:
+concurrent completion/retries issue stock once; competing exchanges cannot
+oversell; duplicate replacement lines are one demand; same-product returned
+stock is available in the batch; shortages and a forced final-write failure
+roll back stock, flags, logs and status. Replacement values use current retail
+prices plus current shop tax and must equal the original discounted, tax-aware
+return entitlement. Changed prices or incomplete historical exchanges must be
+rejected and recreated; no balance collection or payout is introduced. No new
+schema migration is required.
+
 Cash checkout/close serialization (`checkout-cash.test.ts`): CASH checkout and
 cash refund settlement reuse `CashSessionService.lockOpenSessionId` inside their
 write transactions, before product locks. A checkout holding the drawer lock
@@ -283,3 +293,9 @@ zero errors and five existing warnings. The PostgreSQL run used a fresh local
 database and an isolated schema-matched Prisma client. Repeated and overlapping
 localId requests count once; rejected/rolled-back sales do not count; a counter
 write failure returns the committed sale successfully. No new migration required.
+Exchange requeue verification (2026-10-27): preserved the existing replacement
+workflow and merged main through fe2d863, retaining the shared till-session lock.
+Both component builds passed; all 140 app tests and 491 API unit tests passed
+(2 existing API TODOs). All 12 real PostgreSQL return-stock regressions passed
+against a fresh disposable database, including competing exchanges, one-time
+completion, duplicate demand, same-product restocking and forced rollback.
