@@ -26,27 +26,18 @@ interface CloseSessionInput {
  * offline-synced sale never desyncs the expected total.
  */
 export class CashSessionService {
-  /**
-   * Sum of cash taken during a session: COMPLETED sales paid with CASH for this
-   * shop since the session opened. We match on createdAt >= openedAt rather than
-   * cashSessionId alone so that a sale rung up in the tiny window before its
-   * cashSessionId was attached (or an offline sale synced late) still counts.
-   */
+  /** Cash belongs to the drawer locked by checkout, never a timestamp window. */
   private static async cashSalesTotal(
     shopId: string,
-    openedAt: Date,
-    closedAt?: Date | null,
+    sessionId: string,
     db: Prisma.TransactionClient = prisma,
   ) {
-    const createdAt: Prisma.DateTimeFilter = { gte: openedAt };
-    if (closedAt) createdAt.lte = closedAt;
-
     const agg = await db.sale.aggregate({
       where: {
         shopId,
         status: 'COMPLETED',
         paymentMethod: 'CASH',
-        createdAt,
+        cashSessionId: sessionId,
       },
       _sum: { totalAmount: true },
       _count: true,
@@ -114,7 +105,7 @@ export class CashSessionService {
 
   /**
    * The currently OPEN session for a shop (or null), plus a live tally of the
-   * cash taken since it opened so the POS can show running expected drawer.
+   * cash assigned to it so the POS can show running expected drawer.
    */
   static async getCurrent(shopId: string) {
     const session = await prisma.cashSession.findFirst({
@@ -126,7 +117,7 @@ export class CashSessionService {
 
     if (!session) return null;
 
-    const cashSales = await this.cashSalesTotal(shopId, session.openedAt);
+    const cashSales = await this.cashSalesTotal(shopId, session.id);
 
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
@@ -141,15 +132,21 @@ export class CashSessionService {
   }
 
   /**
-   * Find the OPEN session id for a shop, if any. Used by sale creation to tag
-   * cash sales. Best-effort — never throws.
+   * Hold the same guarded row-update lock as close until the caller commits.
+   * A missing/already closing till leaves checkout unassigned. DB failures
+   * propagate; they must never masquerade as the absence of an open drawer.
+   * Acquire before product locks, as refund settlement does.
    */
-  static async findOpenSessionId(shopId: string): Promise<string | null> {
-    const session = await prisma.cashSession.findFirst({
-      where: { shopId, status: 'OPEN' },
-      select: { id: true },
+  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string): Promise<string | null> {
+    const session = await tx.cashSession.findFirst({
+      where: { shopId, status: 'OPEN' }, select: { id: true },
     });
-    return session?.id ?? null;
+    if (!session) return null;
+    const locked = await tx.cashSession.updateMany({
+      where: { id: session.id, shopId, status: 'OPEN' },
+      data: { status: 'OPEN' },
+    });
+    return locked.count === 1 ? session.id : null;
   }
 
   /**
@@ -184,8 +181,7 @@ export class CashSessionService {
       const now = new Date();
       const cashSales = await this.cashSalesTotal(
         input.shopId,
-        session.openedAt,
-        now,
+        session.id,
         tx,
       );
       const refunds = await this.cashRefundsTotal(input.shopId, session.id, tx);
@@ -207,7 +203,7 @@ export class CashSessionService {
   /**
    * Z-report: end-of-shift summary for a session. Totals by payment method,
    * transaction count, gross/net, and the cash-up figures (float, expected,
-   * counted, variance). Window is openedAt → closedAt (or now if still open).
+   * counted, variance). Cash uses session membership; other payments use openedAt → closedAt.
    */
   static async zReport(sessionId: string, shopId: string) {
     const session = await prisma.cashSession.findFirst({
@@ -233,7 +229,10 @@ export class CashSessionService {
     // One snapshot supplies both the summary and payment breakdown. Never
     // recompute historical VAT using the shop's current tax configuration.
     const sales = await prisma.sale.findMany({
-      where: { shopId, status: 'COMPLETED', createdAt },
+      where: { shopId, status: 'COMPLETED', OR: [
+        { paymentMethod: 'CASH', cashSessionId: session.id },
+        { paymentMethod: { not: 'CASH' }, createdAt },
+      ] },
       include: { items: { select: { discount: true } } },
     });
     const sum = (values: number[]) => round2(values.reduce((a, b) => a + b, 0));

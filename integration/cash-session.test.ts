@@ -61,6 +61,7 @@ describe("Postgres till transitions", () => {
     await prisma.sale.create({
       data: {
         shopId,
+        cashSessionId: session.id,
         subtotal: 40,
         totalAmount: 40,
         amountPaid: 40,
