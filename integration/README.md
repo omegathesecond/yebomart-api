@@ -250,3 +250,10 @@ need deliberate reconciliation. Coordinated tests pause actual transactions afte
 sale insertion or the close claim, observe blocked PostgreSQL backends, then
 release them. They check both orders, retry attribution, stock, lookup rollback,
 and sale/refund/close contention using the existing disposable database harness.
+
+Exchange requeue verification (2026-10-27): preserved the existing replacement
+workflow and merged main through fe2d863, retaining the shared till-session lock.
+Both component builds passed; all 140 app tests and 491 API unit tests passed
+(2 existing API TODOs). All 12 real PostgreSQL return-stock regressions passed
+against a fresh disposable database, including competing exchanges, one-time
+completion, duplicate demand, same-product restocking and forced rollback.
