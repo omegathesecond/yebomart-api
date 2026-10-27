@@ -234,7 +234,7 @@ No additional schema migration is required.
 
 Sale usage resume verification (2026-10-27): merged current main through
 4d6043c, preserving stock and customer-credit protections. Added a real Postgres
-late-stock-log failure regression proving sale/stock rollback leaves usage at zero,
+rollback regression proving failed sale/stock writes leave usage at zero,
 and an HTTP counter-failure regression proving checkout and replay return 201.
 Corrected the stale atomic-accounting route comment. Build, 470 unit/HTTP tests
 (2 existing TODOs), and all 4 sale-usage PostgreSQL tests passed. Generated an
