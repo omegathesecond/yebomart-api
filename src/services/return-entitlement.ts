@@ -3,7 +3,9 @@ import { round2 } from '@utils/tax';
 
 export class ReturnEligibilityError extends Error {}
 export async function lockSale(tx: Prisma.TransactionClient, saleId: string) {
-  await tx.$queryRaw`SELECT id FROM "Sale" WHERE id = ${saleId} FOR UPDATE`;
+  // Serialize returns/voids while allowing sale-linked payment FK checks.
+  // Ledger writers lock Customer first; FOR UPDATE would create a lock cycle.
+  await tx.$queryRaw`SELECT id FROM "Sale" WHERE id = ${saleId} FOR NO KEY UPDATE`;
 }
 
 /** Allocate the persisted charged total by discounted line value, then by unit.

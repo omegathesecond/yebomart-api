@@ -5,6 +5,10 @@ import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 
+class ReceiptError extends Error {
+  constructor(message: string, readonly status = 400) { super(message); }
+}
+
 // Both payable writers acquire PO -> supplier locks, never supplier -> PO.
 async function lockPurchaseOrder(tx: Prisma.TransactionClient, poId: string, shopId: string) {
   await tx.$queryRaw`
@@ -44,6 +48,7 @@ export const receivePurchaseOrderSchema = Joi.object({
   // Optional: receive specific line items with specific quantities.
   // If omitted, every line is received in full (the remaining qty).
   items: Joi.array()
+    .unique('poItemId')
     .optional()
     .items(
       Joi.object({
@@ -235,7 +240,11 @@ export class PurchaseOrderController {
       const poId = req.params.id;
       const { items: receiveItems, updateCost, notes } = req.body;
 
+      if (receiveItems && new Set(receiveItems.map((r: any) => r.poItemId)).size !== receiveItems.length) {
+        throw new ReceiptError('Duplicate purchase order line ids are not allowed');
+      }
       const updatedPo = await prisma.$transaction(async (tx) => {
+        // Serialize receipts before reading entitlement; a waiter sees the committed receipt.
         await lockPurchaseOrder(tx, poId, shopId);
         const po = await tx.purchaseOrder.findFirst({
           where: { id: poId, shopId },
@@ -243,17 +252,14 @@ export class PurchaseOrderController {
         });
 
         if (!po) {
-          ApiResponse.notFound(res, 'Purchase order not found');
-          return;
+          throw new ReceiptError('Purchase order not found', 404);
         }
 
         if (po.status === 'RECEIVED') {
-          ApiResponse.badRequest(res, 'Purchase order is already fully received');
-          return;
+          throw new ReceiptError('Purchase order is already fully received');
         }
         if (po.status === 'CANCELLED') {
-          ApiResponse.badRequest(res, 'Cannot receive a cancelled purchase order');
-          return;
+          throw new ReceiptError('Cannot receive a cancelled purchase order');
         }
 
         const itemById = new Map(po.items.map((i) => [i.id, i]));
@@ -266,20 +272,16 @@ export class PurchaseOrderController {
           for (const r of receiveItems as Array<{ poItemId: string; quantity: number }>) {
             const item = itemById.get(r.poItemId);
             if (!item) {
-              ApiResponse.badRequest(res, `Line item ${r.poItemId} does not belong to this purchase order`);
-              return;
+              throw new ReceiptError(`Line item ${r.poItemId} does not belong to this purchase order`);
             }
             const outstanding = item.quantity - item.receivedQty;
             if (outstanding <= 0) {
-              ApiResponse.badRequest(res, `Line item ${r.poItemId} is already fully received`);
-              return;
+              throw new ReceiptError(`Line item ${r.poItemId} is already fully received`);
             }
             if (r.quantity > outstanding) {
-              ApiResponse.badRequest(
-                res,
+              throw new ReceiptError(
                 `Cannot receive ${r.quantity} of "${item.productName}" — only ${outstanding} outstanding`
               );
-              return;
             }
             toReceive.push({ item, qty: r.quantity });
           }
@@ -291,8 +293,7 @@ export class PurchaseOrderController {
         }
 
         if (toReceive.length === 0) {
-          ApiResponse.badRequest(res, 'Nothing to receive — all items already received');
-          return;
+          throw new ReceiptError('Nothing to receive — all items already received');
         }
 
         // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
@@ -300,25 +301,32 @@ export class PurchaseOrderController {
         // understated — independent of whether a product row still exists.
         let receivedValue = 0;
 
+        // Match bulk restock's lock order before touching any product. Reads and
+        // stock logs then observe the committed quantity after competing writers.
+        const productIds = [...new Set(toReceive.map(({ item }) => item.productId))];
+        await tx.$queryRaw`
+          SELECT id FROM "Product"
+          WHERE id IN (${Prisma.join(productIds)}) AND "shopId" = ${shopId}
+          ORDER BY id FOR UPDATE`;
+
         for (const { item, qty } of toReceive) {
           receivedValue += qty * item.unitCost;
 
-          const product = await tx.product.findUnique({ where: { id: item.productId } });
+          const product = await tx.product.findUnique({ where: { id: item.productId, shopId } });
           // Product may have been deleted after the PO was raised; receiving the
           // remaining lines should still succeed, so skip the stock bump but
           // still record the receipt against the PO line below.
           if (product) {
-            const previousQty = product.quantity;
-            const newQty = previousQty + qty;
-
-            await tx.product.update({
+            const updatedProduct = await tx.product.update({
               where: { id: item.productId },
               data: {
-                quantity: newQty,
+                quantity: { increment: qty },
                 ...(updateCost ? { costPrice: item.unitCost } : {}),
               },
             });
 
+            const newQty = updatedProduct.quantity;
+            const previousQty = newQty - qty;
             await tx.stockLog.create({
               data: {
                 shopId,
@@ -396,6 +404,11 @@ export class PurchaseOrderController {
         'Purchase order received'
       );
     } catch (error: any) {
+      if (error instanceof ReceiptError) {
+        if (error.status === 404) ApiResponse.notFound(res, error.message);
+        else ApiResponse.badRequest(res, error.message);
+        return;
+      }
       ApiResponse.serverError(res, error.message, error);
     }
   }
