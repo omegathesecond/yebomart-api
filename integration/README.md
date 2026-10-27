@@ -274,3 +274,12 @@ need deliberate reconciliation. Coordinated tests pause actual transactions afte
 sale insertion or the close claim, observe blocked PostgreSQL backends, then
 release them. They check both orders, retry attribution, stock, lookup rollback,
 and sale/refund/close contention using the existing disposable database harness.
+
+Sale usage final resume verification (2026-10-27): merged main through fe2d863,
+retaining checkout/till-close locking and the existing shared best-effort sale
+accounting path. API and app builds passed; 484 API tests (2 TODOs), 140 app tests,
+and all four sale-usage PostgreSQL regressions passed. App ESLint passed with
+zero errors and five existing warnings. The PostgreSQL run used a fresh local
+database and an isolated schema-matched Prisma client. Repeated and overlapping
+localId requests count once; rejected/rolled-back sales do not count; a counter
+write failure returns the committed sale successfully. No new migration required.
