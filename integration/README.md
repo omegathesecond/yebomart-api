@@ -299,3 +299,9 @@ Both component builds passed; all 140 app tests and 491 API unit tests passed
 (2 existing API TODOs). All 12 real PostgreSQL return-stock regressions passed
 against a fresh disposable database, including competing exchanges, one-time
 completion, duplicate demand, same-product restocking and forced rollback.
+
+Sale usage resume verification (2026-10-27, main 2dcff2f): preserved the
+existing implementation and merged current main, including exchange replacements.
+API and app builds passed; 496 API tests (2 TODOs), 144 app tests, and all four
+sale-usage PostgreSQL regressions passed on a fresh disposable local database.
+App lint passed with zero errors and five existing warnings. No new migration.
