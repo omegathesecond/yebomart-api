@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { applyCustomerCredit } from "@services/customerCredit.service";
-import { round2 } from "@utils/tax";
+import { round2, computeTax } from "@utils/tax";
 import {
   validateCreditReturn,
   settleCreditReturn,
@@ -657,6 +657,13 @@ export class ReturnController {
                       "Return product not found in this shop",
                     );
 
+                  const shop = await tx.shop.findUnique({ where: { id: shopId } });
+                  if (!shop) throw new ReturnEligibilityError("Shop not found");
+                  const valuation = computeTax(item.quantity * item.unitPrice, 0, shop);
+                  await tx.returnExchangeItem.update({
+                    where: { id: item.id },
+                    data: { costPrice: product.costPrice, tax: valuation.tax, totalAmount: valuation.total },
+                  });
                   if (!product.trackStock) continue;
 
                   const previousQty = product.quantity;

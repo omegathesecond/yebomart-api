@@ -614,8 +614,20 @@ describe('return inventory isolation', () => {
     expect(table('product').find(p => p.id === 'prod_widget')!.quantity).toBe(102);
     expect(table('product').find(p => p.id === 'replacement')!.quantity).toBe(exchange ? 48 : 50);
     expect(table('return')[0].status).toBe('COMPLETED');
+    if (exchange) expect(table('returnExchangeItem')[0]).toMatchObject({ costPrice: 5, tax: 0, totalAmount: 20 });
     expect(table('stockLog')).toHaveLength(exchange ? 2 : 1);
     expect(table('stockLog').every(log => log.shopId === 'shop_1')).toBe(true);
+  });
+
+  it.each([false, true])('captures outgoing exchange tax/cost at completion (inclusive=%s)', async taxInclusive => {
+    Object.assign(table('shop')[0], { taxRate: 15, taxInclusive });
+    seedProduct({ id: 'replacement', quantity: 50, costPrice: 7, trackStock: false });
+    const created = await create(body(true));
+    expect(created.statusCode).toBe(201);
+    expect((await complete(created.body.data.id)).statusCode).toBe(200);
+    expect(table('returnExchangeItem')[0]).toMatchObject({
+      costPrice: 7, tax: taxInclusive ? 2.61 : 3, totalAmount: taxInclusive ? 20 : 23,
+    });
   });
 
   it('allows rejection to release reservations after a product disappears', async () => {
