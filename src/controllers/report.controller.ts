@@ -154,13 +154,14 @@ export class ReportController {
       monthStart.setHours(0, 0, 0, 0);
       const monthEnd = new Date();
       
-      const thisMonth = await ReportService.getProductReport(req.user.shopId, {
+      const thisMonth = await ReportService.getSalesReport(req.user.shopId, {
         startDate: monthStart,
         endDate: monthEnd,
       });
 
       ApiResponse.success(res, {
         today: {
+          ...today.summary,
           date: new Date().toISOString().split('T')[0],
           totalSales: today.summary?.totalSales || 0,
           totalTransactions: today.summary?.totalTransactions || 0,
@@ -168,13 +169,15 @@ export class ReportController {
           topProducts: today.topProducts || [],
         },
         thisWeek: {
+          ...thisWeek.summary,
           sales: thisWeek.summary?.totalSales || 0,
           transactions: thisWeek.summary?.totalTransactions || 0,
           growth: 0,
         },
         thisMonth: {
-          sales: thisMonth.products?.reduce((sum: number, p: any) => sum + p.revenue, 0) || 0,
-          transactions: thisMonth.products?.reduce((sum: number, p: any) => sum + p.quantitySold, 0) || 0,
+          ...thisMonth.summary,
+          sales: thisMonth.summary.totalSales,
+          transactions: thisMonth.summary.totalTransactions,
           growth: 0,
         },
       });

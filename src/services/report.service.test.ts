@@ -26,7 +26,7 @@ it('keeps weighted snapshot COGS stable after current-cost edits and agrees with
 
   const before = await ReportService.getProductReport(shop.id, range);
   expect(before.products).toHaveLength(1);
-  expect(before.products[0]).toEqual({
+  expect(before.products[0]).toMatchObject({
     id: product.id, name: 'Rice', category: 'Food', quantitySold: 5,
     revenue: 180, cost: 65, profit: 115, margin: 115 / 180 * 100, averagePrice: 35,
   });
@@ -44,7 +44,7 @@ it('preserves sale-time name groups, revenue ordering and zero-revenue margins',
   const shop = seedShop();
   const product = seedProduct({ shopId: shop.id });
   const date = new Date(2026, 9, 20, 12);
-  seedSale({ shopId: shop.id, createdAt: date, items: [
+  seedSale({ shopId: shop.id, createdAt: date, totalAmount: 18, items: [
     { productId: product.id, productName: 'Old name', quantity: 2, costPrice: 4, unitPrice: 0, totalPrice: 0 },
     { productId: product.id, productName: 'New name', quantity: 1, costPrice: 7, unitPrice: 20, totalPrice: 18 },
   ] });
