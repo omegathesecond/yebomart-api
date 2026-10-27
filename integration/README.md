@@ -243,3 +243,10 @@ its scoped payload's localId across failed retries, blocks overlapping attempts,
 and retires the key after successful online/offline completion. Counter outages
 remain logged analytics loss rather than failed checkout; stock-move accounting
 is unchanged. No migration is required.
+
+Sale usage requeue verification (2026-10-27): preserved the existing task branch
+and merged current main (400040b). API build, 484 unit/HTTP tests (2 existing
+TODOs), and all four sale-usage PostgreSQL regressions passed on a fresh disposable
+local database. Coverage includes a lock-coordinated localId race, replay,
+validation rejection, post-stock transaction rollback, and injected counter-write
+failure returning the committed sale successfully. Stock-move accounting is unchanged.
