@@ -174,19 +174,6 @@ export class SaleService {
       throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
     }
 
-    // Cash-drawer attribution: tag CASH sales to the open till session so the
-    // end-of-day cash-up reconciles against exactly this shift. Best-effort —
-    // a lookup failure or no open session must never block the sale, so we
-    // swallow errors and leave cashSessionId null.
-    let cashSessionId: string | null = null;
-    if (input.paymentMethod === 'CASH') {
-      try {
-        cashSessionId = await CashSessionService.findOpenSessionId(input.shopId);
-      } catch {
-        cashSessionId = null;
-      }
-    }
-
     // Create sale and decrement stock in a transaction.
     //
     // The whole transaction is wrapped in a retry loop for ONE reason: receipt
@@ -202,6 +189,12 @@ export class SaleService {
     for (let attempt = 0; ; attempt++) {
       try {
         sale = await prisma.$transaction(async (tx) => {
+          // Take the till lock before product writes, matching cash refunds.
+          // No open till (including a close that won the lock) means an
+          // explicitly unassigned sale; opening a till is not mandatory.
+          const cashSessionId = input.paymentMethod === 'CASH'
+            ? await CashSessionService.lockOpenSessionId(tx, input.shopId)
+            : null;
           // Lock before stock/sale writes: customer foreign-key KEY SHARE locks
           // must not be upgraded concurrently to FOR UPDATE later in the sale.
           if (isCredit) {

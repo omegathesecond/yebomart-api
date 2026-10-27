@@ -257,3 +257,20 @@ TODOs), and all four sale-usage PostgreSQL regressions passed on a fresh disposa
 local database. Coverage includes a lock-coordinated localId race, replay,
 validation rejection, post-stock transaction rollback, and injected counter-write
 failure returning the committed sale successfully. Stock-move accounting is unchanged.
+Cash checkout/close serialization (`checkout-cash.test.ts`): CASH checkout and
+cash refund settlement reuse `CashSessionService.lockOpenSessionId` inside their
+write transactions, before product locks. A checkout holding the drawer lock
+commits before close tallies it. If close wins, checkout remains unassigned
+(`cashSessionId: null`); no till opening is required. Lookup/database errors abort
+checkout rather than simulating a missing till. Receipt retries and localId
+idempotency retain their existing transaction boundaries.
+
+Cash totals in current/close/Z reports now use explicit session membership;
+noncash Z-report totals retain their time window. Unassigned cash is excluded,
+including late commits whose transaction timestamp predates close. No historical
+attribution is inferred and stored closed expectedCash/variance are not rewritten.
+No migration is required. Historical drawers affected by the original race may
+need deliberate reconciliation. Coordinated tests pause actual transactions after
+sale insertion or the close claim, observe blocked PostgreSQL backends, then
+release them. They check both orders, retry attribution, stock, lookup rollback,
+and sale/refund/close contention using the existing disposable database harness.
