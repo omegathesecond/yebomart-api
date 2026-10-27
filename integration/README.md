@@ -231,3 +231,11 @@ into the existing receipt branch, retaining the shipped supplier-payment locking
 `stock.service.ts`. Build and all 31 coordinated PostgreSQL regressions passed
 on a fresh local database, including concurrent payments of 80 against 100.
 No additional schema migration is required.
+
+Sale usage resume verification (2026-10-27): merged current main through
+4d6043c, preserving stock and customer-credit protections. Added a real Postgres
+late-stock-log failure regression proving sale/stock rollback leaves usage at zero,
+and an HTTP counter-failure regression proving checkout and replay return 201.
+Corrected the stale atomic-accounting route comment. Build, 470 unit/HTTP tests
+(2 existing TODOs), and all 4 sale-usage PostgreSQL tests passed. Generated an
+isolated Prisma client from this schema to avoid the stale shared client.

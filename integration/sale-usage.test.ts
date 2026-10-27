@@ -6,16 +6,22 @@ import { SaleService } from '../src/services/sale.service';
 let shopId: string, userId: string, productId: string;
 const shops: string[] = [];
 let failCounterFor: string | undefined;
-// Inject precisely the counter-write failure, leaving all sale/stock writes real.
+let failStockLogFor: string | undefined;
+// Inject targeted failures while keeping sale and stock persistence real.
 prisma.$use(async (params, next) => {
   if (params.model === 'Shop' && params.action === 'update' &&
       params.args.where.id === failCounterFor && params.args.data.monthlyTransactions) {
     throw new Error('injected counter-write failure');
   }
+  if (params.model === 'StockLog' && params.action === 'create' &&
+      params.args.data.shopId === failStockLogFor) {
+    throw new Error('injected stock-log failure');
+  }
   return next(params);
 });
 beforeEach(async () => {
   failCounterFor = undefined;
+  failStockLogFor = undefined;
   shopId = (await prisma.shop.create({ data: {
     name: 'Usage test', ownerName: 'Test', ownerPhone: randomUUID(), ownerYeboidSub: randomUUID(),
   } })).id;
@@ -25,6 +31,7 @@ beforeEach(async () => {
 });
 afterAll(async () => {
   failCounterFor = undefined;
+  failStockLogFor = undefined;
   for (const id of shops) {
     await prisma.saleItem.deleteMany({ where: { sale: { shopId: id } } });
     await prisma.stockLog.deleteMany({ where: { shopId: id } });
@@ -63,4 +70,14 @@ it('counter failure returns the committed sale and replay never duplicates it', 
   failCounterFor = undefined;
   expect((await SaleService.create(request)).id).toBe(sale.id);
   await state(1, 9, 0);
+});
+
+it('does not count a transaction that rolls back after sale and stock writes', async () => {
+  const request = input();
+  failStockLogFor = shopId;
+  await expect(SaleService.create(request)).rejects.toThrow('injected stock-log failure');
+  await state(0, 10);
+  failStockLogFor = undefined;
+  await SaleService.create(request);
+  await state(1, 9);
 });
