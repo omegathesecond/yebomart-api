@@ -1,3 +1,4 @@
+import { CashSessionService } from "@services/cashSession.service";
 import { Prisma } from "@prisma/client";
 import { applyCustomerCredit } from "@services/customerCredit.service";
 import { computeTax, round2 } from "@utils/tax";
@@ -596,18 +597,10 @@ export class ReturnController {
                 // Same row lock as close(): a payout either commits before the
                 // closing tally or is refused after close. Prior-sale dates do
                 // not affect attribution; cash leaves the current drawer.
-                const session = await tx.cashSession.findFirst({
-                  where: { shopId: req.user!.shopId, status: 'OPEN' },
-                });
-                if (!session)
-                  throw new ReturnEligibilityError('Open a till before confirming a cash refund');
-                const locked = await tx.cashSession.updateMany({
-                  where: { id: session.id, shopId: req.user!.shopId, status: 'OPEN' },
-                  data: { status: 'OPEN' },
-                });
-                if (locked.count !== 1)
-                  throw new ReturnEligibilityError('Till closed before refund confirmation; no payout recorded');
-                updateData.cashSessionId = session.id;
+                const sessionId = await CashSessionService.lockOpenSessionId(tx, req.user!.shopId);
+                if (!sessionId)
+                  throw new ReturnEligibilityError('Open till required; till may have closed before refund confirmation');
+                updateData.cashSessionId = sessionId;
               }
               updateData.settledAt = new Date();
             } else if (settlement) {
