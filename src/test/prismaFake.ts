@@ -122,6 +122,8 @@ function matchesWhere(rec: Row, where: Row | undefined, model?: ModelName): bool
   const parents = model ? (PARENT_RELATIONS[model] ?? {}) : {};
   return Object.entries(where).every(([key, cond]) => {
     if (cond === undefined) return true;
+    if (key === 'OR') return cond.some((clause: Row) => matchesWhere(rec, clause, model));
+    if (key === 'AND') return (Array.isArray(cond) ? cond : [cond]).every((clause: Row) => matchesWhere(rec, clause, model));
     const parent = parents[key];
     if (parent && cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
       const [parentModel, fk] = parent;
