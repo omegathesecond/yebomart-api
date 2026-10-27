@@ -1,477 +1,265 @@
 import { prisma } from '@config/prisma';
+import { account, totals, Movement } from './report-accounting';
+import { round2 } from '@utils/tax';
 
 interface DateRange {
   startDate: Date;
   endDate: Date;
 }
 
-// All historical COGS use the immutable sale-line snapshot.
-function saleItemCost(item: { costPrice: number; quantity: number }): number {
-  return item.costPrice * item.quantity;
-}
-
 export class ReportService {
-  /**
-   * Get daily report
-   */
-  static async getDailyReport(shopId: string, date?: Date) {
-    const targetDate = date || new Date();
-    const startOfDay = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
-    const endOfDay = new Date(startOfDay);
-    endOfDay.setDate(endOfDay.getDate() + 1);
-
-    // Get sales data
-    const sales = await prisma.sale.findMany({
-      where: {
-        shopId,
-        status: 'COMPLETED',
-        createdAt: { gte: startOfDay, lt: endOfDay },
-      },
-      include: {
-        items: true,
-        user: { select: { id: true, name: true } },
-      },
-    });
-
-    // Calculate totals
-    let totalSales = 0;
-    let totalTax = 0;
-    let totalCost = 0;
-    let cashSales = 0;
-    let momoSales = 0;
-    let emaliSales = 0;
-    let cardSales = 0;
-
-    const productSales: Map<string, { name: string; quantity: number; revenue: number }> = new Map();
-    const staffSales: Map<string, { name: string; transactions: number; total: number }> = new Map();
-
-    for (const sale of sales) {
-      totalSales += sale.totalAmount;
-      totalTax += sale.tax;
-
-      switch (sale.paymentMethod) {
-        case 'CASH':
-          cashSales += sale.totalAmount;
-          break;
-        case 'MOMO':
-          momoSales += sale.totalAmount;
-          break;
-        case 'EMALI':
-          emaliSales += sale.totalAmount;
-          break;
-        case 'CARD':
-          cardSales += sale.totalAmount;
-          break;
-      }
-
-      // Staff stats
-      if (sale.user) {
-        const existing = staffSales.get(sale.userId!) || { name: sale.user.name, transactions: 0, total: 0 };
-        existing.transactions++;
-        existing.total += sale.totalAmount;
-        staffSales.set(sale.userId!, existing);
-      }
-
-      // Product stats
-      for (const item of sale.items) {
-        totalCost += saleItemCost(item);
-        
-        const existing = productSales.get(item.productId) || { name: item.productName, quantity: 0, revenue: 0 };
-        existing.quantity += item.quantity;
-        existing.revenue += item.totalPrice;
-        productSales.set(item.productId, existing);
-      }
-    }
-
-    // Get expenses
-    const expenses = await prisma.expense.aggregate({
-      where: {
-        shopId,
-        date: { gte: startOfDay, lt: endOfDay },
-      },
-      _sum: { amount: true },
-    });
-
-    const totalExpenses = expenses._sum.amount || 0;
-    // For a VAT-registered shop the VAT collected is owed to the revenue
-    // authority, not income — so revenue/profit are reckoned NET of tax.
-    // Non-VAT shops have totalTax 0, so netRevenue === totalSales (unchanged).
-    const netRevenue = totalSales - totalTax;
-    const grossProfit = netRevenue - totalCost;
-    const netProfit = grossProfit - totalExpenses;
-
-    // Top products
-    const topProducts = Array.from(productSales.entries())
-      .map(([id, data]) => ({ id, ...data }))
-      .sort((a, b) => b.quantity - a.quantity)
-      .slice(0, 10);
-
-    // Low stock alerts
-    const lowStockProducts = await prisma.product.findMany({
-      where: {
-        shopId,
-        isActive: true,
-        trackStock: true,
-      },
-      select: { id: true, name: true, quantity: true, reorderAt: true },
-    });
-
-    const lowStock = lowStockProducts
-      .filter(p => p.quantity <= p.reorderAt)
-      .map(p => ({ id: p.id, name: p.name, quantity: p.quantity, reorderAt: p.reorderAt }));
-
-    return {
-      date: startOfDay,
-      summary: {
-        totalSales,
-        totalTax,
-        netRevenue,
-        totalTransactions: sales.length,
-        averageBasket: sales.length > 0 ? totalSales / sales.length : 0,
-        totalCost,
-        grossProfit,
-        totalExpenses,
-        netProfit,
-      },
-      paymentBreakdown: {
-        cash: cashSales,
-        momo: momoSales,
-        emali: emaliSales,
-        card: cardSales,
-      },
-      topProducts,
-      lowStock,
-      staffPerformance: Array.from(staffSales.entries()).map(([id, data]) => ({ id, ...data })),
-    };
+  private static bounds(range: DateRange) {
+    const start = new Date(range.startDate.getFullYear(), range.startDate.getMonth(), range.startDate.getDate());
+    const end = new Date(range.endDate.getFullYear(), range.endDate.getMonth(), range.endDate.getDate() + 1);
+    return { start, end };
   }
 
-  /**
-   * Get a sales report for an arbitrary date range.
-   *
-   * Returns the same authoritative summary shape as the daily report
-   * (revenue net of VAT, COGS, gross/net profit, expenses, transactions,
-   * average basket) plus the top products and a current stock snapshot,
-   * so the POS Reports page can render a single source of truth for any
-   * "today / this week / this month" range instead of recomputing from a
-   * partially-synced local cache.
-   *
-   * `endDate` is treated inclusively of the whole day: the query upper
-   * bound is the start of the day AFTER endDate, matching the daily
-   * report's [startOfDay, nextDay) convention so a same-day range
-   * ([today, today]) returns the full day's sales.
-   */
-  static async getSalesReport(shopId: string, range: DateRange) {
-    const startOfRange = new Date(
-      range.startDate.getFullYear(),
-      range.startDate.getMonth(),
-      range.startDate.getDate(),
-    );
-    const endExclusive = new Date(
-      range.endDate.getFullYear(),
-      range.endDate.getMonth(),
-      range.endDate.getDate(),
-    );
-    endExclusive.setDate(endExclusive.getDate() + 1);
+  private static async journal(shopId: string, range: DateRange) {
+    const { start, end } = this.bounds(range);
+    const [sales, returns] = await Promise.all([
+      prisma.sale.findMany({
+        where: {
+          shopId,
+          status: 'COMPLETED',
+          createdAt: { gte: start, lt: end },
+        },
+        include: { items: true },
+      }),
+      // Recognition is scoped to completion time, independently of sale time.
+      prisma.return.findMany({
+        where: {
+          shopId,
+          status: 'COMPLETED',
+          processedAt: { gte: start, lt: end },
+        },
+        include: { items: true, exchangeItems: true },
+      }),
+    ]);
+    const ids = [...new Set(returns.flatMap((r) => (r.saleId ? [r.saleId] : [])))];
+    const [originals, earlierReturns] = ids.length
+      ? await Promise.all([
+          prisma.sale.findMany({
+            where: { shopId, id: { in: ids } },
+            include: { items: true },
+          }),
+          // Earlier completions on these receipts allocate residual VAT/COGS cents,
+          // without scanning every historical return in the shop.
+          prisma.return.findMany({
+            where: {
+              shopId,
+              saleId: { in: ids },
+              status: 'COMPLETED',
+              processedAt: { lt: start, not: null },
+            },
+            include: { items: true, exchangeItems: true },
+          }),
+        ])
+      : [[], []];
+    const journal = account(sales, [...earlierReturns, ...returns], originals, start);
+    return { ...journal, sales, start, end };
+  }
 
-    const sales = await prisma.sale.findMany({
-      where: {
-        shopId,
-        status: 'COMPLETED',
-        createdAt: { gte: startOfRange, lt: endExclusive },
-      },
-      include: { items: true },
-    });
-
-    let totalSales = 0;
-    let totalTax = 0;
-    let totalCost = 0;
-    let cashSales = 0;
-    let momoSales = 0;
-    let emaliSales = 0;
-    let cardSales = 0;
-
-    const productSales: Map<string, { name: string; quantity: number; revenue: number }> = new Map();
-
-    for (const sale of sales) {
-      totalSales += sale.totalAmount;
-      totalTax += sale.tax;
-
-      switch (sale.paymentMethod) {
-        case 'CASH':
-          cashSales += sale.totalAmount;
-          break;
-        case 'MOMO':
-          momoSales += sale.totalAmount;
-          break;
-        case 'EMALI':
-          emaliSales += sale.totalAmount;
-          break;
-        case 'CARD':
-          cardSales += sale.totalAmount;
-          break;
-      }
-
-      for (const item of sale.items) {
-        totalCost += saleItemCost(item);
-
-        const existing = productSales.get(item.productId) || { name: item.productName, quantity: 0, revenue: 0 };
-        existing.quantity += item.quantity;
-        existing.revenue += item.totalPrice;
-        productSales.set(item.productId, existing);
-      }
+  private static products(rows: Movement[]) {
+    const groups = new Map<string, Movement[]>();
+    for (const row of rows) {
+      const key = JSON.stringify([row.productId, row.name]);
+      const group = groups.get(key) || [];
+      group.push(row);
+      groups.set(key, group);
     }
+    return [...groups.values()]
+      .map((items) => {
+        const s = totals(items);
+        const sales = items.filter((i) => i.quantity > 0 && i.exchangeSales === 0);
+        return {
+          id: items[0].productId,
+          name: items[0].name,
+          quantitySold: items.reduce((n, i) => n + i.quantity, 0),
+          ...s,
+          revenue: s.netRevenue,
+          cost: s.totalCost,
+          profit: s.grossProfit,
+          margin: s.netRevenue > 0 ? (s.grossProfit / s.netRevenue) * 100 : 0,
+          averagePrice: sales.length ? sales.reduce((n, i) => n + i.unitPrice, 0) / sales.length : 0,
+        };
+      })
+      .sort((a, b) => b.revenue - a.revenue);
+  }
 
-    const expenses = await prisma.expense.aggregate({
-      where: {
-        shopId,
-        date: { gte: startOfRange, lt: endExclusive },
-      },
-      _sum: { amount: true },
-    });
-
+  static async getSalesReport(shopId: string, range: DateRange) {
+    const journal = await this.journal(shopId, range);
+    const [expenses, stockProducts] = await Promise.all([
+      prisma.expense.aggregate({
+        where: { shopId, date: { gte: journal.start, lt: journal.end } },
+        _sum: { amount: true },
+      }),
+      prisma.product.findMany({
+        where: { shopId, isActive: true },
+        select: {
+          id: true,
+          name: true,
+          costPrice: true,
+          quantity: true,
+          reorderAt: true,
+          trackStock: true,
+        },
+      }),
+    ]);
+    const s = totals(journal.movements);
     const totalExpenses = expenses._sum.amount || 0;
-    // VAT collected is owed to the revenue authority, not income — revenue
-    // and profit are reckoned NET of tax (non-VAT shops have totalTax 0).
-    const netRevenue = totalSales - totalTax;
-    const grossProfit = netRevenue - totalCost;
-    const netProfit = grossProfit - totalExpenses;
-
-    const topProducts = Array.from(productSales.entries())
-      .map(([id, data]) => ({ id, ...data }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 10);
-
-    // Current stock snapshot (point-in-time, not range-scoped).
-    const stockProducts = await prisma.product.findMany({
-      where: { shopId, isActive: true },
-      select: { id: true, costPrice: true, quantity: true, reorderAt: true, trackStock: true },
-    });
-
-    const stockValue = stockProducts.reduce((sum, p) => sum + p.costPrice * p.quantity, 0);
-    const lowStockCount = stockProducts.filter(
-      p => p.trackStock && p.quantity <= p.reorderAt,
-    ).length;
-
+    const paymentBreakdown = { cash: 0, momo: 0, emali: 0, card: 0 };
+    for (const sale of journal.sales) {
+      const key = sale.paymentMethod.toLowerCase() as keyof typeof paymentBreakdown;
+      if (key in paymentBreakdown) paymentBreakdown[key] += sale.totalAmount;
+    }
+    // These are original sale tenders, not net cash flows. Refund settlements
+    // belong to the cash-up report; store credit/debt do not become cash payouts.
+    const summary = {
+      ...s,
+      ...journal.evidence,
+      profitComplete: journal.evidence.receiptlessCount === 0 && journal.evidence.unvaluedExchangeCount === 0,
+      totalTransactions: journal.sales.length,
+      averageBasket: journal.sales.length ? s.grossSales / journal.sales.length : 0,
+      totalExpenses,
+      netProfit: round2(s.grossProfit - totalExpenses),
+    };
     return {
-      range: { startDate: startOfRange, endDate: range.endDate },
-      summary: {
-        totalSales,
-        totalTax,
-        netRevenue,
-        totalTransactions: sales.length,
-        averageBasket: sales.length > 0 ? totalSales / sales.length : 0,
-        totalCost,
-        grossProfit,
-        totalExpenses,
-        netProfit,
-      },
-      paymentBreakdown: {
-        cash: cashSales,
-        momo: momoSales,
-        emali: emaliSales,
-        card: cardSales,
-      },
-      topProducts,
+      range: { startDate: journal.start, endDate: range.endDate },
+      summary,
+      paymentBreakdown,
+      topProducts: this.products(journal.movements)
+        .slice(0, 10)
+        .map((p) => ({ ...p, quantity: p.quantitySold })),
       stock: {
         totalProducts: stockProducts.length,
-        stockValue,
-        lowStockCount,
+        stockValue: stockProducts.reduce((n, p) => n + p.costPrice * p.quantity, 0),
+        lowStockCount: stockProducts.filter((p) => p.trackStock && p.quantity <= p.reorderAt).length,
       },
+      lowStock: stockProducts.filter((p) => p.trackStock && p.quantity <= p.reorderAt),
     };
   }
 
-  /**
-   * Get weekly report
-   */
-  static async getWeeklyReport(shopId: string, weekStart?: Date) {
-    const now = new Date();
-    const startOfWeek = weekStart || new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(endOfWeek.getDate() + 7);
-
-    const dailyReports = [];
-    const currentDay = new Date(startOfWeek);
-
-    while (currentDay < endOfWeek) {
-      const report = await this.getDailyReport(shopId, new Date(currentDay));
-      dailyReports.push(report);
-      currentDay.setDate(currentDay.getDate() + 1);
-    }
-
-    // Aggregate
-    let totalSales = 0;
-    let totalTax = 0;
-    let totalTransactions = 0;
-    let totalCost = 0;
-    let totalExpenses = 0;
-
-    for (const report of dailyReports) {
-      totalSales += report.summary.totalSales;
-      totalTax += report.summary.totalTax;
-      totalTransactions += report.summary.totalTransactions;
-      totalCost += report.summary.totalCost;
-      totalExpenses += report.summary.totalExpenses;
-    }
-
-    const netRevenue = totalSales - totalTax;
-
+  static async getDailyReport(shopId: string, date = new Date()) {
+    const report = await this.getSalesReport(shopId, {
+      startDate: date,
+      endDate: date,
+    });
+    const staff = await this.getStaffReport(shopId, {
+      startDate: date,
+      endDate: date,
+    });
     return {
-      weekStart: startOfWeek,
-      weekEnd: endOfWeek,
-      summary: {
-        totalSales,
-        totalTax,
-        netRevenue,
-        totalTransactions,
-        averageDaily: totalSales / 7,
-        totalCost,
-        grossProfit: netRevenue - totalCost,
-        totalExpenses,
-        netProfit: netRevenue - totalCost - totalExpenses,
-      },
-      dailyBreakdown: dailyReports.map(r => ({
-        date: r.date,
-        sales: r.summary.totalSales,
-        transactions: r.summary.totalTransactions,
-        profit: r.summary.netProfit,
+      ...report,
+      date: report.range.startDate,
+      staffPerformance: staff.staff.map((s) => ({
+        ...s,
+        transactions: s.transactionCount,
+        total: s.totalSales,
       })),
     };
   }
 
-  /**
-   * Get product performance report
-   */
-  static async getProductReport(shopId: string, range: DateRange) {
-    const saleItems = await prisma.saleItem.findMany({
-      where: {
-        sale: {
-          shopId,
-          status: 'COMPLETED',
-          createdAt: { gte: range.startDate, lte: range.endDate },
-        },
-      },
-      select: {
-        productId: true, productName: true, quantity: true,
-        totalPrice: true, unitPrice: true, costPrice: true,
-      },
+  static async getWeeklyReport(shopId: string, weekStart?: Date) {
+    const now = new Date();
+    const start = weekStart || new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+    const last = new Date(start);
+    last.setDate(last.getDate() + 6);
+    const report = await this.getSalesReport(shopId, {
+      startDate: start,
+      endDate: last,
     });
-
-    // Current product data is descriptive only; historical costs belong to sale lines.
-    const productIds = saleItems.map(item => item.productId);
-    const products = await prisma.product.findMany({
-      where: { id: { in: productIds } },
-      select: { id: true, category: true },
-    });
-
-    const productMap = new Map(products.map(p => [p.id, p]));
-
-    // Preserve grouping by both id and sale-time name, including the existing
-    // unweighted average unit price across lines (not across units).
-    const groups = new Map<string, {
-      id: string; name: string; quantity: number; revenue: number;
-      cost: number; unitPriceTotal: number; lines: number;
-    }>();
-    for (const item of saleItems) {
-      const key = JSON.stringify([item.productId, item.productName]);
-      const group = groups.get(key) || {
-        id: item.productId, name: item.productName, quantity: 0,
-        revenue: 0, cost: 0, unitPriceTotal: 0, lines: 0,
-      };
-      group.quantity += item.quantity;
-      group.revenue += item.totalPrice;
-      group.cost += saleItemCost(item);
-      group.unitPriceTotal += item.unitPrice;
-      group.lines++;
-      groups.set(key, group);
+    const dailyBreakdown = [];
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(start);
+      date.setDate(date.getDate() + i);
+      const daily = await this.getSalesReport(shopId, {
+        startDate: date,
+        endDate: date,
+      });
+      dailyBreakdown.push({
+        date,
+        sales: daily.summary.totalSales,
+        transactions: daily.summary.totalTransactions,
+        profit: daily.summary.netProfit,
+      });
     }
-
-    const productPerformance = Array.from(groups.values()).map(group => {
-      const { revenue, cost } = group;
-      return {
-        id: group.id,
-        name: group.name,
-        category: productMap.get(group.id)?.category || 'Uncategorized',
-        quantitySold: group.quantity,
-        revenue,
-        cost,
-        profit: revenue - cost,
-        margin: revenue > 0 ? ((revenue - cost) / revenue) * 100 : 0,
-        averagePrice: group.unitPriceTotal / group.lines,
-      };
-    });
-
-    // Sort by revenue
-    productPerformance.sort((a, b) => b.revenue - a.revenue);
-
-    // Category breakdown
-    const categoryMap = new Map<string, { revenue: number; quantity: number }>();
-    for (const product of productPerformance) {
-      const existing = categoryMap.get(product.category) || { revenue: 0, quantity: 0 };
-      existing.revenue += product.revenue;
-      existing.quantity += product.quantitySold;
-      categoryMap.set(product.category, existing);
-    }
-
+    const weekEnd = new Date(last);
+    weekEnd.setDate(weekEnd.getDate() + 1);
     return {
-      range,
-      products: productPerformance,
-      categories: Array.from(categoryMap.entries())
-        .map(([name, data]) => ({ name, ...data }))
-        .sort((a, b) => b.revenue - a.revenue),
+      weekStart: start,
+      weekEnd,
+      summary: {
+        ...report.summary,
+        averageDaily: report.summary.totalSales / 7,
+      },
+      dailyBreakdown,
     };
   }
 
-  /**
-   * Get staff performance report
-   */
+  static async getProductReport(shopId: string, range: DateRange) {
+    const journal = await this.journal(shopId, range);
+    const rows = this.products(journal.movements);
+    const products = await prisma.product.findMany({
+      where: { shopId, id: { in: rows.map((r) => r.id) } },
+      select: { id: true, category: true },
+    });
+    const categoriesById = new Map(products.map((p) => [p.id, p.category]));
+    const performance = rows.map((p) => ({
+      ...p,
+      category: categoriesById.get(p.id) || 'Uncategorized',
+    }));
+    const categories = new Map<string, { revenue: number; quantity: number }>();
+    for (const p of performance) {
+      const c = categories.get(p.category) || { revenue: 0, quantity: 0 };
+      c.revenue = round2(c.revenue + p.revenue);
+      c.quantity += p.quantitySold;
+      categories.set(p.category, c);
+    }
+    return {
+      range,
+      products: performance,
+      adjustments: journal.evidence,
+      categories: [...categories.entries()].map(([name, c]) => ({ name, ...c })).sort((a, b) => b.revenue - a.revenue),
+    };
+  }
+
   static async getStaffReport(shopId: string, range: DateRange) {
+    const journal = await this.journal(shopId, range);
     const users = await prisma.user.findMany({
       where: { shopId },
       select: { id: true, name: true, role: true },
     });
-
-    const staffPerformance = await Promise.all(
-      users.map(async (user) => {
-        const [sales, voids] = await Promise.all([
-          prisma.sale.aggregate({
-            where: {
-              shopId,
-              userId: user.id,
-              status: 'COMPLETED',
-              createdAt: { gte: range.startDate, lte: range.endDate },
-            },
-            _sum: { totalAmount: true },
-            _count: true,
-            _avg: { totalAmount: true },
-          }),
-          prisma.sale.count({
-            where: {
-              shopId,
-              userId: user.id,
-              status: 'VOIDED',
-              createdAt: { gte: range.startDate, lte: range.endDate },
-            },
-          }),
-        ]);
-
+    // Keep unattributed owner/deleted-staff activity visible so rows reconcile.
+    const ids = new Set([...journal.movements.map((r) => r.staffId), ...journal.sales.map((s) => s.userId)]);
+    const staffUsers = [...users];
+    for (const id of ids)
+      if (!users.some((u) => u.id === id)) staffUsers.push({ id: id || '', name: 'Unattributed', role: 'OWNER' });
+    const staff = await Promise.all(
+      staffUsers.map(async (user) => {
+        const id = user.id || null;
+        const s = totals(journal.movements.filter((r) => r.staffId === id));
+        const transactions = journal.sales.filter((s) => s.userId === id);
+        const voidCount = await prisma.sale.count({
+          where: {
+            shopId,
+            userId: id,
+            status: 'VOIDED',
+            createdAt: { gte: journal.start, lt: journal.end },
+          },
+        });
         return {
-          id: user.id,
-          name: user.name,
-          role: user.role,
-          totalSales: sales._sum.totalAmount || 0,
-          transactionCount: sales._count,
-          averageTransaction: sales._avg.totalAmount || 0,
-          voidCount: voids,
+          ...user,
+          ...s,
+          transactionCount: transactions.length,
+          averageTransaction: transactions.length ? s.grossSales / transactions.length : 0,
+          voidCount,
         };
-      })
+      }),
     );
-
-    // Sort by total sales
-    staffPerformance.sort((a, b) => b.totalSales - a.totalSales);
-
     return {
       range,
-      staff: staffPerformance,
+      staff: staff.sort((a, b) => b.totalSales - a.totalSales),
+      adjustments: journal.evidence,
     };
   }
 

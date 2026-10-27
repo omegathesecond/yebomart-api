@@ -132,8 +132,7 @@ function matchesWhere(rec: Row, where: Row | undefined, model?: ModelName): bool
     const val = rec[key];
     if (cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
       if ('in' in cond) return (cond.in as any[]).includes(val);
-      if ('not' in cond) return val !== cond.not;
-      let ok = true;
+      let ok = !('not' in cond) || val !== cond.not;
       if ('gte' in cond) ok = ok && val >= cond.gte;
       if ('gt' in cond) ok = ok && val > cond.gt;
       if ('lte' in cond) ok = ok && val <= cond.lte;

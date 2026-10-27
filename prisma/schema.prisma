@@ -599,6 +599,7 @@ model Return {
 
   @@index([shopId, createdAt])
   @@index([saleId])
+  @@index([shopId, status, processedAt])
   @@index([shopId, cashSessionId])
 }
 
@@ -631,6 +632,12 @@ model ReturnExchangeItem {
   productName String
   quantity    Int
   unitPrice   Float
+
+  // Immutable outgoing merchandise valuation, captured at completion.
+  // Null identifies historical exchanges without tax/cost evidence.
+  costPrice   Float?
+  tax         Float?
+  totalAmount Float?
 
   // Relationships
   return Return @relation(fields: [returnId], references: [id], onDelete: Cascade)

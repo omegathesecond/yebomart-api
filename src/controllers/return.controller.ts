@@ -724,6 +724,17 @@ export class ReturnController {
                       "Return product not found in this shop",
                     );
 
+                  const shop = await tx.shop.findUnique({ where: { id: shopId } });
+                  if (!shop) throw new ReturnEligibilityError("Shop not found");
+                  // Replacement unitPrice already includes VAT. Keep snapshots on
+                  // each persisted line; stock demand above is grouped by product.
+                  for (const line of returnRecord.exchangeItems.filter(line => line.productId === item.productId)) {
+                    const valuation = computeTax(line.quantity * line.unitPrice, 0, { ...shop, taxInclusive: true });
+                    await tx.returnExchangeItem.update({
+                      where: { id: line.id },
+                      data: { costPrice: product.costPrice, tax: valuation.tax, totalAmount: valuation.total },
+                    });
+                  }
                   if (!product.trackStock) continue;
 
                   const previousQty = product.quantity;
