@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SaleService } from '../services/sale.service';
-import { ReturnController } from './return.controller';
+import { ReturnController, createReturnSchema } from './return.controller';
 import {
   resetDb,
   seedShop,
@@ -285,7 +285,7 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
     expect(created.status).toBe('PENDING');
   });
 
-  it('does not book a refund for non-REFUND types even when lines have value', async () => {
+  it('rejects an exchange without replacement merchandise', async () => {
     const sale = seedShopSale();
 
     const res = mockRes();
@@ -306,8 +306,8 @@ describe('ReturnController.create — shop-scoping & input trust', () => {
       res,
     );
 
-    expect(res.statusCode).toBe(201);
-    expect(res.body.data.refundAmount).toBe(0);
+    expect(res.statusCode).toBe(400);
+    expect(table('return')).toHaveLength(0);
   });
 
   it('allows a receiptless return (no saleId) and derives refund from the lines', async () => {
@@ -375,7 +375,7 @@ describe('cumulative sale entitlement', () => {
     seedProduct({ id: 'replacement' });
     const created = await create(sale.id, 5, {
       type: 'EXCHANGE',
-      exchangeItems: [{ productId: 'replacement', productName: 'Replacement', quantity: 1, unitPrice: 50 }],
+      exchangeItems: [{ productId: 'replacement', productName: 'Replacement', quantity: 5, unitPrice: 50 }],
     });
     expect(created.statusCode).toBe(201);
     if (status === 'APPROVED') {
@@ -533,8 +533,9 @@ describe('return inventory isolation', () => {
   });
   const body = (exchange = false) => ({
     reason: 'Wrong size', type: exchange ? 'EXCHANGE' : 'REFUND',
+    saleId: exchange ? seedShopSale().id : undefined,
     items: [line('prod_widget')],
-    exchangeItems: exchange ? [line('replacement')] : [],
+    ...(exchange ? { exchangeItems: [line('replacement')] } : {}),
   });
   async function create(payload: any) {
     const res = mockRes();
@@ -561,7 +562,7 @@ describe('return inventory isolation', () => {
   it.each(['returned', 'exchange'])('rejects foreign %s inventory at creation', async (kind) => {
     seedShop({ id: 'shop_2' });
     seedProduct({ id: 'foreign', shopId: 'shop_2' });
-    const payload = body();
+    const payload = body(kind === 'exchange');
     if (kind === 'returned') payload.items = [line('foreign', { restockable: false })];
     else payload.exchangeItems = [line('foreign')];
     const before = snapshot();
@@ -572,7 +573,7 @@ describe('return inventory isolation', () => {
   });
 
   it.each(['returned', 'exchange'])('rejects missing %s products at creation', async (kind) => {
-    const payload = body();
+    const payload = body(kind === 'exchange');
     if (kind === 'returned') payload.items = [line('missing')];
     else payload.exchangeItems = [line('missing')];
     const before = snapshot();
@@ -636,5 +637,108 @@ describe('return inventory isolation', () => {
     expect((await complete(created.body.data.id)).statusCode).toBe(200);
     expect(table('product').map(p => p.quantity)).toEqual([100, 100]);
     expect(table('stockLog')).toHaveLength(0);
+  });
+});
+
+describe('equal-value replacement merchandise', () => {
+  const returned = { productId: 'prod_widget', productName: 'Untrusted', quantity: 2, unitPrice: 999, restockable: true };
+  async function create(exchangeItems: unknown[], extra = {}) {
+    const sale = seedShopSale({ receiptNumber: `exchange-${table('sale').length}` });
+    const res = mockRes();
+    await ReturnController.create(req({ saleId: sale.id, reason: 'Wrong size', type: 'EXCHANGE', items: [returned], exchangeItems, ...extra }), res);
+    return res;
+  }
+  async function process(id: string, action = 'complete') {
+    const res = mockRes();
+    await ReturnController.process({ ...req({ action }), params: { id } }, res);
+    return res;
+  }
+  const replacement = (quantity = 2) => ({ productId: 'replacement', quantity, unitPrice: 0.01, productName: 'Tampered' });
+  const snapshot = () => structuredClone({ products: table('product'), returns: table('return'), items: table('returnItem'), logs: table('stockLog') });
+
+  it('aggregates duplicates and derives names/prices from shop products, never the request', async () => {
+    seedProduct({ id: 'replacement', name: 'Real replacement' });
+    const res = await create([replacement(1), replacement(1)]);
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data).toMatchObject({ refundAmount: 0, exchangeItems: [{ productName: 'Real replacement', quantity: 2, unitPrice: 10 }] });
+    expect(res.body.data.exchangeItems).toHaveLength(1);
+    expect((await process(res.body.data.id)).statusCode).toBe(200);
+    expect(table('product').find(p => p.id === 'replacement')!.quantity).toBe(98);
+    const before = snapshot();
+    expect((await process(res.body.data.id)).statusCode).toBe(400);
+    expect(snapshot()).toEqual(before);
+  });
+  it.each([[], [replacement(1)], [replacement(3)], [{ productId: 'foreign', quantity: 2 }]])('rejects missing, unequal or foreign replacements: %j', async (lines) => {
+    seedProduct({ id: 'replacement' });
+    seedProduct({ id: 'foreign', shopId: 'shop_2' });
+    expect((await create(lines)).statusCode).toBe(400);
+    expect(table('return')).toHaveLength(0);
+  });
+  it('compares tax-inclusive replacement value against discounted original entitlement', async () => {
+    Object.assign(table('shop')[0], { taxRate: 15, taxInclusive: false });
+    seedProduct({ id: 'replacement', sellPrice: 8 });
+    const sale = seedShopSale({ subtotal: 50, discount: 10, tax: 6, totalAmount: 46 });
+    const res = mockRes();
+    await ReturnController.create(req({ saleId: sale.id, reason: 'Wrong size', type: 'EXCHANGE', items: [returned], exchangeItems: [replacement()] }), res);
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data.items[0].unitPrice).toBe(9.2);
+    expect(res.body.data.exchangeItems[0].unitPrice).toBe(9.2);
+  });
+  it('rejects already-persisted empty exchanges during approval and completion', async () => {
+    seedProduct({ id: 'replacement' });
+    const res = await create([replacement()]);
+    table('returnExchangeItem').splice(0);
+    const before = snapshot();
+    for (const action of ['approve', 'complete']) {
+      const result = await process(res.body.data.id, action);
+      expect(result.statusCode).toBe(400);
+      expect(result.body.message).toContain('at least one replacement');
+    }
+    expect(snapshot()).toEqual(before);
+  });
+  it('rejects non-exchange replacement fields, including empty arrays', async () => {
+    expect((await create([], { type: 'REFUND' })).statusCode).toBe(400);
+    expect((await create([replacement()], { type: 'STORE_CREDIT' })).statusCode).toBe(400);
+  });
+  it('checks duplicate persisted replacement quantities together, rolling back all writes on shortage', async () => {
+    seedProduct({ id: 'replacement', quantity: 1 });
+    const res = await create([replacement()]);
+    const line = table('returnExchangeItem')[0];
+    line.quantity = 1;
+    table('returnExchangeItem').push({ ...line, id: 'duplicate' });
+    const before = snapshot();
+    const result = await process(res.body.data.id);
+    expect(result.statusCode).toBe(400);
+    expect(result.body.message).toContain('Insufficient stock');
+    expect(snapshot()).toEqual(before);
+  });
+  it('uses same-product restocks in the batch before checking stock sufficiency', async () => {
+    table('product')[0].quantity = 0;
+    const res = await create([{ productId: 'prod_widget', quantity: 2 }]);
+    expect((await process(res.body.data.id)).statusCode).toBe(200);
+    expect(table('product')[0].quantity).toBe(0);
+    expect(table('stockLog').map(log => log.quantity)).toEqual([2, -2]);
+  });
+  it('revalidates replacement prices at completion with no partial stock changes', async () => {
+    seedProduct({ id: 'replacement' });
+    const res = await create([replacement()]);
+    table('product').find(p => p.id === 'replacement')!.sellPrice = 12;
+    const before = snapshot();
+    expect((await process(res.body.data.id)).statusCode).toBe(400);
+    expect(snapshot()).toEqual(before);
+  });
+});
+
+
+describe('replacement request contract', () => {
+  const body = { saleId: 'sale', type: 'EXCHANGE', reason: 'Wrong size', items: [{ productId: 'returned', productName: 'Returned', quantity: 1, unitPrice: 10 }] };
+  it('requires replacement IDs and quantities, and rejects client prices and names', () => {
+    expect(createReturnSchema.validate(body).error).toBeDefined();
+    expect(createReturnSchema.validate({ ...body, exchangeItems: [] }).error).toBeDefined();
+    expect(createReturnSchema.validate({ ...body, exchangeItems: [{ productId: 'replacement', quantity: 1 }] }).error).toBeUndefined();
+    expect(createReturnSchema.validate({ ...body, exchangeItems: [{ productId: 'replacement', quantity: 1, unitPrice: 0.01 }] }).error).toBeDefined();
+    expect(createReturnSchema.validate({ ...body, exchangeItems: [{ productId: 'replacement', quantity: 1, productName: 'Fake' }] }).error).toBeDefined();
+    for (const type of ['REFUND', 'STORE_CREDIT'])
+      expect(createReturnSchema.validate({ ...body, type, exchangeItems: [] }).error).toBeDefined();
   });
 });

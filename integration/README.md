@@ -222,3 +222,13 @@ into the existing receipt branch, retaining the shipped supplier-payment locking
 `stock.service.ts`. Build and all 31 coordinated PostgreSQL regressions passed
 on a fresh local database, including concurrent payments of 80 against 100.
 No additional schema migration is required.
+
+`return-stock.test.ts` also covers equal-value exchange replacement issuance:
+concurrent completion/retries issue stock once; competing exchanges cannot
+oversell; duplicate replacement lines are one demand; same-product returned
+stock is available in the batch; shortages and a forced final-write failure
+roll back stock, flags, logs and status. Replacement values use current retail
+prices plus current shop tax and must equal the original discounted, tax-aware
+return entitlement. Changed prices or incomplete historical exchanges must be
+rejected and recreated; no balance collection or payout is introduced. No new
+schema migration is required.
