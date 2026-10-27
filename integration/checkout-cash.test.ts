@@ -64,10 +64,6 @@ for (const saleFirst of [true, false]) it(`serializes checkout and close with ${
     : await ordered('CashSession', 'updateMany', close, sale);
   const saved = await prisma.sale.findFirstOrThrow({ where: { shopId } });
   expect(saved.cashSessionId).toBe(saleFirst ? session.id : null);
-  const closed = await prisma.cashSession.findUniqueOrThrow({ where: { id: session.id } });
-  // Even the losing sale's DB transaction timestamp falls inside the old
-  // timestamp window. Membership must exclude it from the closed drawer.
-  expect(saved.createdAt.getTime()).toBeLessThanOrEqual(closed.closedAt!.getTime());
   expect(await checkout(localId)).toMatchObject({ id: saved.id });
   expect(await prisma.sale.count({ where: { shopId } })).toBe(1);
   expect(await prisma.product.findUniqueOrThrow({ where: { id: productId } })).toMatchObject({ quantity: 9 });
@@ -99,4 +95,16 @@ it('checkout and refund share till-before-product ordering while close waits', a
   const report = await tills.zReport(session.id, shopId);
   expect(report.session.expectedCash).toBe(closed.expectedCash);
   expect(100 + report.byPaymentMethod[0].total - report.cashRefundsTotal).toBe(closed.expectedCash);
+});
+
+it('uses drawer membership despite overlapping or skewed sale timestamps', async () => {
+  const session = await tills.open({ shopId, openingFloat: 100 });
+  await checkout();
+  await prisma.sale.updateMany({ where: { shopId }, data: { createdAt: new Date(session.openedAt.getTime() - 86400000) } });
+  await prisma.sale.create({ data: { shopId, subtotal: 999, totalAmount: 999, amountPaid: 999, paymentMethod: 'CASH', createdAt: session.openedAt } });
+  expect(await tills.close({ shopId, sessionId: session.id, countedCash: 120 })).toMatchObject({ expectedCash: 120, variance: 0 });
+  const report = await tills.zReport(session.id, shopId);
+  expect(report.transactionCount).toBe(1);
+  expect(report.byPaymentMethod).toEqual([{ method: 'CASH', total: 20, discount: 0, count: 1 }]);
+  expect(report.session.expectedCash).toBe(120);
 });
