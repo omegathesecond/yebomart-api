@@ -5,13 +5,16 @@ import { Prisma } from '@prisma/client';
 import router from './product.routes';
 import { JWTUtil } from '../utils/jwt';
 import { createProductSchema, updateProductSchema } from '../controllers/product.controller';
-import { prisma, resetDb, seedProduct, table } from '../test/prismaFake';
+import { prisma, resetDb, seedUser, seedProduct, table } from '../test/prismaFake';
 
 vi.mock('@yebo/mcp-server', () => ({
   extractBearerToken: (header?: string) => header?.replace(/^Bearer /, ''),
   JwksValidator: class { async verify() { throw new Error('Staff token'); } },
 }));
-beforeEach(resetDb);
+beforeEach(() => {
+  resetDb();
+  seedUser({ id: 'staff_1', shopId: 'shop_1', role: 'MANAGER', isActive: true });
+});
 
 async function request(method: string, path: string, body?: object) {
   const app = express();

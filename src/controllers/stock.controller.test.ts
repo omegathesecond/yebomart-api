@@ -27,15 +27,14 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// managerAuth (imported below) wraps authMiddleware, which tries a YeboID
-// (JWKS, real network) verify first and falls back to the yebomart-signed
-// staff HS256 path only when that throws. Tests must never hit the network,
-// so we force every token down the staff path and let extractBearerToken do
-// its real, trivial job of pulling the token out of the header.
+// Exercise real staff JWTs and owner authentication without JWKS network calls.
 vi.mock('@yebo/mcp-server', () => ({
-  JwksValidator: vi.fn().mockImplementation(() => ({
-    verify: vi.fn().mockRejectedValue(new Error('not a YeboID token')),
-  })),
+  JwksValidator: class {
+    async verify(token: string) {
+      if (token === 'test-yeboid-owner') return { userId: 'test-owner' };
+      throw new Error('not a YeboID token');
+    }
+  },
   extractBearerToken: (header?: string) => header?.replace(/^Bearer\s+/i, '') ?? null,
 }));
 
@@ -45,6 +44,7 @@ import { JWTUtil } from '../utils/jwt';
 import {
   resetDb,
   seedShop,
+  seedUser,
   seedProduct,
   seedSale,
   seedStockLog,
@@ -483,6 +483,11 @@ describe('stock write routes — managerAuth gates CASHIER off /stock/adjust and
   }
 
   function signStaff(role: 'OWNER' | 'MANAGER' | 'CASHIER') {
+    if (role === 'OWNER') {
+      table('shop').find((shop) => shop.id === shopId)!.ownerYeboidSub = 'test-owner';
+      return 'test-yeboid-owner';
+    }
+    seedUser({ id: 'user_1', shopId, role, isActive: true });
     return JWTUtil.generateAccessToken({ id: 'user_1', shopId, role, type: 'user' });
   }
 

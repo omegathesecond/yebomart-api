@@ -151,10 +151,11 @@ export class CashSessionService {
    * Hold the same guarded row-update lock as close until the caller commits.
    * A missing/already closing till leaves checkout unassigned. DB failures
    * propagate; they must never masquerade as the absence of an open drawer.
-   * Acquire before product locks, as refund settlement does.
+   * Acquire before sale/product locks, as refund settlement does. A supplied
+   * session ID requires that exact drawer to remain open (cash-sale voids).
    */
-  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string): Promise<string | null> {
-    const session = await tx.cashSession.findFirst({
+  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string, sessionId?: string): Promise<string | null> {
+    const session = sessionId ? { id: sessionId } : await tx.cashSession.findFirst({
       where: { shopId, status: 'OPEN' }, select: { id: true },
     });
     if (!session) return null;
@@ -162,6 +163,9 @@ export class CashSessionService {
       where: { id: session.id, shopId, status: 'OPEN' },
       data: { status: 'OPEN' },
     });
+    if (sessionId && locked.count !== 1) {
+      throw new Error('Cannot void a cash sale from a closed till. Use the return/refund settlement flow to record the refund.');
+    }
     return locked.count === 1 ? session.id : null;
   }
 

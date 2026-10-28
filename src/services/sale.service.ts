@@ -26,6 +26,7 @@ function isUniqueViolationOn(err: unknown, field: string): boolean {
 }
 
 export class SaleDiscountError extends Error {}
+export class SaleDiscountPermissionError extends Error {}
 
 /** Validate against authoritative values without rounding away an excess. */
 function validateDiscount(discount: number, maximum: Prisma.Decimal, label: string): void {
@@ -83,6 +84,21 @@ export class SaleService {
         include: { items: true },
       });
       if (existing) return existing;
+    }
+
+    // A missing userId denotes the authenticated shop owner (the controller
+    // derives it from auth, never from the request body). Staff permissions and
+    // roles must be current: a login token can outlive a permission change.
+    if ((input.discount ?? 0) !== 0 || input.items.some(item => (item.discount ?? 0) !== 0)) {
+      if (input.userId) {
+        const staff = await prisma.user.findFirst({
+          where: { id: input.userId, shopId: input.shopId, isActive: true },
+          select: { role: true, canDiscount: true },
+        });
+        if (!staff || !(staff.role === 'OWNER' || staff.role === 'MANAGER' || staff.canDiscount)) {
+          throw new SaleDiscountPermissionError('You do not have permission to apply discounts');
+        }
+      }
     }
 
     // Get all products
@@ -503,6 +519,16 @@ export class SaleService {
    */
   static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
     const updatedSale = await prisma.$transaction(async (tx) => {
+      // Drawer membership/payment method are immutable. Read them before taking
+      // locks so all cash writers follow till -> sale -> product ordering.
+      const membership = await tx.sale.findFirst({
+        where: { id: saleId, shopId },
+        select: { paymentMethod: true, cashSessionId: true },
+      });
+      if (!membership) throw new Error('Sale not found');
+      if (membership.paymentMethod === 'CASH' && membership.cashSessionId) {
+        await CashSessionService.lockOpenSessionId(tx, shopId, membership.cashSessionId);
+      }
       await lockSale(tx, saleId);
       // Compare-and-set takes the sale row lock before any financial/stock writes.
       // A concurrent void waits, then fails this predicate after the winner commits.

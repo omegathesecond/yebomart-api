@@ -33,6 +33,24 @@ function getJwksValidator(): JwksValidator {
   return cachedJwksValidator;
 }
 
+/** Resolve only shop-scoped staff sessions; never trust a token's role. */
+async function resolveStaff(decoded: IDecodedToken): Promise<IDecodedToken | null> {
+  if (decoded.type !== 'user' || typeof decoded.id !== 'string' || !decoded.id ||
+      typeof decoded.shopId !== 'string' || !decoded.shopId) return null;
+
+  const user = await prisma.user.findFirst({
+    where: { id: decoded.id, shopId: decoded.shopId },
+    select: { id: true, shopId: true, phone: true, email: true, role: true, isActive: true },
+  });
+  if (!user || !user.isActive || user.id !== decoded.id || user.shopId !== decoded.shopId ||
+      (user.role !== 'MANAGER' && user.role !== 'CASHIER')) return null;
+
+  return {
+    id: user.id, shopId: user.shopId, phone: user.phone,
+    email: user.email ?? undefined, role: user.role, type: 'user',
+  };
+}
+
 /**
  * Authenticate a request as a shop OWNER (YeboID JWT) or STAFF member
  * (yebomart-signed HS256). Populates req.user uniformly. Most routes use this.
@@ -45,17 +63,21 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       return;
     }
 
-    // Try YeboID first — RS256 + JWKS. If it parses + validates, this is an
-    // owner. If it errors (wrong issuer / wrong signing alg / bad signature),
-    // fall through to staff HS256 path.
+    // Only token verification may fall through to staff authentication. A
+    // database failure after successful owner verification must fail closed.
+    let ownerId: string | undefined;
     try {
-      const auth = await getJwksValidator().verify(token);
-      req.yeboidUserId = auth.userId;
+      ownerId = (await getJwksValidator().verify(token)).userId;
+    } catch {
+      // Not a valid YeboID token — try the signed staff token below.
+    }
+    if (ownerId) {
+      req.yeboidUserId = ownerId;
 
       // Owner → resolve to the Shop they own. One indexed lookup; sub-ms in
       // practice.
       const shop = await prisma.shop.findUnique({
-        where: { ownerYeboidSub: auth.userId },
+        where: { ownerYeboidSub: ownerId },
         select: { id: true, ownerPhone: true, ownerEmail: true },
       });
 
@@ -78,8 +100,6 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       };
       next();
       return;
-    } catch {
-      // Not a valid YeboID token — try staff HS256 below.
     }
 
     const decoded = JWTUtil.verifyAccessToken(token);
@@ -87,10 +107,15 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       ApiResponse.unauthorized(res, 'Invalid or expired token');
       return;
     }
-    req.user = decoded;
+    const staff = await resolveStaff(decoded);
+    if (!staff) {
+      ApiResponse.unauthorized(res, 'Staff account not found or inactive');
+      return;
+    }
+    req.user = staff;
     next();
   } catch (error) {
-    ApiResponse.unauthorized(res, 'Authentication failed');
+    ApiResponse.serverError(res, 'Authentication check failed');
   }
 };
 
@@ -122,38 +147,12 @@ export const staffAuth = requireRole('OWNER', 'MANAGER', 'CASHIER');
  * doesn't reject if missing. Used by /api/billing/plans-style public-ish
  * endpoints that personalize when authed.
  */
-export const optionalAuth = async (req: AuthRequest, _res: Response, next: NextFunction): Promise<void> => {
-  try {
-    const token = extractBearerToken(req.headers.authorization);
-    if (!token) {
-      next();
-      return;
-    }
-    try {
-      const auth = await getJwksValidator().verify(token);
-      const shop = await prisma.shop.findUnique({
-        where: { ownerYeboidSub: auth.userId },
-        select: { id: true, ownerPhone: true, ownerEmail: true },
-      });
-      if (shop) {
-        req.yeboidUserId = auth.userId;
-        req.user = {
-          id: shop.id,
-          shopId: shop.id,
-          phone: shop.ownerPhone,
-          email: shop.ownerEmail ?? undefined,
-          role: 'OWNER' as UserRole,
-          type: 'shop',
-        };
-      }
-    } catch {
-      const decoded = JWTUtil.verifyAccessToken(token);
-      if (decoded) req.user = decoded;
-    }
-  } catch {
-    // Optional — never throw to next().
+export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  if (!req.headers.authorization) {
+    next();
+    return;
   }
-  next();
+  await authMiddleware(req, res, next);
 };
 
 /**
