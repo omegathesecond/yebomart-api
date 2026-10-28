@@ -26,11 +26,13 @@ vi.mock('./shop.service', () => ({
 }));
 
 import { SaleService } from './sale.service';
+import { ShopService } from './shop.service';
 import { CustomerController } from '../controllers/customer.controller';
 import {
   prismaFake,
   resetDb,
   seedShop,
+  seedUser,
   seedProduct,
   seedCustomer,
   table,
@@ -40,6 +42,7 @@ let shopId: string;
 
 beforeEach(() => {
   resetDb();
+  vi.clearAllMocks();
   const shop = seedShop();
   shopId = shop.id;
 });
@@ -571,5 +574,49 @@ describe('SaleService.create — authoritative discount bounds', () => {
     expect(sale.items[0].totalPrice).toBe(0);
     expect(sale.subtotal).toBe(0);
     expect(sale.totalAmount).toBe(0);
+  });
+});
+
+
+describe('SaleService.create — current discount permission', () => {
+  it.each([
+    { discount: 1, itemsDiscount: 0 },
+    { discount: 0, itemsDiscount: 1 },
+  ])('denies unauthorized discounts without any writes: %j', async ({ discount, itemsDiscount }) => {
+    const staff = seedUser({ shopId, canDiscount: false });
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 10 });
+    const customer = seedCustomer({ shopId });
+    const before = JSON.stringify(['sale', 'saleItem', 'product', 'stockLog', 'customer', 'customerCredit', 'shop'].map(table));
+    await expect(SaleService.create(saleInput({ userId: staff.id, customerId: customer.id,
+      paymentMethod: 'CREDIT', discount,
+      items: [{ productId: product.id, quantity: 1, discount: itemsDiscount }],
+    }))).rejects.toThrow('You do not have permission to apply discounts');
+    expect(JSON.stringify(['sale', 'saleItem', 'product', 'stockLog', 'customer', 'customerCredit', 'shop'].map(table))).toBe(before);
+    expect(ShopService.incrementUsage).not.toHaveBeenCalled();
+  });
+
+  it.each(['OWNER', 'MANAGER', 'CASHIER'])('allows current %s permission and rejects revocation after login', async role => {
+    const staff = seedUser({ shopId, role, canDiscount: role === 'CASHIER' });
+    const product = seedProduct({ shopId, sellPrice: 10, quantity: 10 });
+    const input = saleInput({ userId: staff.id, amountPaid: 10, localId: 'discount-sale', discount: 1,
+      items: [{ productId: product.id, quantity: 1, discount: 1 }],
+    });
+    const sale = await SaleService.create(input);
+    await prismaFake.user.update({ where: { id: staff.id }, data: { role: 'CASHIER', canDiscount: false } });
+    expect((await SaleService.create(input)).id).toBe(sale.id);
+    expect(table('stockLog')).toHaveLength(1);
+    await expect(SaleService.create({ ...input, localId: 'new-sale' })).rejects.toThrow(/permission/);
+    await SaleService.create({ ...input, localId: 'zero-sale', discount: 0,
+      items: [{ productId: product.id, quantity: 1, discount: 0 }] });
+    expect(table('sale')).toHaveLength(2);
+  });
+
+  it('rejects staff from another shop or inactive staff', async () => {
+    const product = seedProduct({ shopId, sellPrice: 10 });
+    for (const staff of [seedUser({ shopId: 'other', role: 'MANAGER' }), seedUser({ shopId, isActive: false, canDiscount: true })]) {
+      await expect(SaleService.create(saleInput({ userId: staff.id, discount: 1, amountPaid: 10,
+        items: [{ productId: product.id, quantity: 1 }],
+      }))).rejects.toThrow(/permission/);
+    }
   });
 });
