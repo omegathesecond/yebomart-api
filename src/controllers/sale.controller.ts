@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import Joi from 'joi';
-import { SaleService, SaleDiscountError } from '@services/sale.service';
+import { SaleService, SaleDiscountError, SaleDiscountPermissionError } from '@services/sale.service';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { settlePendingCharge } from '@middleware/billing.middleware';
@@ -162,6 +162,10 @@ export class SaleController {
 
       ApiResponse.created(res, sale, 'Sale completed successfully');
     } catch (error: any) {
+      if (error instanceof SaleDiscountPermissionError) {
+        ApiResponse.forbidden(res, error.message);
+        return;
+      }
       if (error instanceof SaleDiscountError) {
         ApiResponse.badRequest(res, error.message);
         return;

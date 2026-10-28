@@ -26,6 +26,7 @@ function isUniqueViolationOn(err: unknown, field: string): boolean {
 }
 
 export class SaleDiscountError extends Error {}
+export class SaleDiscountPermissionError extends Error {}
 
 /** Validate against authoritative values without rounding away an excess. */
 function validateDiscount(discount: number, maximum: Prisma.Decimal, label: string): void {
@@ -83,6 +84,21 @@ export class SaleService {
         include: { items: true },
       });
       if (existing) return existing;
+    }
+
+    // A missing userId denotes the authenticated shop owner (the controller
+    // derives it from auth, never from the request body). Staff permissions and
+    // roles must be current: a login token can outlive a permission change.
+    if ((input.discount ?? 0) !== 0 || input.items.some(item => (item.discount ?? 0) !== 0)) {
+      if (input.userId) {
+        const staff = await prisma.user.findFirst({
+          where: { id: input.userId, shopId: input.shopId, isActive: true },
+          select: { role: true, canDiscount: true },
+        });
+        if (!staff || !(staff.role === 'OWNER' || staff.role === 'MANAGER' || staff.canDiscount)) {
+          throw new SaleDiscountPermissionError('You do not have permission to apply discounts');
+        }
+      }
     }
 
     // Get all products

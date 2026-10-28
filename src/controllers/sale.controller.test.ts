@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SaleController, smsReceiptSchema, createSaleSchema } from './sale.controller';
-import { resetDb, seedShop, seedSale, seedProduct, seedCustomer, table } from '../test/prismaFake';
+import { resetDb, seedShop, seedSale, seedProduct, seedCustomer, seedUser, table } from '../test/prismaFake';
 
 // emailReceipt dynamically imports @services/yebopay.client — vi.mock still
 // hoists and intercepts that resolution regardless of the static/dynamic
@@ -484,6 +484,7 @@ describe('SaleController.create — customer ownership', () => {
 });
 
 describe('SaleController.create — excessive discounts', () => {
+  beforeEach(() => { seedUser({ id: 'user_1', canDiscount: true }); });
   it.each([[100, 0], [0, 100], [4, 7]])('returns a clear 400 for line=%s cart=%s', async (line, cart) => {
     const product = seedProduct({ shopId: 'shop_1', sellPrice: 10, quantity: 10 });
     const customer = seedCustomer({ shopId: 'shop_1', balance: 25 });
@@ -499,5 +500,23 @@ describe('SaleController.create — excessive discounts', () => {
     expect(res.body.success).toBe(false);
     expect(res.body.message).toMatch(/discount.*cannot exceed/i);
     expect(['sale', 'saleItem', 'product', 'stockLog', 'customer', 'customerCredit'].map(n => table(n as any))).toEqual(before);
+  });
+});
+
+
+describe('SaleController.create — discount permission', () => {
+  it.each([true, false])('returns a clear 403 for line/cart discounts (line=%s)', async line => {
+    seedUser({ id: 'user_1', canDiscount: false });
+    const product = seedProduct({ sellPrice: 10, quantity: 10 });
+    const res = mockRes();
+    await SaleController.create(reqFor({
+      userId: undefined, canDiscount: true, role: 'OWNER',
+      items: [{ productId: product.id, quantity: 1, discount: line ? 1 : 0 }],
+      discount: line ? 0 : 1, paymentMethod: 'CASH', amountPaid: 10,
+    }), res);
+    expect(res.statusCode).toBe(403);
+    expect(res.body.message).toBe('You do not have permission to apply discounts');
+    expect(table('sale')).toHaveLength(0);
+    expect(table('product')[0].quantity).toBe(10);
   });
 });
