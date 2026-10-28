@@ -257,3 +257,12 @@ Both component builds passed; all 140 app tests and 491 API unit tests passed
 (2 existing API TODOs). All 12 real PostgreSQL return-stock regressions passed
 against a fresh disposable database, including competing exchanges, one-time
 completion, duplicate demand, same-product restocking and forced rollback.
+
+Cash void/close serialization (`checkout-cash.test.ts`): voiding an attached CASH
+sale locks its exact OPEN drawer through the same guarded update as checkout,
+before the sale and stock locks. Both close/void orders observe PostgreSQL lock
+waits before releasing the winner. Closed-drawer voids fail with a direction to
+use return/refund settlement; sale status, stock, saved expected cash/variance
+and reopened Z-report remain unchanged, including after another drawer opens.
+Unassigned cash and noncash voids retain their existing behavior. Credit reversal
+and return-entitlement regressions continue to apply. No migration is required.

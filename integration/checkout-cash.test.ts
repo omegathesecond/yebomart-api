@@ -1,3 +1,4 @@
+import { ordered as orderedLock } from './orderedLock';
 import { randomUUID } from 'crypto';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { prisma } from '../src/config/prisma';
@@ -31,29 +32,9 @@ afterAll(async () => {
   }
   await prisma.$disconnect();
 });
+const ordered = <T, U>(model: string, action: string, first: () => Promise<T>, second: () => Promise<U>) => orderedLock(h => { hook = h; }, model, action, first, second);
 const checkout = (localId = randomUUID()) => SaleService.create({ shopId, paymentMethod: 'CASH', amountPaid: 20, localId, items: [{ productId, quantity: 1 }] });
 
-// Pause a real transaction after it owns its lock; verify the other backend
-// actually blocks before releasing it. No timing-based assumption of overlap.
-async function ordered<T, U>(model: string, action: string, first: () => Promise<T>, second: () => Promise<U>) {
-  let ready!: () => void, release!: () => void;
-  const entered = new Promise<void>(r => { ready = r; });
-  const gate = new Promise<void>(r => { release = r; });
-  hook = async p => { if (p.model === model && p.action === action) { hook = undefined; ready(); await gate; } };
-  const a = first();
-  await entered;
-  const b = second();
-  try {
-    let waiting = false;
-    for (const deadline = Date.now() + 3000; Date.now() < deadline;) {
-      const rows = await prisma.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
-      if (Number(rows[0].n) > 0) { waiting = true; break; }
-      await new Promise(r => setTimeout(r, 20));
-    }
-    expect(waiting).toBe(true);
-  } finally { release(); hook = undefined; }
-  return Promise.all([a, b]);
-}
 for (const saleFirst of [true, false]) it(`serializes checkout and close with ${saleFirst ? 'checkout' : 'close'} first`, async () => {
   const session = await tills.open({ shopId, openingFloat: 100 });
   const localId = randomUUID();
@@ -107,4 +88,59 @@ it('uses drawer membership despite overlapping or skewed sale timestamps', async
   expect(report.transactionCount).toBe(1);
   expect(report.byPaymentMethod).toEqual([{ method: 'CASH', total: 20, discount: 0, count: 1 }]);
   expect(report.session.expectedCash).toBe(120);
+});
+
+const voidSale = (id: string) => SaleService.voidSale(id, shopId, undefined, 'Checkout mistake');
+async function expectCashUp(sessionId: string, expected: number) {
+  expect(await prisma.cashSession.findUniqueOrThrow({ where: { id: sessionId } }))
+    .toMatchObject({ status: 'CLOSED', countedCash: expected, expectedCash: expected, variance: 0 });
+  const report = await tills.zReport(sessionId, shopId);
+  expect(report.session).toMatchObject({ expectedCash: expected, variance: 0 });
+  expect(report.byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0).toBe(expected);
+}
+for (const voidFirst of [true, false]) it(`serializes cash void and close with ${voidFirst ? 'void' : 'close'} first`, async () => {
+  const session = await tills.open({ shopId, openingFloat: 0 });
+  const sale = await checkout();
+  const close = () => tills.close({ shopId, sessionId: session.id, countedCash: voidFirst ? 0 : 20 });
+  // Attach rejection handling immediately, while the transaction is blocked.
+  const attemptVoid = () => voidSale(sale.id).then(() => 'voided', (error: Error) => error.message);
+  const results = voidFirst
+    ? await ordered('CashSession', 'updateMany', attemptVoid, close)
+    : await ordered('CashSession', 'updateMany', close, attemptVoid);
+  expect(results[voidFirst ? 0 : 1]).toBe(voidFirst ? 'voided' :
+    'Cannot void a cash sale from a closed till. Use the return/refund settlement flow to record the refund.');
+  expect(await prisma.sale.findUniqueOrThrow({ where: { id: sale.id } }))
+    .toMatchObject({ status: voidFirst ? 'VOIDED' : 'COMPLETED' });
+  expect(await prisma.product.findUniqueOrThrow({ where: { id: productId } }))
+    .toMatchObject({ quantity: voidFirst ? 10 : 9 });
+  expect(await prisma.stockLog.count({ where: { shopId, type: 'RETURN' } })).toBe(voidFirst ? 1 : 0);
+  await expectCashUp(session.id, voidFirst ? 0 : 20);
+});
+it('rejects a closed-till void without changing stock, sale, saved cash-up or reopened Z-report', async () => {
+  const session = await tills.open({ shopId, openingFloat: 0 });
+  const sale = await checkout();
+  await tills.close({ shopId, sessionId: session.id, countedCash: 20 });
+  const before = await tills.zReport(session.id, shopId);
+  // Opening another drawer must not allow voiding the previous drawer's sale.
+  await tills.open({ shopId, openingFloat: 0 });
+  await expect(voidSale(sale.id)).rejects.toThrow(/closed till.*return\/refund settlement/);
+  expect(await prisma.sale.findUniqueOrThrow({ where: { id: sale.id } }))
+    .toMatchObject({ status: 'COMPLETED', voidReason: null });
+  expect(await prisma.product.findUniqueOrThrow({ where: { id: productId } })).toMatchObject({ quantity: 9 });
+  expect(await prisma.stockLog.count({ where: { shopId, type: 'RETURN' } })).toBe(0);
+  await expectCashUp(session.id, 20);
+  expect(await tills.zReport(session.id, shopId)).toEqual(before);
+});
+it.each(['CASH', 'CARD', 'MOMO', 'EMALI', 'MIXED'] as const)('preserves %s voids without a cash drawer', async paymentMethod => {
+  const sale = await SaleService.create({ shopId, paymentMethod, amountPaid: 20, items: [{ productId, quantity: 1 }] });
+  expect(await voidSale(sale.id)).toMatchObject({ status: 'VOIDED' });
+  expect(await prisma.product.findUniqueOrThrow({ where: { id: productId } })).toMatchObject({ quantity: 10 });
+});
+it('allows a noncash void even when its attached drawer is closed', async () => {
+  const session = await tills.open({ shopId, openingFloat: 0 });
+  const sale = await SaleService.create({ shopId, paymentMethod: 'CARD', amountPaid: 20, items: [{ productId, quantity: 1 }] });
+  await prisma.sale.update({ where: { id: sale.id }, data: { cashSessionId: session.id } });
+  await tills.close({ shopId, sessionId: session.id, countedCash: 0 });
+  expect(await voidSale(sale.id)).toMatchObject({ status: 'VOIDED' });
+  expect(await prisma.product.findUniqueOrThrow({ where: { id: productId } })).toMatchObject({ quantity: 10 });
 });

@@ -503,6 +503,16 @@ export class SaleService {
    */
   static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
     const updatedSale = await prisma.$transaction(async (tx) => {
+      // Drawer membership/payment method are immutable. Read them before taking
+      // locks so all cash writers follow till -> sale -> product ordering.
+      const membership = await tx.sale.findFirst({
+        where: { id: saleId, shopId },
+        select: { paymentMethod: true, cashSessionId: true },
+      });
+      if (!membership) throw new Error('Sale not found');
+      if (membership.paymentMethod === 'CASH' && membership.cashSessionId) {
+        await CashSessionService.lockOpenSessionId(tx, shopId, membership.cashSessionId);
+      }
       await lockSale(tx, saleId);
       // Compare-and-set takes the sale row lock before any financial/stock writes.
       // A concurrent void waits, then fails this predicate after the winner commits.
