@@ -27,15 +27,14 @@
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-// ownerAuth (used below to prove the PATCH routes are owner-only) wraps
-// authMiddleware, which tries a YeboID (JWKS, real network) verify first and
-// falls back to the yebomart-signed staff HS256 path only when that throws.
-// Force every token down the staff path so tests never hit the network —
-// mirrors stock.controller.test.ts's managerAuth coverage.
+// Exercise real staff JWTs and owner authentication without JWKS network calls.
 vi.mock('@yebo/mcp-server', () => ({
-  JwksValidator: vi.fn().mockImplementation(() => ({
-    verify: vi.fn().mockRejectedValue(new Error('not a YeboID token')),
-  })),
+  JwksValidator: class {
+    async verify(token: string) {
+      if (token === 'test-yeboid-owner') return { userId: 'test-owner' };
+      throw new Error('not a YeboID token');
+    }
+  },
   extractBearerToken: (header?: string) => header?.replace(/^Bearer\s+/i, '') ?? null,
 }));
 
@@ -43,7 +42,7 @@ import { ShopController } from './shop.controller';
 import { ShopService } from '../services/shop.service';
 import { ownerAuth } from '../middleware/auth.middleware';
 import { JWTUtil } from '../utils/jwt';
-import { resetDb, seedShop, table } from '../test/prismaFake';
+import { resetDb, seedUser, seedShop, table } from '../test/prismaFake';
 
 function mockRes() {
   const res: any = { statusCode: 200, body: undefined };
@@ -137,6 +136,11 @@ describe('notification/tax PATCH routes are owner-only (ownerAuth gate in shop.r
   }
 
   function signStaff(role: 'OWNER' | 'MANAGER' | 'CASHIER') {
+    if (role === 'OWNER') {
+      table('shop').find((shop) => shop.id === shopId)!.ownerYeboidSub = 'test-owner';
+      return 'test-yeboid-owner';
+    }
+    seedUser({ id: 'user_1', shopId, role, isActive: true });
     return JWTUtil.generateAccessToken({ id: 'user_1', shopId, role, type: 'user' });
   }
 

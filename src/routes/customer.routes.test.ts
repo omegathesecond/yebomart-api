@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'http';
 import router from './customer.routes';
+import { UserService } from '../services/user.service';
 import { JWTUtil } from '../utils/jwt';
 import { CustomerController } from '../controllers/customer.controller';
-import { resetDb, seedCustomer, table } from '../test/prismaFake';
+import { resetDb, seedUser, seedCustomer, table } from '../test/prismaFake';
 
 // Exercise real staff authentication and manager authorization without fetching JWKS.
 vi.mock('@yebo/mcp-server', () => ({
@@ -16,7 +17,7 @@ vi.mock('@yebo/mcp-server', () => ({
 
 beforeEach(resetDb);
 
-async function patch(id: string, body: object, role: 'MANAGER' | 'CASHIER' = 'MANAGER') {
+async function patch(id: string, body: object, role: 'MANAGER' | 'CASHIER' = 'MANAGER', issuedToken?: string) {
   const app = express();
   app.use(express.json());
   app.use('/api/customers', router);
@@ -25,7 +26,8 @@ async function patch(id: string, body: object, role: 'MANAGER' | 'CASHIER' = 'MA
   });
   try {
     const address = server.address() as { port: number };
-    const token = JWTUtil.generateAccessToken({ id: 'staff_1', shopId: 'shop_1', role, type: 'user' });
+    if (!issuedToken) seedUser({ id: 'staff_1', shopId: 'shop_1', role, isActive: true });
+    const token = issuedToken ?? JWTUtil.generateAccessToken({ id: 'staff_1', shopId: 'shop_1', role, type: 'user' });
     const response = await fetch(`http://127.0.0.1:${address.port}/api/customers/${id}`, {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -88,5 +90,21 @@ describe('PATCH /api/customers/:id', () => {
     await CustomerController.update({ user: { shopId: 'shop_1' }, params: { id: customer.id }, body: { name: 'Changed', balance: 0, shopId: 'shop_2' } } as any, res);
     expect(table('customer')[0]).toMatchObject({ name: 'Changed', balance: 80, shopId: 'shop_1' });
     expect(table('customerCredit')).toEqual([]);
+  });
+});
+
+
+describe('live staff authority on customer write routes', () => {
+  it.each(['deactivation', 'soft deletion', 'demotion'] as const)('rejects a previously admitted token after %s', async change => {
+    const customer = seedCustomer();
+    seedUser({ id: 'staff_1', shopId: 'shop_1', role: 'MANAGER', isActive: true });
+    seedUser({ id: 'other', shopId: 'shop_1', phone: '+26876000009', isActive: true });
+    const token = JWTUtil.generateAccessToken({ id: 'staff_1', shopId: 'shop_1', role: 'MANAGER', type: 'user' });
+    expect((await patch(customer.id, { name: 'Before change' }, 'MANAGER', token)).status).toBe(200);
+    if (change === 'soft deletion') await UserService.delete('staff_1', 'shop_1');
+    else await UserService.update('staff_1', 'shop_1', change === 'demotion' ? { role: 'CASHIER' } : { isActive: false });
+    const before = structuredClone(table('customer'));
+    expect((await patch(customer.id, { name: 'Unauthorized change' }, 'MANAGER', token)).status).toBe(change === 'demotion' ? 403 : 401);
+    expect(table('customer')).toEqual(before);
   });
 });
