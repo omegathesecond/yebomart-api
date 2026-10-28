@@ -15,11 +15,10 @@
  *       User row);
  *   (b) a shop has AT MOST ONE open till — a second open is a 409;
  *   (c) /current returns the live drawer with a running expected total, or null;
- *   (d) closing computes expectedCash = float + cash sales IN THE SESSION
- *       WINDOW and stores variance = counted − expected (signed: negative =
+ *   (d) closing computes expectedCash = float + cash sales ASSIGNED TO THE SESSION and stores variance = counted − expected (signed: negative =
  *       short), ignoring pre-open sales, non-cash sales and non-COMPLETED sales;
  *   (e) closing a missing / already-closed / other-shop session is refused;
- *   (f) the z-report aggregates only sales inside openedAt→closedAt, broken
+ *   (f) the z-report aggregates cash sales by session and noncash inside openedAt→closedAt, broken
  *       down by payment method — a sale rung up after cash-up must not leak in.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -81,7 +80,12 @@ let rcpSeq = 0;
 // Sale.receiptNumber is @@unique([shopId, receiptNumber]) and the fake enforces
 // it, so every seeded sale needs its own number.
 function sale(partial: Record<string, any>) {
-  return seedSale({ subtotal: (partial.totalAmount ?? 100) + (partial.discount ?? 0), receiptNumber: `RCP-${++rcpSeq}`, ...partial });
+  // Seed the attribution checkout would persist; pre/post-shift fixtures
+  // deliberately have no drawer, independently of reporting predicates.
+  const outsideShift = partial.createdAt === BEFORE_OPEN || partial.createdAt === AFTER_CLOSE ||
+    partial.createdAt?.getTime() > Date.now();
+  const drawer = table('cashSession').find(row => row.shopId === (partial.shopId ?? 'shop_1'));
+  return seedSale({ cashSessionId: outsideShift ? null : drawer?.id, subtotal: (partial.totalAmount ?? 100) + (partial.discount ?? 0), receiptNumber: `RCP-${++rcpSeq}`, ...partial });
 }
 
 beforeEach(() => {

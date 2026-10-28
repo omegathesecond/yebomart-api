@@ -1,6 +1,7 @@
+import { CashSessionService } from "@services/cashSession.service";
 import { Prisma } from "@prisma/client";
 import { applyCustomerCredit } from "@services/customerCredit.service";
-import { round2, computeTax } from "@utils/tax";
+import { computeTax, round2 } from "@utils/tax";
 import {
   validateCreditReturn,
   settleCreditReturn,
@@ -39,6 +40,54 @@ async function validateReturnProducts(
         `Product ${productId} not found in this shop`,
       );
   }
+}
+
+// Replacement prices are current retail prices, with the shop's current VAT.
+// Allocate the basket's rounded total across lines so stored values sum exactly.
+function validateExchangeShape(type: string, saleId: string | null | undefined, lines?: unknown[]) {
+  if (type === "EXCHANGE") {
+    if (!lines?.length) throw new ReturnEligibilityError("Choose at least one replacement item");
+    if (!saleId) throw new ReturnEligibilityError("Exchanges require an original sale receipt");
+  } else if (lines !== undefined && lines.length > 0) {
+    throw new ReturnEligibilityError("Only exchanges can contain replacement items");
+  }
+}
+
+async function priceReplacements(
+  tx: Prisma.TransactionClient, shopId: string,
+  lines: Array<{ productId: string; quantity: number }>, returnedValue: number,
+) {
+  const grouped = new Map<string, number>();
+  for (const line of lines) {
+    if (!Number.isSafeInteger(line.quantity) || line.quantity < 1)
+      throw new ReturnEligibilityError("Replacement quantities must be positive whole numbers");
+    const quantity = (grouped.get(line.productId) ?? 0) + line.quantity;
+    if (!Number.isSafeInteger(quantity)) throw new ReturnEligibilityError("Invalid replacement quantity");
+    grouped.set(line.productId, quantity);
+  }
+  const shop = await tx.shop.findUnique({ where: { id: shopId } });
+  if (!shop) throw new ReturnEligibilityError("Shop not found");
+  const products = [];
+  for (const [productId, quantity] of [...grouped].sort(([a], [b]) => a.localeCompare(b))) {
+    const product = await tx.product.findFirst({ where: { id: productId, shopId } });
+    if (!product) throw new ReturnEligibilityError(`Product ${productId} not found in this shop`);
+    if (!product.isActive) throw new ReturnEligibilityError(`Replacement ${product.name} is inactive`);
+    if (!Number.isFinite(product.sellPrice) || product.sellPrice < 0)
+      throw new ReturnEligibilityError("Invalid replacement price");
+    products.push({ productId, productName: product.name, quantity, base: product.sellPrice * quantity });
+  }
+  const subtotal = products.reduce((sum, p) => sum + p.base, 0);
+  const totalCents = Math.round(computeTax(subtotal, 0, shop).total * 100);
+  if (!Number.isSafeInteger(totalCents) || totalCents !== Math.round(returnedValue * 100))
+    throw new ReturnEligibilityError("Only equal-value exchanges are supported. Replacement value must equal returned value, including tax and original discounts.");
+  let cumulative = 0, allocated = 0;
+  return products.map(({ base, ...line }) => {
+    cumulative += base;
+    const boundary = subtotal ? Math.round(totalCents * cumulative / subtotal) : 0;
+    const unitPrice = (boundary - allocated) / 100 / line.quantity;
+    allocated = boundary;
+    return { ...line, unitPrice };
+  });
 }
 
 // Store credit is a new entitlement from a paid receipt, never CREDIT debt settlement.
@@ -99,16 +148,14 @@ export const createReturnSchema = Joi.object({
     )
     .required()
     .min(1),
-  exchangeItems: Joi.array()
-    .items(
-      Joi.object({
-        productId: Joi.string().required(),
-        productName: Joi.string().required(),
-        quantity: Joi.number().required().integer().min(1),
-        unitPrice: Joi.number().required().min(0),
-      }),
-    )
-    .optional(),
+  exchangeItems: Joi.when('type', {
+    is: 'EXCHANGE',
+    then: Joi.array().items(Joi.object({
+      productId: Joi.string().required(),
+      quantity: Joi.number().required().integer().min(1),
+    })).min(1).required(),
+    otherwise: Joi.forbidden(),
+  }),
   // Accepted for backward compatibility but IGNORED — the server always derives
   // the refund from the (sale-validated) line items. See ReturnController.create.
   refundAmount: Joi.number().optional().min(0),
@@ -182,6 +229,9 @@ export class ReturnController {
       }>;
 
       const returnRecord = await prisma.$transaction(async (tx) => {
+        validateExchangeShape(type, saleId, exchangeItems);
+        if (type !== "EXCHANGE" && exchangeItems !== undefined)
+          throw new ReturnEligibilityError("Only exchanges can contain replacement items");
         let debtorId = customerId;
         let isCreditSale = false;
         await validateReturnProducts(tx, shopId, [
@@ -265,6 +315,10 @@ export class ReturnController {
             "Store credit entitlement must be positive",
           );
 
+        const replacements = type === "EXCHANGE"
+          ? await priceReplacements(tx, shopId, exchangeItems, calculatedRefund)
+          : [];
+
         // Create the return
         return tx.return.create({
           data: {
@@ -289,16 +343,7 @@ export class ReturnController {
                 restockable: item.restockable,
               })),
             },
-            exchangeItems: exchangeItems
-              ? {
-                  create: exchangeItems.map((item: any) => ({
-                    productId: item.productId,
-                    productName: item.productName,
-                    quantity: item.quantity,
-                    unitPrice: item.unitPrice,
-                  })),
-                }
-              : undefined,
+            exchangeItems: { create: replacements },
           },
           include: returnDetails,
         });
@@ -458,6 +503,7 @@ export class ReturnController {
           throw new ReturnEligibilityError("Return is already final");
         let isCreditSale = false;
         if (action !== "reject") {
+          validateExchangeShape(returnRecord.type, returnRecord.saleId, returnRecord.exchangeItems);
           const debt = returnRecord.saleId
             ? await validateCreditReturn(tx, {
                 ...returnRecord,
@@ -551,18 +597,10 @@ export class ReturnController {
                 // Same row lock as close(): a payout either commits before the
                 // closing tally or is refused after close. Prior-sale dates do
                 // not affect attribution; cash leaves the current drawer.
-                const session = await tx.cashSession.findFirst({
-                  where: { shopId: req.user!.shopId, status: 'OPEN' },
-                });
-                if (!session)
-                  throw new ReturnEligibilityError('Open a till before confirming a cash refund');
-                const locked = await tx.cashSession.updateMany({
-                  where: { id: session.id, shopId: req.user!.shopId, status: 'OPEN' },
-                  data: { status: 'OPEN' },
-                });
-                if (locked.count !== 1)
-                  throw new ReturnEligibilityError('Till closed before refund confirmation; no payout recorded');
-                updateData.cashSessionId = session.id;
+                const sessionId = await CashSessionService.lockOpenSessionId(tx, req.user!.shopId);
+                if (!sessionId)
+                  throw new ReturnEligibilityError('Open till required; till may have closed before refund confirmation');
+                updateData.cashSessionId = sessionId;
               }
               updateData.settledAt = new Date();
             } else if (settlement) {
@@ -601,6 +639,28 @@ export class ReturnController {
               SELECT id FROM "Product"
               WHERE id IN (${Prisma.join(productIds)}) AND "shopId" = ${shopId}
               ORDER BY id FOR UPDATE`;
+
+            let replacements: Array<{ productId: string; quantity: number }> = returnRecord.exchangeItems;
+            if (returnRecord.type === "EXCHANGE") {
+              const priced = await priceReplacements(tx, shopId, returnRecord.exchangeItems,
+                returnRecord.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0));
+              // Persisted prices must still match authoritative prices, including
+              // historical records. A changed price requires a new exchange.
+              for (const line of priced) {
+                const persisted = returnRecord.exchangeItems.filter(item => item.productId === line.productId);
+                if (Math.round(persisted.reduce((sum, item) => sum + item.quantity * item.unitPrice * 100, 0)) !== Math.round(line.quantity * line.unitPrice * 100))
+                  throw new ReturnEligibilityError("Replacement prices changed; create a new exchange");
+              }
+              replacements = priced;
+              for (const item of replacements) {
+                const product = await tx.product.findUnique({ where: { id: item.productId } });
+                if (!product || product.shopId !== shopId) throw new ReturnEligibilityError("Replacement product not found in this shop");
+                const restock = returnRecord.items.filter(line => line.productId === item.productId && line.restockable && !line.restocked)
+                  .reduce((sum, line) => sum + line.quantity, 0);
+                if (product.trackStock && product.quantity + restock < item.quantity)
+                  throw new ReturnEligibilityError(`Insufficient stock for ${product.name}`);
+              }
+            }
 
             // Restock returned items and deduct exchanged-out items atomically so
             // the product quantity and the StockLog audit trail stay consistent.
@@ -647,8 +707,8 @@ export class ReturnController {
               }
 
               // Deduct exchange items from stock (these leave the shop again)
-              if (returnRecord.exchangeItems) {
-                for (const item of returnRecord.exchangeItems) {
+              if (replacements.length) {
+                for (const item of replacements) {
                   const product = await tx.product.findUnique({
                     where: { id: item.productId },
                   });
@@ -659,11 +719,15 @@ export class ReturnController {
 
                   const shop = await tx.shop.findUnique({ where: { id: shopId } });
                   if (!shop) throw new ReturnEligibilityError("Shop not found");
-                  const valuation = computeTax(item.quantity * item.unitPrice, 0, shop);
-                  await tx.returnExchangeItem.update({
-                    where: { id: item.id },
-                    data: { costPrice: product.costPrice, tax: valuation.tax, totalAmount: valuation.total },
-                  });
+                  // Replacement unitPrice already includes VAT. Keep snapshots on
+                  // each persisted line; stock demand above is grouped by product.
+                  for (const line of returnRecord.exchangeItems.filter(line => line.productId === item.productId)) {
+                    const valuation = computeTax(line.quantity * line.unitPrice, 0, { ...shop, taxInclusive: true });
+                    await tx.returnExchangeItem.update({
+                      where: { id: line.id },
+                      data: { costPrice: product.costPrice, tax: valuation.tax, totalAmount: valuation.total },
+                    });
+                  }
                   if (!product.trackStock) continue;
 
                   const previousQty = product.quantity;
