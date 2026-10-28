@@ -425,7 +425,8 @@ export class SaleService {
         where,
         skip,
         take,
-        orderBy: { createdAt: 'desc' },
+        // Timestamp ties must keep the same order across history pages.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: {
           items: {
             select: {
