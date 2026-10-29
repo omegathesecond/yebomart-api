@@ -176,7 +176,7 @@ export class CashSessionService {
    * Acquire before sale/product locks, as refund settlement does. A supplied
    * session ID requires that exact drawer to remain open (cash-sale voids).
    */
-  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string, sessionId?: string, closedMessage = 'Cannot void a cash sale from a closed till. Use the return/refund settlement flow to record the refund.'): Promise<string | null> {
+  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string, sessionId?: string, closedMessage: string | Error = 'Cannot void a cash sale from a closed till. Use the return/refund settlement flow to record the refund.'): Promise<string | null> {
     const session = sessionId ? { id: sessionId } : await tx.cashSession.findFirst({
       where: { shopId, status: 'OPEN' }, select: { id: true },
     });
@@ -186,7 +186,7 @@ export class CashSessionService {
       data: { status: 'OPEN' },
     });
     if (sessionId && locked.count !== 1) {
-      throw new Error(closedMessage);
+      throw closedMessage instanceof Error ? closedMessage : new Error(closedMessage);
     }
     return locked.count === 1 ? session.id : null;
   }

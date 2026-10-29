@@ -1,4 +1,4 @@
-import { recordExpense } from '@services/expense.service';
+import { recordExpense, ExpenseTillRejectedError } from '@services/expense.service';
 import { Response } from 'express';
 import Joi from 'joi';
 import { prisma } from '@config/prisma';
@@ -53,6 +53,10 @@ export class ExpenseController {
 
       ApiResponse.created(res, expense, 'Expense recorded');
     } catch (error: any) {
+      if (error instanceof ExpenseTillRejectedError) {
+        ApiResponse.error(res, error.message, 409, undefined, { code: error.code });
+        return;
+      }
       ApiResponse.badRequest(res, error.message);
     }
   }

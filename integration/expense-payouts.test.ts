@@ -67,7 +67,14 @@ for (const payoutFirst of [true, false]) it(`serializes payout/close with ${payo
     : await ordered(setHook, 'CashSession', 'updateMany', close, pay);
   const outcome = outcomes[payoutFirst ? 0 : 1] as Awaited<ReturnType<typeof pay>>;
   if (payoutFirst) expect(outcome.value?.cashSessionId).toBe(till.id);
-  else expect(outcome.error.message).toContain('closed');
+  else {
+    expect(outcome.error.message).toContain('closed');
+    expect(outcome.error.code).toBe('EXPENSE_TILL_NOT_RECORDED');
+    const response = res();
+    await ExpenseController.create({ user: { shopId }, body: input(till.id) } as any, response);
+    expect(response.code).toBe(409);
+    expect(response.body.code).toBe('EXPENSE_TILL_NOT_RECORDED');
+  }
   expect(await prisma.expense.count({ where: { shopId } })).toBe(payoutFirst ? 1 : 0);
   expect(await tills.zReport(till.id, shopId)).toMatchObject({ expensePayoutsTotal: payoutFirst ? 50 : 0, session: { expectedCash: payoutFirst ? 150 : 200 } });
 });

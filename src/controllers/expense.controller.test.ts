@@ -226,3 +226,11 @@ describe('expense receiptUrl validation contract', () => {
    expect(table('expense')).toHaveLength(1);
    expect(table('expense')[0].amount).toBe(50);
  });
+
+it('confirms non-creation with a public code when the requested till is unavailable', async () => {
+  const res = mockRes();
+  await ExpenseController.create(reqFor({ category: 'TRANSPORT', amount: 50, fundingSource: 'TILL_CASH', cashSessionId: 'closed' }), res);
+  expect(res.statusCode).toBe(409);
+  expect(res.body.code).toBe('EXPENSE_TILL_NOT_RECORDED');
+  expect(table('expense')).toHaveLength(0);
+});
