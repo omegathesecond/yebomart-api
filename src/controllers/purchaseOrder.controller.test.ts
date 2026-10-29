@@ -198,3 +198,92 @@ describe('PurchaseOrderController.getPayments — payment history for a PO', () 
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('purchase tax allocation', () => {
+  function taxed(quantity = 10, unitCost = 10, tax = 15) {
+    Object.assign(table('pOItem')[0], { quantity, unitCost, totalCost: quantity * unitCost });
+    Object.assign(table('purchaseOrder')[0], {
+      subtotal: quantity * unitCost, tax, totalAmount: quantity * unitCost + tax,
+    });
+  }
+  it('bills 115 for a 100 + 15 order and permits full settlement, rejecting excess', async () => {
+    taxed();
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    expect(table('supplierLedger')[0].amount).toBe(115);
+    expect(table('supplier')[0].balance).toBe(115);
+    const excess = mockRes();
+    await PurchaseOrderController.recordPayment(req(poId, { amount: 115.01 }), excess);
+    expect(excess.statusCode).toBe(400);
+    const paid = mockRes();
+    await PurchaseOrderController.recordPayment(req(poId, { amount: 115 }), paid);
+    expect(paid.statusCode).toBe(200);
+    expect(paid.body.data.balanceDue).toBe(0);
+    expect(table('supplier')[0].balance).toBe(0);
+    expect(table('sale')).toHaveLength(0);
+  });
+  it('allocates partial value, caps payment at that value, then settles the rest', async () => {
+    taxed();
+    await PurchaseOrderController.receive(req(poId, { items: [{ poItemId, quantity: 4 }] }), mockRes());
+    expect(table('purchaseOrder')[0].amountReceived).toBe(46);
+    const excess = mockRes();
+    await PurchaseOrderController.recordPayment(req(poId, { amount: 46.01 }), excess);
+    expect(excess.statusCode).toBe(400);
+    await PurchaseOrderController.recordPayment(req(poId, { amount: 46 }), mockRes());
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    const paid = mockRes();
+    await PurchaseOrderController.recordPayment(req(poId, { amount: 69 }), paid);
+    expect(paid.statusCode).toBe(200);
+    expect(paid.body.data.balanceDue).toBe(0);
+  });
+  it('rounds cumulative partial receipts and books the final remainder exactly once', async () => {
+    taxed(3, 1, 0.01);
+    for (let i = 0; i < 3; i++) {
+      const res = mockRes();
+      await PurchaseOrderController.receive(req(poId, { items: [{ poItemId, quantity: 1 }] }), res);
+      expect(res.statusCode).toBe(200);
+    }
+    expect(table('supplierLedger').map(l => l.amount)).toEqual([1, 1.01, 1]);
+    expect(table('purchaseOrder')[0].amountReceived).toBe(3.01);
+    const retry = mockRes();
+    await PurchaseOrderController.receive(req(poId), retry);
+    expect(retry.statusCode).toBe(400);
+    expect(table('supplierLedger')).toHaveLength(3);
+  });
+  it('serializes concurrent full receipts without duplicating tax', async () => {
+    taxed();
+    const responses = [mockRes(), mockRes()];
+    await Promise.all(responses.map(res => PurchaseOrderController.receive(req(poId), res)));
+    expect(responses.map(r => r.statusCode).sort()).toEqual([200, 400]);
+    expect(table('supplierLedger').map(l => l.amount)).toEqual([115]);
+  });
+  it('serializes fitting partial receipts and retains zero-tax cent totals', async () => {
+    taxed(3, 0.1, 0);
+    const responses = [mockRes(), mockRes()];
+    await Promise.all(responses.map(res => PurchaseOrderController.receive(
+      req(poId, { items: [{ poItemId, quantity: 1 }] }), res)));
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    expect(table('purchaseOrder')[0].amountReceived).toBeCloseTo(0.3, 10);
+    expect(table('supplierLedger').map(l => l.amount)).toEqual([0.1, 0.1, 0.1]);
+  });
+  it('weights tax by line value across differently priced items', async () => {
+    const other = seedProduct({ shopId: 'shop_1', quantity: 0 });
+    const po = seedPurchaseOrder({ shopId: 'shop_1', supplierId, subtotal: 100, tax: 15, totalAmount: 115,
+      items: [
+        { productId, productName: 'Small', quantity: 1, unitCost: 20, totalCost: 20, receivedQty: 0 },
+        { productId: other.id, productName: 'Large', quantity: 1, unitCost: 80, totalCost: 80, receivedQty: 0 },
+      ],
+    });
+    const line = table('pOItem').find(l => l.productId === other.id)!;
+    await PurchaseOrderController.receive(req(po.id, { items: [{ poItemId: line.id, quantity: 1 }] }), mockRes());
+    expect(table('purchaseOrder').find(p => p.id === po.id)!.amountReceived).toBe(92);
+    await PurchaseOrderController.receive(req(po.id), mockRes());
+    expect(table('supplierLedger').filter(l => l.poId === po.id).map(l => l.amount)).toEqual([92, 23]);
+  });
+  it('allocates tax-only orders on final receipt', async () => {
+    taxed(2, 0, 0.15);
+    await PurchaseOrderController.receive(req(poId, { items: [{ poItemId, quantity: 1 }] }), mockRes());
+    expect(table('supplierLedger')).toHaveLength(0);
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    expect(table('supplierLedger')[0].amount).toBe(0.15);
+  });
+});

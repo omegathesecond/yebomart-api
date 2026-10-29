@@ -4,6 +4,8 @@ import Joi from 'joi';
 import { prisma } from '@config/prisma';
 import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
+import { round2 } from '@utils/tax';
+import { receivedPayable } from '@utils/purchaseOrder';
 
 class ReceiptError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -107,7 +109,7 @@ export class PurchaseOrderController {
       }
 
       const lineItems = items.map((i: any) => {
-        const totalCost = i.qtyOrdered * i.unitCost;
+        const totalCost = round2(i.qtyOrdered * i.unitCost);
         return {
           productId: i.productId,
           productName: productById.get(i.productId)!.name,
@@ -117,8 +119,9 @@ export class PurchaseOrderController {
         };
       });
 
-      const subtotal = lineItems.reduce((sum: number, i: any) => sum + i.totalCost, 0);
-      const totalAmount = subtotal + (tax || 0);
+      const subtotal = round2(lineItems.reduce((sum: number, i: any) => sum + i.totalCost, 0));
+      const purchaseTax = round2(tax ?? 0);
+      const totalAmount = round2(subtotal + purchaseTax);
       const orderNumber = `PO-${Date.now()}`;
 
       const po = await prisma.purchaseOrder.create({
@@ -128,7 +131,7 @@ export class PurchaseOrderController {
           orderNumber,
           status,
           subtotal,
-          tax: tax || 0,
+          tax: purchaseTax,
           totalAmount,
           expectedDate: expectedDate || undefined,
           notes,
@@ -212,7 +215,7 @@ export class PurchaseOrderController {
         return;
       }
 
-      ApiResponse.success(res, { ...po, balanceDue: po.amountReceived - po.amountPaid });
+      ApiResponse.success(res, { ...po, balanceDue: round2(po.amountReceived - po.amountPaid) });
     } catch (error: any) {
       ApiResponse.serverError(res, error.message, error);
     }
@@ -296,10 +299,15 @@ export class PurchaseOrderController {
           throw new ReceiptError('Nothing to receive — all items already received');
         }
 
-        // Cost VALUE received in THIS receipt (Σ qty*unitCost). This is the
-        // amount booked as a supplier payable so purchases are no longer
-        // understated — independent of whether a product row still exists.
-        let receivedValue = 0;
+        const receipts = new Map(toReceive.map(({ item, qty }) => [item.id, qty]));
+        const receivedItems = po.items.map(item => ({
+          ...item, receivedQty: item.receivedQty + (receipts.get(item.id) ?? 0),
+        }));
+        const fullyReceived = receivedItems.every(item => item.receivedQty === item.quantity);
+        // Cumulative cent-rounded entitlement makes partitioning independent of
+        // receipt order. The PO lock protects both this read and the billed delta.
+        const cumulativePayable = receivedPayable(po, receivedItems);
+        const receivedValue = round2(cumulativePayable - po.amountReceived);
 
         // Match bulk restock's lock order before touching any product. Reads and
         // stock logs then observe the committed quantity after competing writers.
@@ -310,8 +318,6 @@ export class PurchaseOrderController {
           ORDER BY id FOR UPDATE`;
 
         for (const { item, qty } of toReceive) {
-          receivedValue += qty * item.unitCost;
-
           const product = await tx.product.findUnique({ where: { id: item.productId, shopId } });
           // Product may have been deleted after the PO was raised; receiving the
           // remaining lines should still succeed, so skip the stock bump but
@@ -373,12 +379,6 @@ export class PurchaseOrderController {
           });
         }
 
-        // Recompute PO status from the line receipts.
-        const fullyReceived = po.items.every((item) => {
-          const extra = toReceive.find((t) => t.item.id === item.id)?.qty ?? 0;
-          return item.receivedQty + extra >= item.quantity;
-        });
-
         return tx.purchaseOrder.update({
           where: { id: poId },
           data: {
@@ -386,7 +386,7 @@ export class PurchaseOrderController {
             receivedDate: fullyReceived ? new Date() : po.receivedDate ?? new Date(),
             // Grow the cumulative billed value for this PO. balanceDue is
             // derived as amountReceived - amountPaid.
-            amountReceived: { increment: receivedValue },
+            amountReceived: cumulativePayable,
             notes: notes ?? po.notes,
           },
           include: {
@@ -400,7 +400,7 @@ export class PurchaseOrderController {
 
       ApiResponse.success(
         res,
-        { ...updatedPo, balanceDue: updatedPo.amountReceived - updatedPo.amountPaid },
+        { ...updatedPo, balanceDue: round2(updatedPo.amountReceived - updatedPo.amountPaid) },
         'Purchase order received'
       );
     } catch (error: any) {
@@ -448,7 +448,7 @@ export class PurchaseOrderController {
 
         // Can't pay more than is owed on the PO (amountReceived - amountPaid).
         // Fail loudly rather than silently clamping — overpayment is a data error.
-        const balanceDue = po.amountReceived - po.amountPaid;
+        const balanceDue = round2(po.amountReceived - po.amountPaid);
         if (balanceDue <= 0) {
           ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
           return;
@@ -492,7 +492,7 @@ export class PurchaseOrderController {
 
       ApiResponse.success(
         res,
-        { ...updatedPo, balanceDue: updatedPo.amountReceived - updatedPo.amountPaid },
+        { ...updatedPo, balanceDue: round2(updatedPo.amountReceived - updatedPo.amountPaid) },
         'Payment recorded'
       );
     } catch (error: any) {

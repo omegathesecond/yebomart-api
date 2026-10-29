@@ -168,6 +168,17 @@ describe('Postgres purchase order receipt entitlement', () => {
     expect(results.every((r) => [200, 400].includes(r.statusCode))).toBe(true);
     await reconcile(10, successful);
   });
+  it('allocates tax once across blocked concurrent partial receipts and final retry', async () => {
+    await prisma.purchaseOrder.update({ where: { id: poId }, data: { tax: 0.01, totalAmount: 50.01 } });
+    expect((await receiptRace([partial(4), partial(6)])).map(r => r.statusCode)).toEqual([200, 200]);
+    expect((await receive()).statusCode).toBe(400);
+    const po = await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: poId } });
+    expect(po.amountReceived).toBe(50.01);
+    const bills = await prisma.supplierLedger.findMany({ where: { poId } });
+    expect(bills).toHaveLength(2);
+    expect(bills.reduce((sum, bill) => sum + Math.round(bill.amount * 100), 0)).toBe(5001);
+    expect((await prisma.supplier.findUniqueOrThrow({ where: { id: supplierId } })).balance).toBeCloseTo(50.01, 10);
+  });
   it('rejects duplicate line ids in schema and controller without writes', async () => {
     const body = {
       items: [partial(6).items[0], partial(6).items[0]],
@@ -259,6 +270,7 @@ describe('Postgres purchase order receipt entitlement', () => {
       data: { poId, productId: other.id, productName: other.name,
         quantity: 10, unitCost: 5, totalCost: 50 },
     });
+    await prisma.purchaseOrder.update({ where: { id: poId }, data: { subtotal: 100, totalAmount: 100 } });
     const lines = [{ poItemId: lineId, productId },
       { poItemId: otherLine.id, productId: other.id }]
       .sort((a, b) => a.productId.localeCompare(b.productId));
