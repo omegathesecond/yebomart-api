@@ -73,7 +73,7 @@ const complete = (id: string) =>
 const pay = (amount: number) =>
   call(
     CustomerController.addCredit,
-    { type: "PAYMENT", amount, saleId },
+    { type: "PAYMENT", amount, saleId, collectionMethod: "EXTERNAL_NONCASH", collectionKey: randomUUID() },
     customerId,
   );
 async function consistent(balance: number) {

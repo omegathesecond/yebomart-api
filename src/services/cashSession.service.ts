@@ -75,6 +75,14 @@ export class CashSessionService {
     return { total: round2(refunds._sum.refundAmount ?? 0), count: refunds._count };
   }
 
+  private static async cashCollections(shopId: string, sessionId: string, db: Prisma.TransactionClient = prisma) {
+    const result = await db.customerCredit.aggregate({
+      where: { shopId, cashSessionId: sessionId, type: 'PAYMENT', collectionMethod: 'CASH' },
+      _sum: { amount: true }, _count: true,
+    });
+    return { total: round2(result._sum.amount ?? 0), count: result._count };
+  }
+
   /**
    * Open a till for a shop. Rejects (throws CONFLICT) if one is already open —
    * a shop has at most one live drawer at a time.
@@ -135,15 +143,18 @@ export class CashSessionService {
 
     const cashSales = await this.cashSalesTotal(shopId, session.id);
 
+    const collections = await this.cashCollections(shopId, session.id);
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
       ...session,
+      cashCollectionsTotal: collections.total,
+      cashCollectionsCount: collections.count,
       cashRefundsTotal: refunds.total,
       cashRefundsCount: refunds.count,
       cashSalesTotal: cashSales.total,
       cashSalesCount: cashSales.count,
-      // Live drawer = float + cash sales - confirmed cash payouts.
-      expectedCash: round2(session.openingFloat + cashSales.total - refunds.total),
+      // Live drawer = float + cash sales + debt collections - confirmed cash payouts.
+      expectedCash: round2(session.openingFloat + cashSales.total + collections.total - refunds.total),
     };
   }
 
@@ -204,14 +215,17 @@ export class CashSessionService {
         session.id,
         tx,
       );
+      const collections = await this.cashCollections(input.shopId, session.id, tx);
       const refunds = await this.cashRefundsTotal(input.shopId, session.id, tx);
-      const expectedCash = round2(session.openingFloat + cashSales.total - refunds.total);
+      const expectedCash = round2(session.openingFloat + cashSales.total + collections.total - refunds.total);
       return tx.cashSession.update({
         where: { id: session.id },
         data: {
           closedAt: now,
           countedCash: input.countedCash,
           expectedCash,
+          cashCollectionsTotal: collections.total,
+          cashCollectionsCount: collections.count,
           variance: input.countedCash - expectedCash,
           notes: input.notes ?? session.notes,
         },
@@ -277,8 +291,11 @@ export class CashSessionService {
       };
     });
 
+    const collections = await this.cashCollections(shopId, session.id);
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
+      cashCollectionsTotal: session.status === 'CLOSED' ? session.cashCollectionsTotal : collections.total,
+      cashCollectionsCount: session.status === 'CLOSED' ? session.cashCollectionsCount : collections.count,
       cashRefundsTotal: refunds.total,
       cashRefundsCount: refunds.count,
       session: {
@@ -288,7 +305,7 @@ export class CashSessionService {
         openedAt: session.openedAt,
         closedAt: session.closedAt,
         countedCash: session.countedCash,
-        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) - refunds.total),
+        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) + collections.total - refunds.total),
         variance: session.variance,
         notes: session.notes,
         cashier: session.user,

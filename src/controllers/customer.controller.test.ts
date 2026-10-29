@@ -117,7 +117,7 @@ describe('CustomerController.addCredit — credit limit enforcement (bug #1)', (
     const customer = seedCustomer({ balance: 500, creditLimit: 100 });
     const res = mockRes();
 
-    await CustomerController.addCredit(reqFor(customer.id, { type: 'PAYMENT', amount: 50 }), res);
+    await CustomerController.addCredit(reqFor(customer.id, { type: 'PAYMENT', amount: 50, collectionMethod: 'EXTERNAL_NONCASH', collectionKey: '00000000-0000-4000-8000-000000000001' }), res);
 
     expect(res.statusCode).toBe(200);
     expect(table('customer')[0].balance).toBe(450);
@@ -156,4 +156,17 @@ describe('CustomerController.addCredit — machine-readable signal survives prod
       expect(res.body.error).toBeUndefined();
     });
   }
+});
+
+describe('collection request contract', () => {
+  it('requires method and retry key for payments, forbids attribution on adjustments, and rejects zero payments', async () => {
+    const { addCreditSchema } = await import('./customer.controller');
+    const key = '00000000-0000-4000-8000-000000000002';
+    expect(addCreditSchema.validate({ type: 'PAYMENT', amount: 100 }).error).toBeDefined();
+    for (const collectionMethod of ['CASH', 'EXTERNAL_NONCASH']) {
+      expect(addCreditSchema.validate({ type: 'PAYMENT', amount: 100, collectionMethod, collectionKey: key }).error).toBeUndefined();
+    }
+    expect(addCreditSchema.validate({ type: 'PAYMENT', amount: 0, collectionMethod: 'CASH', collectionKey: key }).error).toBeDefined();
+    expect(addCreditSchema.validate({ type: 'ADJUSTMENT', amount: -20, collectionMethod: 'CASH', collectionKey: key }).error).toBeDefined();
+  });
 });

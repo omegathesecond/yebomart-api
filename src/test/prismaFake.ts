@@ -56,7 +56,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   saleItem: [],
   stockLog: [],
   customer: [['shopId', 'phone']],
-  customerCredit: [],
+  customerCredit: [['shopId', 'collectionKey']],
   expense: [],
   user: [['shopId', 'phone']],
   admin: [['email']],
@@ -122,6 +122,7 @@ function matchesWhere(rec: Row, where: Row | undefined, model?: ModelName): bool
   const parents = model ? (PARENT_RELATIONS[model] ?? {}) : {};
   return Object.entries(where).every(([key, cond]) => {
     if (cond === undefined) return true;
+    if (model && UNIQUE_KEYS[model].some(parts => parts.length > 1 && parts.join('_') === key)) return matchesWhere(rec, cond, model);
     if (key === 'OR') return cond.some((clause: Row) => matchesWhere(rec, clause, model));
     if (key === 'AND') return (Array.isArray(cond) ? cond : [cond]).every((clause: Row) => matchesWhere(rec, clause, model));
     const parent = parents[key];
@@ -489,6 +490,11 @@ function model(name: ModelName) {
   return {
     findFirst: async (args?: Row) => db.findFirst(name, args),
     findUnique: async (args?: Row) => db.findUnique(name, args),
+    findFirstOrThrow: async (args?: Row) => {
+      const row = db.findFirst(name, args);
+      if (!row) throw new Error('Record not found');
+      return row;
+    },
     findMany: async (args?: Row) => db.findMany(name, args),
     count: async (args?: Row) => db.count(name, args),
     create: async (args: Row) =>

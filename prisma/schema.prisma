@@ -294,7 +294,7 @@ model SaleItem {
 
 // A cashier's till session: opened with a starting float, closed at end of
 // shift with a counted cash total. The cash-up reconciles the physical drawer
-// against expectedCash (openingFloat + cash sales - confirmed cash refunds),
+// against expectedCash (openingFloat + cash sales + cash collections - confirmed cash refunds),
 // recording any variance (shortage/overage) for loss prevention.
 // One OPEN row per shop is enforced by the partial unique index in
 // 20261021000000_one_open_cash_session (Prisma 5 cannot express its predicate).
@@ -313,7 +313,9 @@ model CashSession {
   // Populated at cash-up (close):
   closedAt     DateTime?
   countedCash  Float? // Physical cash counted in the drawer
-  expectedCash Float? // openingFloat + cash sales - confirmed cash refunds
+  expectedCash Float? // openingFloat + cash sales + cash collections - confirmed cash refunds
+  cashCollectionsTotal Float? // Null: historical collection attribution unknown
+  cashCollectionsCount Int?
   variance     Float? // countedCash - expectedCash (negative = short)
 
   status CashSessionStatus @default(OPEN)
@@ -324,6 +326,7 @@ model CashSession {
   user  User?  @relation(fields: [userId], references: [id])
   sales Sale[]
   cashRefunds Return[]
+  collections CustomerCredit[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -874,6 +877,10 @@ model CustomerCredit {
   shopId     String
   customerId String
 
+  collectionMethod CollectionMethod? // Null: historical/unclassified, never inferred as cash
+  collectionKey String?
+  cashSessionId String?
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id])
   type   CreditType
   amount Float
   returnId String? @unique
@@ -890,8 +897,15 @@ model CustomerCredit {
 
   createdAt DateTime @default(now())
 
+  @@unique([shopId, collectionKey])
+  @@index([shopId, cashSessionId])
   @@index([customerId, createdAt])
   @@index([shopId, createdAt])
+}
+
+enum CollectionMethod {
+  CASH
+  EXTERNAL_NONCASH
 }
 
 enum CreditType {

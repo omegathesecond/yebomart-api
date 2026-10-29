@@ -30,8 +30,10 @@ export const addCreditSchema = Joi.object({
   amount: Joi.when('type', {
     is: 'ADJUSTMENT',
     then: Joi.number().required().invalid(0),
-    otherwise: Joi.number().required().min(0),
+    otherwise: Joi.when('type', { is: 'PAYMENT', then: Joi.number().required().greater(0), otherwise: Joi.number().required().min(0) }),
   }),
+  collectionMethod: Joi.when('type', { is: 'PAYMENT', then: Joi.string().valid('CASH', 'EXTERNAL_NONCASH').required(), otherwise: Joi.forbidden() }),
+  collectionKey: Joi.when('type', { is: 'PAYMENT', then: Joi.string().uuid().required(), otherwise: Joi.forbidden() }),
   note: Joi.string().optional().max(500),
   saleId: Joi.string().optional(),
   // Set true to push an entry through even if it breaches the credit limit.
@@ -244,7 +246,7 @@ export class CustomerController {
       }
 
       const { id } = req.params;
-      const { type, amount, note, saleId, override } = req.body;
+      const { type, amount, note, saleId, override, collectionMethod, collectionKey } = req.body;
 
       const customer = await prisma.customer.findFirst({
         where: { id, shopId: req.user.shopId },
@@ -257,7 +259,7 @@ export class CustomerController {
       }
 
       const result = await prisma.$transaction(tx => applyCustomerCredit(tx, {
-        shopId: req.user!.shopId, customerId: id, type, amount, note, saleId,
+        shopId: req.user!.shopId, customerId: id, type, amount, note, saleId, collectionMethod, collectionKey,
         userId: req.user!.id,
       }, { currencySymbol: customer.shop?.currencySymbol ?? '',
         override, role: req.user!.role }));

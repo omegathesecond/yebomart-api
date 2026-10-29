@@ -105,7 +105,7 @@ async function manual(
     {
       user: { id: userId, shopId, role },
       params: { id: customerId },
-      body: { type, amount, override },
+      body: { type, amount, override, ...(type === "PAYMENT" ? { collectionMethod: "EXTERNAL_NONCASH", collectionKey: randomUUID() } : {}) },
     } as any,
     res,
   );

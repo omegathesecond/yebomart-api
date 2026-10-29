@@ -1,4 +1,5 @@
-import { Prisma, CreditType } from '@prisma/client';
+import { CashSessionService } from './cashSession.service';
+import { Prisma, CreditType, CollectionMethod } from '@prisma/client';
 
 /**
  * Customer-credit money rules.
@@ -150,14 +151,56 @@ export async function applyCustomerCredit(
     note?: string;
     saleId?: string;
     returnId?: string;
+    collectionMethod?: CollectionMethod;
+    collectionKey?: string;
   },
   options: { currencySymbol: string; override?: boolean; role?: string },
 ) {
+  const replay = async () => {
+    const prior = await tx.customerCredit.findUnique({
+      where: { shopId_collectionKey: { shopId: entry.shopId, collectionKey: entry.collectionKey! } },
+    });
+    if (!prior) return null;
+    if (prior.customerId !== entry.customerId || prior.type !== entry.type ||
+        prior.amount !== entry.amount || prior.collectionMethod !== entry.collectionMethod ||
+        (prior.note ?? '') !== (entry.note ?? '') || (prior.saleId ?? '') !== (entry.saleId ?? '')) {
+      throw new Error('Collection retry key was already used for a different entry');
+    }
+    const customer = await tx.customer.findFirstOrThrow({ where: { id: entry.customerId, shopId: entry.shopId } });
+    return { credit: prior, newBalance: customer.balance, balanceChange: 0 };
+  };
+  let cashSessionId: string | undefined;
+  if (entry.type === 'PAYMENT') {
+    if (!entry.collectionKey || !['CASH', 'EXTERNAL_NONCASH'].includes(entry.collectionMethod ?? '') ||
+        !Number.isFinite(entry.amount) || entry.amount <= 0) {
+      throw new Error('Payment requires an explicit collection method, positive amount and retry key');
+    }
+    const prior = await replay();
+    if (prior) return prior;
+    // Same ordering as checkout/refunds: till, then customer. Close shares this till lock.
+    if (entry.collectionMethod === 'CASH') {
+      cashSessionId = await CashSessionService.lockOpenSessionId(tx, entry.shopId) ?? undefined;
+      if (!cashSessionId) {
+        const prior = await replay();
+        if (prior) return prior;
+        throw new Error('Open a till before collecting cash');
+      }
+    }
+  } else if (entry.collectionMethod || entry.collectionKey) {
+    throw new Error('Only customer payments may have collection attribution');
+  }
   await lockCustomerCredit(tx, entry);
+  if (entry.type === 'PAYMENT') {
+    const prior = await replay();
+    if (prior) return prior;
+  }
   const customer = await tx.customer.findFirst({
     where: { id: entry.customerId, shopId: entry.shopId },
   });
   if (!customer) throw new Error('Customer not found');
+  if (entry.saleId && !(await tx.sale.findFirst({ where: { id: entry.saleId, shopId: entry.shopId, customerId: entry.customerId } }))) {
+    throw new Error('Sale not found for this customer and shop');
+  }
   const evaluation = evaluateCredit({
     type: entry.type,
     amount: entry.amount,
@@ -177,7 +220,7 @@ export async function applyCustomerCredit(
       attemptedBalance: evaluation.newBalance,
     });
   }
-  const credit = await tx.customerCredit.create({ data: entry });
+  const credit = await tx.customerCredit.create({ data: { ...entry, cashSessionId } });
   const updatedCustomer = await tx.customer.update({
     where: { id: customer.id },
     data: { balance: { increment: evaluation.balanceChange } },

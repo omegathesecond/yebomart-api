@@ -266,3 +266,20 @@ use return/refund settlement; sale status, stock, saved expected cash/variance
 and reopened Z-report remain unchanged, including after another drawer opens.
 Unassigned cash and noncash voids retain their existing behavior. Credit reversal
 and return-entitlement regressions continue to apply. No migration is required.
+
+Customer debt collections (`customer-collections.test.ts`): PAYMENT writes require
+an explicit CASH or EXTERNAL_NONCASH method and UUID retry key. Cash uses the
+existing till lock before the customer ledger lock; no open till means refusal.
+Ledger, balance, method and till attribution commit together. Collection retries
+return the existing ledger row, including after the till closes; changing a retry
+payload is refused. Debt settlement does not create sales or revenue. Tests cover
+both close race orders, duplicate retries, rollback, foreign shop/customer/sale,
+noncash without a drawer, adjustments and unknown historical attribution.
+
+Apply `20261029131000_customer_collections` before releasing this API and app
+change together. The payment request contract intentionally rejects unclassified
+new payments; there is no legacy request fallback. Historical payment method and
+till remain null, and historical closed collection subtotals remain null/unknown.
+No historical totals or balances are rewritten and no cash attribution is inferred.
+The app retains unconfirmed payment payloads and retry keys in sessionStorage
+across route remounts/reloads in the same browser tab; retry the unchanged entry.
