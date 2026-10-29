@@ -10,6 +10,11 @@ import { getHealthReport, getReadinessStatus, getLivenessStatus } from '@service
 
 const app: Application = express();
 
+// Cloud Run terminates every public request at its ingress proxy. Trust only
+// that nearest hop: caller-supplied X-Forwarded-For prefixes must never choose
+// the rate-limit key. Do not use `true` (which trusts the leftmost value).
+app.set('trust proxy', 1);
+
 // CORS configuration
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || [
   'http://localhost:3000',

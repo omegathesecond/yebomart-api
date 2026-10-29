@@ -27,6 +27,9 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
+      # Persist scale-to-zero at both service and revision levels.
+      - '--min=0'
+      - '--min-instances=0'
       - '--service-account=yebomart-runtime@hiyebo.iam.gserviceaccount.com'
       - '--port'
       - '8080'
