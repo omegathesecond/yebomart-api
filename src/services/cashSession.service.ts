@@ -83,6 +83,14 @@ export class CashSessionService {
     return { total: round2(result._sum.amount ?? 0), count: result._count };
   }
 
+  private static async expensePayouts(shopId: string, sessionId: string, db: Prisma.TransactionClient = prisma) {
+    const payouts = await db.expense.aggregate({
+      where: { shopId, cashSessionId: sessionId, fundingSource: 'TILL_CASH' },
+      _sum: { amount: true }, _count: true,
+    });
+    return { total: round2(payouts._sum.amount ?? 0), count: payouts._count };
+  }
+
   /**
    * Open a till for a shop. Rejects (throws CONFLICT) if one is already open —
    * a shop has at most one live drawer at a time.
@@ -144,17 +152,20 @@ export class CashSessionService {
     const cashSales = await this.cashSalesTotal(shopId, session.id);
 
     const collections = await this.cashCollections(shopId, session.id);
+    const payouts = await this.expensePayouts(shopId, session.id);
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
       ...session,
       cashCollectionsTotal: collections.total,
       cashCollectionsCount: collections.count,
+      expensePayoutsTotal: payouts.total,
+      expensePayoutsCount: payouts.count,
       cashRefundsTotal: refunds.total,
       cashRefundsCount: refunds.count,
       cashSalesTotal: cashSales.total,
       cashSalesCount: cashSales.count,
       // Live drawer = float + cash sales + debt collections - confirmed cash payouts.
-      expectedCash: round2(session.openingFloat + cashSales.total + collections.total - refunds.total),
+      expectedCash: round2(session.openingFloat + cashSales.total + collections.total - refunds.total - payouts.total),
     };
   }
 
@@ -165,7 +176,7 @@ export class CashSessionService {
    * Acquire before sale/product locks, as refund settlement does. A supplied
    * session ID requires that exact drawer to remain open (cash-sale voids).
    */
-  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string, sessionId?: string): Promise<string | null> {
+  static async lockOpenSessionId(tx: Prisma.TransactionClient, shopId: string, sessionId?: string, closedMessage: string | Error = 'Cannot void a cash sale from a closed till. Use the return/refund settlement flow to record the refund.'): Promise<string | null> {
     const session = sessionId ? { id: sessionId } : await tx.cashSession.findFirst({
       where: { shopId, status: 'OPEN' }, select: { id: true },
     });
@@ -175,7 +186,7 @@ export class CashSessionService {
       data: { status: 'OPEN' },
     });
     if (sessionId && locked.count !== 1) {
-      throw new Error('Cannot void a cash sale from a closed till. Use the return/refund settlement flow to record the refund.');
+      throw typeof closedMessage === 'string' ? new Error(closedMessage) : closedMessage;
     }
     return locked.count === 1 ? session.id : null;
   }
@@ -216,14 +227,17 @@ export class CashSessionService {
         tx,
       );
       const collections = await this.cashCollections(input.shopId, session.id, tx);
+      const payouts = await this.expensePayouts(input.shopId, session.id, tx);
       const refunds = await this.cashRefundsTotal(input.shopId, session.id, tx);
-      const expectedCash = round2(session.openingFloat + cashSales.total + collections.total - refunds.total);
+      const expectedCash = round2(session.openingFloat + cashSales.total + collections.total - refunds.total - payouts.total);
       return tx.cashSession.update({
         where: { id: session.id },
         data: {
           closedAt: now,
           countedCash: input.countedCash,
           expectedCash,
+          expensePayoutsTotal: payouts.total,
+          expensePayoutsCount: payouts.count,
           cashCollectionsTotal: collections.total,
           cashCollectionsCount: collections.count,
           variance: input.countedCash - expectedCash,
@@ -292,10 +306,15 @@ export class CashSessionService {
     });
 
     const collections = await this.cashCollections(shopId, session.id);
+    const payouts = session.status === 'CLOSED'
+      ? { total: session.expensePayoutsTotal, count: session.expensePayoutsCount }
+      : await this.expensePayouts(shopId, session.id);
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
       cashCollectionsTotal: session.status === 'CLOSED' ? session.cashCollectionsTotal : collections.total,
       cashCollectionsCount: session.status === 'CLOSED' ? session.cashCollectionsCount : collections.count,
+      expensePayoutsTotal: payouts.total,
+      expensePayoutsCount: payouts.count,
       cashRefundsTotal: refunds.total,
       cashRefundsCount: refunds.count,
       session: {
@@ -305,7 +324,7 @@ export class CashSessionService {
         openedAt: session.openedAt,
         closedAt: session.closedAt,
         countedCash: session.countedCash,
-        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) + collections.total - refunds.total),
+        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) + collections.total - refunds.total - (payouts.total ?? 0)),
         variance: session.variance,
         notes: session.notes,
         cashier: session.user,

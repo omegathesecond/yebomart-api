@@ -283,3 +283,29 @@ till remain null, and historical closed collection subtotals remain null/unknown
 No historical totals or balances are rewritten and no cash attribution is inferred.
 The app retains unconfirmed payment payloads and retry keys in sessionStorage
 across route remounts/reloads in the same browser tab; retry the unchanged entry.
+
+Till expense payouts (`expense-payouts.test.ts`): every new expense requires an
+explicit OUTSIDE_TILL or TILL_CASH source, a positive amount, date and UUID retry
+key. TILL_CASH also requires an exact open shop-owned session. Creation serializes
+shop/key retries, then locks the drawer using the existing guarded update before
+inserting the single expense row. Close shares that lock. Retrying an accepted
+payout after close returns the original row; changed payloads are rejected.
+Till-funded expenses reject all edits/deletes, including while open. Historical
+expenses remain unclassified and cannot be reclassified by update. Outside-till
+expenses retain normal editing and have no drawer effect. Profit reports aggregate
+the same expense row once; no separate expense or sales posting is introduced.
+
+Apply `20261029203000_expense_payouts` before releasing this API/app together.
+The task branches include the already dev-released customer-collection dependency;
+production will also require its migration if promoted there. The new migration
+leaves historical funding/session/key and saved expense subtotals NULL. Closed
+expected/count/variance and expense subtotal/count are saved; historical subtotal
+NULL displays as unknown. No historical reclassification is performed.
+
+Expense payout implementation verification (2026-10-29): API build and 540 unit/
+HTTP regressions passed (2 existing TODOs); app build, 202 regressions and lint
+passed (5 existing warnings). All 106 real PostgreSQL regressions passed with the
+open-till index and refund/collection/expense CHECK constraints applied, including
+both payout/close lock orders and combined sales/collection/refund/expense totals.
+The actual migration also passed a rolled-back historical-row preservation check.
+No production or dev database/service was changed during implementation.
