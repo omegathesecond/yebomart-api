@@ -1,3 +1,4 @@
+import { recordExpense } from '@services/expense.service';
 import { Response } from 'express';
 import Joi from 'joi';
 import { prisma } from '@config/prisma';
@@ -6,9 +7,12 @@ import { AuthRequest } from '@middleware/auth.middleware';
 
 export const createExpenseSchema = Joi.object({
   category: Joi.string().required().valid('RENT', 'UTILITIES', 'SUPPLIES', 'WAGES', 'TRANSPORT', 'MARKETING', 'REPAIRS', 'OTHER'),
-  amount: Joi.number().required().min(0),
+  amount: Joi.number().required().positive().precision(2),
+  fundingSource: Joi.string().valid('OUTSIDE_TILL', 'TILL_CASH').required(),
+  cashSessionId: Joi.when('fundingSource', { is: 'TILL_CASH', then: Joi.string().required(), otherwise: Joi.forbidden() }),
+  submissionKey: Joi.string().guid({ version: 'uuidv4' }).required(),
   description: Joi.string().optional().max(500),
-  date: Joi.date().optional().default(() => new Date()),
+  date: Joi.date().required(),
   receiptUrl: Joi.string().optional().uri(),
 });
 
@@ -45,12 +49,7 @@ export class ExpenseController {
         return;
       }
 
-      const expense = await prisma.expense.create({
-        data: {
-          shopId: req.user.shopId,
-          ...req.body,
-        },
-      });
+      const expense = await recordExpense(req.user.shopId, req.body);
 
       ApiResponse.created(res, expense, 'Expense recorded');
     } catch (error: any) {
@@ -179,6 +178,11 @@ export class ExpenseController {
         return;
       }
 
+      if (existing.fundingSource === 'TILL_CASH') {
+        ApiResponse.badRequest(res, 'Till-funded expenses cannot be edited. Keep the payout record for reconciliation.');
+        return;
+      }
+
       // An explicit '' means "detach the receipt" — store NULL, not ''.
       const data = { ...req.body };
       if (data.receiptUrl === '') data.receiptUrl = null;
@@ -205,6 +209,12 @@ export class ExpenseController {
       }
 
       const { id } = req.params;
+      const existing = await prisma.expense.findFirst({ where: { id, shopId: req.user.shopId } });
+      if (!existing) { ApiResponse.notFound(res, 'Expense not found'); return; }
+      if (existing.fundingSource === 'TILL_CASH') {
+        ApiResponse.badRequest(res, 'Till-funded expenses cannot be deleted. Keep the payout record for reconciliation.');
+        return;
+      }
       await prisma.expense.deleteMany({
         where: { id, shopId: req.user.shopId },
       });

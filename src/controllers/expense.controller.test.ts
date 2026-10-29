@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   ExpenseController,
@@ -28,7 +29,7 @@ function reqFor(
   return {
     user: { id: 'user_1', shopId: opts.shopId ?? 'shop_1', role: 'MANAGER' },
     params: { id: opts.id ?? '' },
-    body,
+    body: opts.id ? body : { fundingSource: 'OUTSIDE_TILL', submissionKey: randomUUID(), date: new Date('2026-10-29T12:00:00Z'), ...body },
   };
 }
 
@@ -166,6 +167,7 @@ describe('ExpenseController.update — attach / replace / detach a receipt', () 
 describe('expense receiptUrl validation contract', () => {
   it('create accepts a valid receipt url', () => {
     const { error } = createExpenseSchema.validate({
+      fundingSource: 'OUTSIDE_TILL', submissionKey: randomUUID(), date: new Date(),
       category: 'SUPPLIES',
       amount: 10,
       receiptUrl: RECEIPT,
@@ -175,6 +177,7 @@ describe('expense receiptUrl validation contract', () => {
 
   it('create rejects a non-url receipt (so the app must omit it, not send "")', () => {
     const { error } = createExpenseSchema.validate({
+      fundingSource: 'OUTSIDE_TILL', submissionKey: randomUUID(), date: new Date(),
       category: 'SUPPLIES',
       amount: 10,
       receiptUrl: '',
@@ -202,3 +205,24 @@ describe('expense receiptUrl validation contract', () => {
     expect(error).toBeDefined();
   });
 });
+
+ it('requires explicit source, exact till membership and retry key for new expenses; edits cannot reclassify', () => {
+   const base = { category: 'TRANSPORT', amount: 50, date: new Date(), submissionKey: randomUUID() };
+   expect(createExpenseSchema.validate(base).error).toBeDefined();
+   expect(createExpenseSchema.validate({ ...base, fundingSource: 'TILL_CASH' }).error).toBeDefined();
+   expect(createExpenseSchema.validate({ ...base, fundingSource: 'TILL_CASH', cashSessionId: 'till' }).error).toBeUndefined();
+   expect(createExpenseSchema.validate({ ...base, fundingSource: 'OUTSIDE_TILL', cashSessionId: 'till' }).error).toBeDefined();
+   expect(createExpenseSchema.validate({ ...base, fundingSource: 'OUTSIDE_TILL', submissionKey: undefined }).error).toBeDefined();
+   expect(updateExpenseSchema.validate({ fundingSource: 'TILL_CASH' }).error).toBeDefined();
+   expect(updateExpenseSchema.validate({ cashSessionId: 'till' }).error).toBeDefined();
+ });
+
+ for (const operation of ['update', 'delete'] as const) it(`rejects ${operation} of a till-funded expense, including after close`, async () => {
+   const expense = seedExpense({ fundingSource: 'TILL_CASH', cashSessionId: 'closed-till', amount: 50 });
+   const res = mockRes();
+   await ExpenseController[operation](reqFor({ amount: 100 }, { id: expense.id }), res);
+   expect(res.statusCode).toBe(400);
+   expect(res.body.message).toContain('cannot be');
+   expect(table('expense')).toHaveLength(1);
+   expect(table('expense')[0].amount).toBe(50);
+ });

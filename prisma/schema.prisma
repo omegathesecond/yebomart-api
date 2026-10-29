@@ -294,7 +294,7 @@ model SaleItem {
 
 // A cashier's till session: opened with a starting float, closed at end of
 // shift with a counted cash total. The cash-up reconciles the physical drawer
-// against expectedCash (openingFloat + cash sales + cash collections - confirmed cash refunds),
+// against expectedCash (openingFloat + cash sales + cash collections - cash refunds - till expenses),
 // recording any variance (shortage/overage) for loss prevention.
 // One OPEN row per shop is enforced by the partial unique index in
 // 20261021000000_one_open_cash_session (Prisma 5 cannot express its predicate).
@@ -313,9 +313,11 @@ model CashSession {
   // Populated at cash-up (close):
   closedAt     DateTime?
   countedCash  Float? // Physical cash counted in the drawer
-  expectedCash Float? // openingFloat + cash sales + cash collections - confirmed cash refunds
+  expectedCash Float? // openingFloat + cash sales + cash collections - cash refunds - till expenses
   cashCollectionsTotal Float? // Null: historical collection attribution unknown
   cashCollectionsCount Int?
+  expensePayoutsTotal Float? // Saved at close; null for historical sessions
+  expensePayoutsCount Int?
   variance     Float? // countedCash - expectedCash (negative = short)
 
   status CashSessionStatus @default(OPEN)
@@ -327,6 +329,7 @@ model CashSession {
   sales Sale[]
   cashRefunds Return[]
   collections CustomerCredit[]
+  expensePayouts Expense[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -395,6 +398,12 @@ model Expense {
   description String?
   date        DateTime
 
+  // Null on historical expenses: never infer drawer funding.
+  fundingSource ExpenseFundingSource?
+  cashSessionId String?
+  submissionKey String?
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id])
+
   // Receipt
   receiptUrl String?
 
@@ -405,6 +414,13 @@ model Expense {
   updatedAt DateTime @updatedAt
 
   @@index([shopId, date])
+  @@index([shopId, cashSessionId])
+  @@unique([shopId, submissionKey])
+}
+
+enum ExpenseFundingSource {
+  OUTSIDE_TILL
+  TILL_CASH
 }
 
 enum ExpenseCategory {
