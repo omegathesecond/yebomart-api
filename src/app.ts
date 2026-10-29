@@ -10,6 +10,12 @@ import { getHealthReport, getReadinessStatus, getLivenessStatus } from '@service
 
 const app: Application = express();
 
+// Cloud Run terminates public connections and appends the connecting client's
+// address to X-Forwarded-For. Trust only that final ingress hop, never arbitrary
+// caller-supplied prefixes (trust proxy=true would allow rate-limit bypass).
+// Outside Cloud Run, connections are direct and forwarded headers stay untrusted.
+app.set('trust proxy', process.env.K_SERVICE ? 1 : false);
+
 // CORS configuration
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || [
   'http://localhost:3000',
