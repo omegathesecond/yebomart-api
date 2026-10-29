@@ -226,3 +226,12 @@ describe('expense receiptUrl validation contract', () => {
    expect(table('expense')).toHaveLength(1);
    expect(table('expense')[0].amount).toBe(50);
  });
+
+it('marks a missing or already closed till as confirmed non-creation', async () => {
+  const res = mockRes();
+  await ExpenseController.create(reqFor({ category: 'TRANSPORT', amount: 50,
+    fundingSource: 'TILL_CASH', cashSessionId: 'closed-till' }), res);
+  expect(res.statusCode).toBe(409);
+  expect(res.body.code).toBe('EXPENSE_PAYOUT_NOT_RECORDED');
+  expect(table('expense')).toHaveLength(0);
+});

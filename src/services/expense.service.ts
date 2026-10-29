@@ -2,6 +2,10 @@ import { prisma } from '@config/prisma';
 import { ExpenseCategory, ExpenseFundingSource } from '@prisma/client';
 import { CashSessionService } from './cashSession.service';
 
+export class ExpensePayoutRejectedError extends Error {
+  readonly code = 'EXPENSE_PAYOUT_NOT_RECORDED';
+}
+
 interface ExpenseInput {
   category: ExpenseCategory;
   amount: number;
@@ -39,8 +43,8 @@ export async function recordExpense(shopId: string, input: ExpenseInput) {
     if (input.fundingSource === 'TILL_CASH') {
       // Check ownership, then share the exact-session guarded update with close.
       const session = await tx.cashSession.findFirst({ where: { id: input.cashSessionId, shopId, status: 'OPEN' } });
-      if (!session) throw new Error('Open a till in this shop before paying an expense from it');
-      await CashSessionService.lockOpenSessionId(tx, shopId, session.id, 'Till is closed; expense payout was not recorded');
+      if (!session) throw new ExpensePayoutRejectedError('Open a till in this shop before paying an expense from it; expense payout was not recorded');
+      await CashSessionService.lockOpenSessionId(tx, shopId, session.id, new ExpensePayoutRejectedError('Till is closed; expense payout was not recorded'));
     }
     return tx.expense.create({ data: { ...input, date: new Date(input.date), shopId } });
   });
