@@ -553,6 +553,9 @@ export function table(name: ModelName): Row[] {
 export function seedShop(partial: Partial<Row> = {}): Row {
   return db.createOne('shop', {
     name: 'Test Shop',
+    taxRate: 0,
+    taxInclusive: false,
+    taxNumber: null,
     ownerYeboidSub: partial.ownerYeboidSub ?? `yeboid-${Math.random().toString(36).slice(2)}`,
     ownerName: 'Owner',
     ownerPhone: partial.ownerPhone ?? `+2687${Math.floor(Math.random() * 1e7)}`,

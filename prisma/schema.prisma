@@ -212,6 +212,10 @@ model Sale {
   subtotal    Float
   discount    Float @default(0)
   tax         Float @default(0)
+  // Null rate/mode means historical metadata was not captured. No backfill.
+  taxRate     Float?
+  taxInclusive Boolean?
+  taxNumber   String?
   totalAmount Float
 
   // Payment

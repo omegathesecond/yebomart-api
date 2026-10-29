@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SaleController, smsReceiptSchema, createSaleSchema } from './sale.controller';
-import { resetDb, seedShop, seedSale, seedProduct, seedCustomer, seedUser, table } from '../test/prismaFake';
+import { prismaFake, resetDb, seedShop, seedSale, seedProduct, seedCustomer, seedUser, table } from '../test/prismaFake';
 
 // emailReceipt dynamically imports @services/yebopay.client — vi.mock still
 // hoists and intercepts that resolution regardless of the static/dynamic
@@ -23,6 +23,7 @@ vi.mock('../services/yebopay.client', () => ({
     sendInvoice: vi.fn(async () => ({ pdf_url: 'https://example.com/inv_1.pdf' })),
   },
 }));
+import { SaleService } from '../services/sale.service';
 import { YeboPayClient } from '../services/yebopay.client';
 
 // Minimal Express req/res doubles. The controller only touches the fields set
@@ -169,6 +170,7 @@ describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sa
     seedShop({ id: 'shop_vat1', name: 'Corner Store', countryCode: 'ZA', ownerYeboidSub: 'yeboid_owner_vat1' });
     const sale = seedSale({
       shopId: 'shop_vat1',
+      taxRate: 15, taxInclusive: false, taxNumber: null,
       subtotal: 100,
       discount: 0,
       tax: 15,
@@ -185,7 +187,7 @@ describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sa
     expect(input.amountPaid).toBe(115);
     expect(input.lineItems).toEqual([
       { description: 'Bread', quantity: 1, unitPrice: 100 },
-      { description: 'VAT', quantity: 1, unitPrice: 15 },
+      { description: 'VAT (15%)', quantity: 1, unitPrice: 15 },
     ]);
     const sum = input.lineItems.reduce((s: number, li: any) => s + li.quantity * li.unitPrice, 0);
     expect(sum).toBe(input.amountPaid);
@@ -196,6 +198,7 @@ describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sa
     // base = 100 - 20 = 80; tax = 80 * 15/100 = 12; total = 92.
     const sale = seedSale({
       shopId: 'shop_vat2',
+      taxRate: 15, taxInclusive: false, taxNumber: null,
       subtotal: 100,
       discount: 20,
       tax: 12,
@@ -211,7 +214,7 @@ describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sa
     expect(input.lineItems).toEqual([
       { description: 'Bread', quantity: 1, unitPrice: 100 },
       { description: 'Discount', quantity: 1, unitPrice: -20 },
-      { description: 'VAT', quantity: 1, unitPrice: 12 },
+      { description: 'VAT (15%)', quantity: 1, unitPrice: 12 },
     ]);
     const sum = input.lineItems.reduce((s: number, li: any) => s + li.quantity * li.unitPrice, 0);
     expect(sum).toBe(92);
@@ -229,6 +232,7 @@ describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sa
     // 100 inclusive @ 15% -> tax 13.04 backed out, total unchanged at 100.
     const sale = seedSale({
       shopId: 'shop_vat3',
+      taxRate: 15, taxInclusive: true, taxNumber: null,
       subtotal: 100,
       discount: 0,
       tax: 13.04,
@@ -249,6 +253,7 @@ describe('SaleController.emailReceipt — YeboPay invoice reconciles with the sa
     seedShop({ id: 'shop_vat4', name: 'Corner Store', countryCode: 'ZA', ownerYeboidSub: 'yeboid_owner_vat4' });
     const sale = seedSale({
       shopId: 'shop_vat4',
+      taxRate: 0, taxInclusive: false, taxNumber: null,
       subtotal: 42,
       discount: 0,
       tax: 0,
@@ -271,6 +276,7 @@ describe('SaleController.smsReceipt — shows a VAT line when the sale has tax',
     seedShop({ id: 'shop_smsvat', name: 'Corner Store', currencySymbol: 'E', taxNumber: 'VAT-12345' });
     const sale = seedSale({
       shopId: 'shop_smsvat',
+      taxRate: 15, taxInclusive: false, taxNumber: 'VAT-12345',
       totalAmount: 115,
       tax: 15,
       items: [{ productName: 'Bread', quantity: 1, unitPrice: 100, costPrice: 60, totalPrice: 100 }],
@@ -281,7 +287,8 @@ describe('SaleController.smsReceipt — shows a VAT line when the sale has tax',
     await SaleController.smsReceipt(reqFor({ saleId: sale.id, phone: '+26878422613' }, 'shop_smsvat'), res);
 
     const text: string = calls[0].body.content.text;
-    expect(text).toContain('VAT (VAT-12345): E15.00');
+    expect(text).toContain('VAT (15%): E15.00');
+    expect(text).toContain('VAT No: VAT-12345');
     expect(text).toContain('Total: E115.00');
   });
 });
@@ -518,5 +525,97 @@ describe('SaleController.create — discount permission', () => {
     expect(res.body.message).toBe('You do not have permission to apply discounts');
     expect(table('sale')).toHaveLength(0);
     expect(table('product')[0].quantity).toBe(10);
+  });
+});
+
+
+describe('sale-time VAT survives shop changes through reopen and delivery', () => {
+  it.each([{ rate: 15, inclusive: false, tax: 12, total: 92 },
+    { rate: 15, inclusive: true, tax: 10.43, total: 80 },
+    { rate: 0, inclusive: false, tax: 0, total: 80 }])(
+    'creates and delivers unchanged $rate% inclusive=$inclusive', async ({ rate, inclusive, tax, total }) => {
+      await prismaFake.shop.update({ where: { id: 'shop_1' }, data: {
+        countryCode: 'ZA', taxRate: rate, taxInclusive: inclusive, taxNumber: 'OLD-VAT',
+      } });
+      const product = seedProduct({ sellPrice: 55, quantity: 10 });
+      const sale = await SaleService.create({ shopId: 'shop_1', paymentMethod: 'CASH', amountPaid: 200,
+        discount: 20, localId: 'original-checkout', items: [{ productId: product.id, quantity: 2, discount: 10 }] });
+      expect(sale).toMatchObject({ taxRate: rate, taxInclusive: inclusive, taxNumber: 'OLD-VAT', tax, totalAmount: total });
+      await prismaFake.shop.update({ where: { id: 'shop_1' }, data: {
+        taxRate: 25, taxInclusive: !inclusive, taxNumber: 'NEW-VAT',
+      } });
+      const replay = await SaleService.create({ shopId: 'shop_1', paymentMethod: 'CASH', amountPaid: 200,
+        localId: 'original-checkout', items: [{ productId: product.id, quantity: 2 }] });
+      expect(replay).toMatchObject({ id: sale.id, taxRate: rate, taxInclusive: inclusive, taxNumber: 'OLD-VAT', totalAmount: total });
+      const reopened = await SaleService.getById(sale.id, 'shop_1');
+      expect(reopened).toMatchObject({ taxRate: rate, taxInclusive: inclusive, taxNumber: 'OLD-VAT', tax, totalAmount: total });
+      const email = mockRes();
+      await SaleController.emailReceipt(reqFor({ saleId: sale.id, email: 'buyer@example.com' }), email);
+      expect(email.statusCode).toBe(200);
+      const invoice = vi.mocked(YeboPayClient.createInvoice).mock.calls.at(-1)![0];
+      expect(invoice.lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)).toBeCloseTo(total, 2);
+      expect(invoice.description).toContain('OLD-VAT');
+      expect(invoice.description).toContain(`VAT (${rate}%${inclusive ? ' incl.' : ''})`);
+      expect(invoice.description).not.toContain('NEW-VAT');
+      const { calls } = stubFetchOk();
+      const sms = mockRes();
+      await SaleController.smsReceipt(reqFor({ saleId: sale.id, phone: '+26878422613' }), sms);
+      expect(sms.statusCode).toBe(200);
+      expect(calls[0].body.content.text).toContain('VAT No: OLD-VAT');
+      expect(calls[0].body.content.text).not.toContain('NEW-VAT');
+    });
+
+  it('legacy metadata is explicit in SMS and blocks invoicing without contacting YeboPay', async () => {
+    const sale = seedSale({ tax: 15, totalAmount: 115, taxRate: null, taxInclusive: null, taxNumber: null });
+    const before = vi.mocked(YeboPayClient.createInvoice).mock.calls.length;
+    const email = mockRes();
+    await SaleController.emailReceipt(reqFor({ saleId: sale.id, email: 'buyer@example.com' }), email);
+    expect(email.statusCode).toBe(400);
+    expect(email.body.message).toContain('Historical VAT metadata unavailable');
+    expect(vi.mocked(YeboPayClient.createInvoice).mock.calls).toHaveLength(before);
+    const { calls } = stubFetchOk();
+    await SaleController.smsReceipt(reqFor({ saleId: sale.id, phone: '+26878422613' }), mockRes());
+    expect(calls[0].body.content.text).toContain('Historical VAT settings and registration unavailable');
+  });
+
+  it('discounted quantities with indivisible cents reconcile exactly', async () => {
+    const sale = seedSale({ taxRate: 0, taxInclusive: false, taxNumber: null,
+      subtotal: 10, discount: 1, tax: 0, totalAmount: 9,
+      items: [{ productName: 'Bread', quantity: 3, unitPrice: 4, costPrice: 1, totalPrice: 10 }] });
+    await prismaFake.shop.update({ where: { id: 'shop_1' }, data: { countryCode: 'ZA' } });
+    const res = mockRes();
+    await SaleController.emailReceipt(reqFor({ saleId: sale.id, email: 'buyer@example.com' }), res);
+    expect(res.statusCode).toBe(200);
+    const invoice = vi.mocked(YeboPayClient.createInvoice).mock.calls.at(-1)![0];
+    expect(invoice.lineItems).toContainEqual({ description: '3 x Bread', quantity: 1, unitPrice: 10 });
+    expect(invoice.lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)).toBe(9);
+  });
+});
+
+
+describe('receipt invoice rounding and integrity', () => {
+  it('names FX rounding and reconciles the converted persisted total', async () => {
+    // SZL is converted by the existing currency policy, with each line rounded independently.
+    await prismaFake.shop.update({ where: { id: 'shop_1' }, data: { countryCode: 'SZ' } });
+    const sale = seedSale({ taxRate: 15, taxInclusive: false, taxNumber: 'OLD-VAT',
+      subtotal: 30, discount: 1, tax: 4.35, totalAmount: 33.35,
+      items: [1, 2, 3].map(n => ({ productName: `Item ${n}`, quantity: 1, unitPrice: 10, costPrice: 1, totalPrice: 10 })) });
+    const res = mockRes();
+    await SaleController.emailReceipt(reqFor({ saleId: sale.id, email: 'buyer@example.com' }), res);
+    expect(res.statusCode).toBe(200);
+    const invoice = vi.mocked(YeboPayClient.createInvoice).mock.calls.at(-1)![0];
+    expect(invoice.lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)).toBeCloseTo(invoice.amountPaid!, 2);
+    expect(invoice.lineItems).toContainEqual({ description: 'Rounding adjustment', quantity: 1, unitPrice: -0.01 });
+  });
+  it('fails loudly instead of disguising inconsistent persisted amounts as rounding', async () => {
+    const sale = seedSale({ taxRate: 15, taxInclusive: false, taxNumber: null,
+      subtotal: 100, discount: 0, tax: 15, totalAmount: 100,
+      items: [{ productName: 'Bread', quantity: 1, unitPrice: 100, costPrice: 1, totalPrice: 100 }] });
+    const count = vi.mocked(YeboPayClient.createInvoice).mock.calls.length;
+    const res = mockRes();
+    await SaleController.emailReceipt(reqFor({ saleId: sale.id, email: 'buyer@example.com' }), res);
+    expect(res.statusCode).toBe(500);
+    expect(res.body.message).toContain('do not reconcile');
+    expect(vi.mocked(YeboPayClient.createInvoice).mock.calls).toHaveLength(count);
   });
 });

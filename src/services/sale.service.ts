@@ -152,23 +152,6 @@ export class SaleService {
     validateDiscount(discount, subtotalValue, 'Cart discount');
     const subtotal = subtotalValue.toNumber();
 
-    // VAT. The shop's tax config is authoritative — the client computes the
-    // same figure for display, but we recompute here so the persisted Sale.tax
-    // and totalAmount can't be spoofed by the request body. Existing shops
-    // default to taxRate 0 → tax 0, total = subtotal - discount (unchanged).
-    const shop = await prisma.shop.findUnique({
-      where: { id: input.shopId },
-      // currencySymbol is only needed to format the credit-limit rejection
-      // message, but it's free to fetch alongside the tax config.
-      select: { taxRate: true, taxInclusive: true, currencySymbol: true },
-    });
-    if (!shop) {
-      throw new Error('Shop not found');
-    }
-    const { tax, total: totalAmount } = computeTax(subtotal, discount, {
-      taxRate: shop.taxRate,
-      taxInclusive: shop.taxInclusive,
-    });
     // CREDIT ("on the book" / pay-later) sales: nothing is tendered now, so the
     // amountPaid >= total guard is intentionally skipped and amountPaid/change
     // are forced to 0 regardless of what the client sent. The full total is
@@ -181,13 +164,6 @@ export class SaleService {
     // credit sale.
     if (isCredit && !input.customerId) {
       throw new Error('A customer is required for credit (pay-later) sales');
-    }
-
-    const amountPaid = isCredit ? 0 : input.amountPaid;
-    const change = isCredit ? 0 : amountPaid - totalAmount;
-
-    if (change < 0) {
-      throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
     }
 
     // Create sale and decrement stock in a transaction.
@@ -205,6 +181,30 @@ export class SaleService {
     for (let attempt = 0; ; attempt++) {
       try {
         sale = await prisma.$transaction(async (tx) => {
+          // VAT. The shop's tax config is authoritative — the client computes the
+          // same figure for display, but we recompute here so the persisted Sale.tax
+          // and totalAmount can't be spoofed by the request body. Existing shops
+          // default to taxRate 0 → tax 0, total = subtotal - discount (unchanged).
+          const shop = await tx.shop.findUnique({
+            where: { id: input.shopId },
+            // currencySymbol is only needed to format the credit-limit rejection
+            // message, but it's free to fetch alongside the tax config.
+            select: { taxRate: true, taxInclusive: true, taxNumber: true, currencySymbol: true },
+          });
+          if (!shop) {
+            throw new Error('Shop not found');
+          }
+          const { tax, total: totalAmount } = computeTax(subtotal, discount, {
+            taxRate: shop.taxRate,
+            taxInclusive: shop.taxInclusive,
+          });
+          const amountPaid = isCredit ? 0 : input.amountPaid;
+          const change = isCredit ? 0 : amountPaid - totalAmount;
+
+          if (change < 0) {
+            throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
+          }
+
           // Take the till lock before product writes, matching cash refunds.
           // No open till (including a close that won the lock) means an
           // explicitly unassigned sale; opening a till is not mandatory.
@@ -316,6 +316,9 @@ export class SaleService {
               subtotal,
               discount,
               tax,
+              taxRate: shop.taxRate,
+              taxInclusive: shop.taxInclusive,
+              taxNumber: shop.taxNumber,
               totalAmount,
               paymentMethod: input.paymentMethod,
               amountPaid,
