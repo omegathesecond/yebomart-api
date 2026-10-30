@@ -530,3 +530,27 @@ describe('stock write routes — managerAuth gates CASHIER off /stock/adjust and
     expect(res.statusCode).toBe(401);
   });
 });
+
+// Exercise transport errors with the real service + transaction-aware counter.
+import { prismaFake } from '../test/prismaFake';
+for (const operation of ['adjust', 'receive'] as const) {
+  it(`${operation}: counter failure rejects explicitly and retry applies stock once`, async () => {
+    const product = seedProduct({ shopId, quantity: 10, costPrice: 5 });
+    const body = operation === 'adjust'
+      ? { productId: product.id, type: 'ADJUSTMENT', quantity: 3 }
+      : { items: [{ productId: product.id, quantity: 3, costPrice: 8 }] };
+    vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('Usage counter unavailable'));
+    const failed = mockRes();
+    await StockController[operation](authReq(body), failed);
+    expect(failed.statusCode).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(failed.body)).toContain('Usage counter unavailable');
+    expect(table('product')[0]).toMatchObject({ quantity: 10, costPrice: 5 });
+    expect(table('stockLog')).toHaveLength(0);
+    const retry = mockRes();
+    await StockController[operation](authReq(body), retry);
+    expect(retry.statusCode).toBe(200);
+    expect(table('product')[0].quantity).toBe(13);
+    expect(table('stockLog')).toHaveLength(1);
+    expect(table('shop')[0].monthlyStockMoves).toBe(1);
+  });
+}

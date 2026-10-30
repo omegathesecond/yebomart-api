@@ -344,17 +344,23 @@ export class ShopService {
    * Increment usage counters (for billing)
    */
   static async incrementUsage(shopId: string, type: 'transaction' | 'stockMove') {
-    if (type === 'transaction') {
-      await prisma.shop.update({
-        where: { id: shopId },
-        data: { monthlyTransactions: { increment: 1 } },
-      });
-    } else {
-      await prisma.shop.update({
-        where: { id: shopId },
-        data: { monthlyStockMoves: { increment: 1 } },
-      });
-    }
+    await ShopService.incrementUsageInTransaction(prisma, shopId, type);
+  }
+
+  /** Count accepted writes using the caller's transaction; failures must abort it. */
+  static async incrementUsageInTransaction(
+    tx: Pick<Prisma.TransactionClient, 'shop'>,
+    shopId: string,
+    type: 'transaction' | 'stockMove',
+    count = 1,
+  ) {
+    if (count === 0) return;
+    await tx.shop.update({
+      where: { id: shopId },
+      data: {
+        [type === 'transaction' ? 'monthlyTransactions' : 'monthlyStockMoves']: { increment: count },
+      },
+    });
   }
 
   /**

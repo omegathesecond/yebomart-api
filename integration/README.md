@@ -266,3 +266,10 @@ use return/refund settlement; sale status, stock, saved expected cash/variance
 and reopened Z-report remain unchanged, including after another drawer opens.
 Unassigned cash and noncash voids retain their existing behavior. Credit reversal
 and return-entitlement regressions continue to apply. No migration is required.
+
+`stock.test.ts` also exercises atomic stock usage accounting: a temporary,
+shop-scoped PostgreSQL CHECK constraint rejects the final usage update after
+inventory writes. Both adjustment and bulk receipt must roll back; retrying the
+receipt counts two movements once. Opposite-order concurrent bulk receipts
+verify exact usage totals alongside the existing locked stock audit history.
+The constraint is removed in `finally`; no live schema or counters are changed.

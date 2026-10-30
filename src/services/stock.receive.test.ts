@@ -11,11 +11,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-// incrementUsage is an out-of-band counter bump — not part of the receive
-// invariants under test, so stub it.
-vi.mock('./shop.service', () => ({
-  ShopService: { incrementUsage: vi.fn().mockResolvedValue(undefined) },
-}));
+// Run real usage accounting inside the fake transaction.
+
 
 import { StockService } from './stock.service';
 import { prismaFake, resetDb, seedShop, seedProduct, table } from '../test/prismaFake';
@@ -24,7 +21,7 @@ let shopId: string;
 
 beforeEach(() => {
   resetDb();
-  const shop = seedShop();
+  const shop = seedShop({ monthlyStockMoves: 0 });
   shopId = shop.id;
 });
 
@@ -106,4 +103,22 @@ describe('StockService.receive — cost price', () => {
     expect(table('stockLog')[0].note).toBe('Same cost');
     expect(table('product')[0].costPrice).toBe(5);
   });
+});
+
+it('rolls back a whole bulk receipt when the usage update fails, then counts each retried movement once', async () => {
+  const a = seedProduct({ shopId, quantity: 10, costPrice: 5 });
+  const b = seedProduct({ shopId, quantity: 20, costPrice: 6 });
+  const input = { shopId, items: [
+    { productId: a.id, quantity: 3, costPrice: 9 },
+    { productId: b.id, quantity: 4, costPrice: 10 },
+  ] };
+  vi.spyOn(prismaFake.shop, 'update').mockRejectedValueOnce(new Error('Usage unavailable'));
+  await expect(StockService.receive(input)).rejects.toThrow('Usage unavailable');
+  expect(table('product').map(p => [p.quantity, p.costPrice])).toEqual([[10, 5], [20, 6]]);
+  expect(table('stockLog')).toHaveLength(0);
+  expect(table('shop')[0].monthlyStockMoves).toBe(0);
+  await StockService.receive(input);
+  expect(table('product').map(p => p.quantity)).toEqual([13, 24]);
+  expect(table('stockLog')).toHaveLength(2);
+  expect(table('shop')[0].monthlyStockMoves).toBe(2);
 });

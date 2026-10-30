@@ -8,7 +8,6 @@ import {
 } from '@controllers/stock.controller';
 import { validateRequest, validateQuery } from '@middleware/validation.middleware';
 import { authMiddleware, managerAuth } from '@middleware/auth.middleware';
-import { trackUsage } from '@middleware/billing.middleware';
 
 const router = Router();
 
@@ -28,7 +27,7 @@ router.get('/reorder-suggestions', validateQuery(reorderSuggestionsSchema), Stoc
 router.get('/movements', validateQuery(listMovementsSchema), StockController.getMovements);
 
 // Stock adjustments (managers only, track usage)
-router.post('/adjust', managerAuth, trackUsage('stockMove'), validateRequest(adjustStockSchema), StockController.adjust);
-router.post('/receive', managerAuth, trackUsage('stockMove'), validateRequest(receiveStockSchema), StockController.receive);
+router.post('/adjust', managerAuth, validateRequest(adjustStockSchema), StockController.adjust);
+router.post('/receive', managerAuth, validateRequest(receiveStockSchema), StockController.receive);
 
 export default router;
