@@ -72,11 +72,9 @@ export class StockService {
           syncedAt: new Date(),
         },
       });
+      await ShopService.incrementUsageInTransaction(tx, input.shopId, 'stockMove');
       return { product: updatedProduct, stockLog };
     });
-
-    // Increment usage
-    await ShopService.incrementUsage(input.shopId, 'stockMove');
 
     return result;
   }
@@ -151,13 +149,9 @@ export class StockService {
         updates.push({ product: updatedProduct, stockLog });
       }
 
+      await ShopService.incrementUsageInTransaction(tx, input.shopId, 'stockMove', updates.length);
       return updates;
     });
-
-    // Increment usage for each item
-    for (let i = 0; i < input.items.length; i++) {
-      await ShopService.incrementUsage(input.shopId, 'stockMove');
-    }
 
     return result;
   }

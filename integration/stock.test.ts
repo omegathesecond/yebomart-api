@@ -9,9 +9,7 @@ import { SaleService } from '../src/services/sale.service';
 import { race } from './lockedRace';
 import { expectStockHistory } from './stockHistory';
 
-vi.mock('../src/services/shop.service', () => ({
-  ShopService: { incrementUsage: vi.fn().mockResolvedValue(undefined) },
-}));
+
 let shopId: string, userId: string, productId: string;
 const shops: string[] = [];
 beforeEach(async () => {
@@ -70,6 +68,7 @@ it('a later failing item rolls back quantity, cost and logs for the batch', asyn
     { productId, quantity: 5, costPrice: 9 }, { productId: other.id, quantity: 0 },
   ] })).rejects.toThrow('Quantity must be positive');
   await consistent(10, 0);
+  expect((await prisma.shop.findUniqueOrThrow({ where: { id: shopId } })).monthlyStockMoves).toBe(0);
   expect((await prisma.product.findUniqueOrThrow({ where: { id: productId } })).costPrice).toBe(5);
 });
 it('rejects foreign products and duplicate batches without writes', async () => {
@@ -84,6 +83,7 @@ it('opposite batch orders serialize without deadlocking', async () => {
   const results = await overlap([() => batch([productId, other.id]), () => batch([other.id, productId])]);
   expect(results.map(r => r.status)).toEqual(['fulfilled', 'fulfilled']);
   await consistent(12, 2);
+  expect((await prisma.shop.findUniqueOrThrow({ where: { id: shopId } })).monthlyStockMoves).toBe(4);
   expect((await prisma.product.findUniqueOrThrow({ where: { id: other.id } })).quantity).toBe(12);
 });
 
@@ -165,4 +165,26 @@ it('an attempted stale absolute count racing a sale is rejected clearly and cann
   expect(results[1].status).toBe('rejected');
   expect((results[1] as PromiseRejectedResult).reason.message).toContain('Stock Adjustments');
   await consistent(8, 1);
+});
+
+it('a real counter write failure rolls back the complete receipt and permits one clean retry', async () => {
+  const other = await prisma.product.create({ data: { shopId, name: 'Other', quantity: 20, costPrice: 6, sellPrice: 15 } });
+  const input = { shopId, userId, items: [
+    { productId, quantity: 3, costPrice: 9 }, { productId: other.id, quantity: 4, costPrice: 10 },
+  ] };
+  // Real PostgreSQL failure at the final counter UPDATE, after both inventory writes.
+  await prisma.$executeRawUnsafe(`ALTER TABLE "Shop" ADD CONSTRAINT "stock_usage_failure" CHECK (id <> '${shopId}' OR "monthlyStockMoves" = 0)`);
+  try {
+    await expect(StockService.receive(input)).rejects.toThrow();
+    await expect(adjust(3)).rejects.toThrow();
+  } finally {
+    await prisma.$executeRawUnsafe('ALTER TABLE "Shop" DROP CONSTRAINT "stock_usage_failure"');
+  }
+  await consistent(10, 0);
+  expect(await prisma.product.findUniqueOrThrow({ where: { id: other.id } })).toMatchObject({ quantity: 20, costPrice: 6 });
+  expect(await prisma.product.findUniqueOrThrow({ where: { id: productId } })).toMatchObject({ costPrice: 5 });
+  expect((await prisma.shop.findUniqueOrThrow({ where: { id: shopId } })).monthlyStockMoves).toBe(0);
+  await StockService.receive(input);
+  await consistent(13, 1);
+  expect((await prisma.shop.findUniqueOrThrow({ where: { id: shopId } })).monthlyStockMoves).toBe(2);
 });

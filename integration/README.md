@@ -344,3 +344,9 @@ pre-change schema seeded with historical supplier PAYMENT and CLOSED cash-up
 rows passes the actual supplier migration; original balance, amount, expected,
 counted and variance are unchanged, new attribution/subtotals remain NULL.
 No deployed service/database, charge, historical data or production branch changed.
+`stock.test.ts` also exercises atomic stock usage accounting: a temporary,
+shop-scoped PostgreSQL CHECK constraint rejects the final usage update after
+inventory writes. Both adjustment and bulk receipt must roll back; retrying the
+receipt counts two movements once. Opposite-order concurrent bulk receipts
+verify exact usage totals alongside the existing locked stock audit history.
+The constraint is removed in `finally`; no live schema or counters are changed.
