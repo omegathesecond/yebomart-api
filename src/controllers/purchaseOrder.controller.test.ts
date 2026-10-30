@@ -14,6 +14,7 @@
  *       amountPaid, and refuses to overpay the balance due (partial payments
  *       are representable).
  */
+import { randomUUID } from 'crypto';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { PurchaseOrderController } from './purchaseOrder.controller';
 import {
@@ -43,7 +44,7 @@ function req(poId: string, body: Record<string, any> = {}): any {
   return {
     user: { id: 'user_1', shopId: 'shop_1', role: 'MANAGER', type: 'user' },
     params: { id: poId },
-    body,
+    body: 'amount' in body ? { fundingSource: 'OUTSIDE_TILL', submissionKey: randomUUID(), ...body } : body,
   };
 }
 
@@ -285,5 +286,41 @@ describe('purchase tax allocation', () => {
     expect(table('supplierLedger')).toHaveLength(0);
     await PurchaseOrderController.receive(req(poId), mockRes());
     expect(table('supplierLedger')[0].amount).toBe(0.15);
+  });
+});
+
+describe('supplier payment funding contract', () => {
+  it('refuses unclassified, invalid or contradictory funding without booking payment', async () => {
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    for (const body of [
+      { amount: 10 },
+      { amount: 10, fundingSource: 'TILL_CASH', submissionKey: randomUUID() },
+      { amount: 10, fundingSource: 'OUTSIDE_TILL', cashSessionId: 'drawer', submissionKey: randomUUID() },
+      { amount: 10, fundingSource: 'OUTSIDE_TILL', submissionKey: 'invalid-key' },
+    ]) {
+      const res = mockRes();
+      await PurchaseOrderController.recordPayment({ ...req(poId), body }, res);
+      expect(res.statusCode).toBe(400);
+      expect(res.body.code).toBe('SUPPLIER_PAYMENT_NOT_RECORDED');
+    }
+    expect(table('supplierLedger').filter(row => row.type === 'PAYMENT')).toHaveLength(0);
+    expect(table('purchaseOrder')[0].amountPaid).toBe(0);
+    expect(table('supplier')[0].balance).toBe(50);
+  });
+  it('replays outside-till submission exactly once and refuses a changed payload', async () => {
+    await PurchaseOrderController.receive(req(poId), mockRes());
+    const payload = { amount: 20, note: 'EFT', fundingSource: 'OUTSIDE_TILL', submissionKey: randomUUID() };
+    for (let i = 0; i < 2; i++) {
+      const res = mockRes();
+      await PurchaseOrderController.recordPayment(req(poId, payload), res);
+      expect(res.statusCode).toBe(200);
+    }
+    const changed = mockRes();
+    await PurchaseOrderController.recordPayment(req(poId, { ...payload, amount: 21 }), changed);
+    expect(changed.statusCode).toBe(409);
+    expect(changed.body.code).not.toBe('SUPPLIER_PAYMENT_NOT_RECORDED');
+    expect(table('purchaseOrder')[0].amountPaid).toBe(20);
+    expect(table('supplier')[0].balance).toBe(30);
+    expect(table('supplierLedger').filter(row => row.type === 'PAYMENT')).toHaveLength(1);
   });
 });

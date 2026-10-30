@@ -27,7 +27,7 @@ export async function recordExpense(shopId: string, input: ExpenseInput) {
   return prisma.$transaction(async tx => {
     // Serialize duplicate requests even for outside-till payments. Key is shop-scoped;
     // the unique index remains the database authority. Acquire before the till lock.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${shopId + ':' + input.submissionKey}, 0))::text`;
+    await CashSessionService.lockPayoutSubmission(tx, shopId, input.submissionKey);
     const prior = await tx.expense.findFirst({ where: { shopId, submissionKey: input.submissionKey } });
     if (prior) {
       if (prior.category !== input.category || prior.amount !== input.amount ||
@@ -41,10 +41,7 @@ export async function recordExpense(shopId: string, input: ExpenseInput) {
       return prior; // Includes retries after close, without touching another till.
     }
     if (input.fundingSource === 'TILL_CASH') {
-      // Check ownership, then share the exact-session guarded update with close.
-      const session = await tx.cashSession.findFirst({ where: { id: input.cashSessionId, shopId, status: 'OPEN' } });
-      if (!session) throw new ExpensePayoutRejectedError('Open a till in this shop before paying an expense from it; expense payout was not recorded');
-      await CashSessionService.lockOpenSessionId(tx, shopId, session.id, new ExpensePayoutRejectedError('Till is closed; expense payout was not recorded'));
+      await CashSessionService.lockPayoutTill(tx, shopId, input.cashSessionId!, new ExpensePayoutRejectedError('Till is closed or unavailable; expense payout was not recorded. Open a till in this shop before paying an expense from it.'));
     }
     return tx.expense.create({ data: { ...input, date: new Date(input.date), shopId } });
   });

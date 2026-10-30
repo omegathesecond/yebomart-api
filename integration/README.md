@@ -309,3 +309,38 @@ open-till index and refund/collection/expense CHECK constraints applied, includi
 both payout/close lock orders and combined sales/collection/refund/expense totals.
 The actual migration also passed a rolled-back historical-row preservation check.
 No production or dev database/service was changed during implementation.
+
+Supplier payments from the till (`supplier-payouts.test.ts`) extend the released
+expense work (task-1793304083639-mpr9zd), using its shared submission lock and
+exact OPEN till guarded update; no second expense/payout row is created. A PAYMENT
+ledger row records the funding source, exact session and shop-scoped UUID key in
+the same transaction as supplier.balance and PO.amountPaid. Global lock order is
+shop/key advisory lock -> exact till -> PO -> supplier. Receipts retain PO ->
+products -> supplier and never acquire a till after the PO. Close only claims the
+till, then reads committed movements. Tests observe PostgreSQL lock waits in
+both payment/close orders, not timing assumptions. Deduplication precedes OPEN
+validation and caps, so accepted requests replay after close/full settlement.
+Changed payloads for an existing key return 409 and retain the original outcome.
+Business rejections return SUPPLIER_PAYMENT_NOT_RECORDED only after rollback,
+allowing the app to correct funding; uncertain responses retain the original
+payload/key in tab sessionStorage, scoped by shop and PO, across remounts.
+
+Apply `20261030033000_supplier_payouts` BEFORE deploying this API and app together.
+New payments require explicit TILL_CASH or OUTSIDE_TILL funding plus a UUID key;
+TILL_CASH requires an exact open shop-owned session. No old-request fallback is
+provided. Historical ledger funding/session/key and closed supplier subtotal/count
+remain NULL/unknown; no backfill or reclassification. Current cash-up subtracts
+supplier payouts separately from expenses, and close saves the supplier subtotal
+and count alongside expected/count/variance. Closed Z reports use those saved
+supplier figures. No YeboPay charge, sale or operating expense is created by
+settling a payable. Existing caps, tax allocation, returns, customer collections
+and expense accounting remain covered by the full PostgreSQL regression suite.
+
+Implementation verification (2026-10-30): API build and 550 unit/HTTP tests pass
+(2 pre-existing TODOs); all 112 real PostgreSQL regressions pass with supplier,
+expense and collection membership constraints and the one-open-till index. App
+build, 233 tests and lint pass (5 existing lint warnings). An independent fresh
+pre-change schema seeded with historical supplier PAYMENT and CLOSED cash-up
+rows passes the actual supplier migration; original balance, amount, expected,
+counted and variance are unchanged, new attribution/subtotals remain NULL.
+No deployed service/database, charge, historical data or production branch changed.

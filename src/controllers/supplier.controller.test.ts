@@ -61,7 +61,7 @@ beforeEach(async () => {
     {
       user: { id: 'user_1', shopId: 'shop_1', role: 'MANAGER', type: 'user' },
       params: { id: poId },
-      body: { amount: 20 },
+      body: { amount: 20, fundingSource: 'OUTSIDE_TILL', submissionKey: 'fc01f5f0-ad6c-4e2c-8185-a93034bf5622' },
     } as any,
     mockRes(),
   );

@@ -6,6 +6,9 @@ import { ApiResponse } from '@utils/ApiResponse';
 import { AuthRequest } from '@middleware/auth.middleware';
 import { round2 } from '@utils/tax';
 import { receivedPayable } from '@utils/purchaseOrder';
+import { CashSessionService } from '../services/cashSession.service';
+
+class PaymentRetryConflict extends Error {}
 
 class ReceiptError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -68,6 +71,9 @@ export const recordPaymentSchema = Joi.object({
   // and may be repeated until the PO's balance due is settled.
   amount: Joi.number().min(0.01).required(),
   note: Joi.string().optional().max(1000),
+  fundingSource: Joi.string().valid('TILL_CASH', 'OUTSIDE_TILL').required(),
+  cashSessionId: Joi.when('fundingSource', { is: 'TILL_CASH', then: Joi.string().required(), otherwise: Joi.forbidden() }),
+  submissionKey: Joi.string().uuid().required(),
 });
 
 export class PurchaseOrderController {
@@ -434,31 +440,43 @@ export class PurchaseOrderController {
       // Only staff tokens carry a real User id (see receive()).
       const userId = req.user.type === 'user' ? req.user.id : undefined;
       const poId = req.params.id;
-      const { amount, note } = req.body;
+      const { error: validationError, value } = recordPaymentSchema.validate(req.body);
+      if (validationError) throw new ReceiptError(validationError.message);
+      const { amount, note, fundingSource, cashSessionId, submissionKey } = value;
 
       const updatedPo = await prisma.$transaction(async (tx) => {
+        // Global order: shop/key advisory lock -> till -> PO -> supplier.
+        // Dedup before checking OPEN allows unchanged retries after till close.
+        await CashSessionService.lockPayoutSubmission(tx, shopId, submissionKey);
+        const prior = await tx.supplierLedger.findFirst({ where: { shopId, submissionKey } });
+        if (prior) {
+          if (prior.poId !== poId || prior.amount !== amount || prior.fundingSource !== fundingSource ||
+              (prior.cashSessionId ?? null) !== (cashSessionId ?? null) || (prior.paymentNote ?? '') !== (note ?? '')) {
+            throw new PaymentRetryConflict('Retry key belongs to a different supplier payment; retry the unchanged entry');
+          }
+          return tx.purchaseOrder.findFirst({ where: { id: poId, shopId },
+            include: { supplier: { select: { id: true, name: true, phone: true, balance: true } }, items: true } });
+        }
+        if (fundingSource === 'TILL_CASH') {
+          await CashSessionService.lockPayoutTill(tx, shopId, cashSessionId,
+            new ReceiptError('Till is closed or unavailable in this shop; supplier payment was not recorded'));
+        }
         await lockPurchaseOrder(tx, poId, shopId);
         const po = await tx.purchaseOrder.findFirst({
           where: { id: poId, shopId },
         });
         if (!po) {
-          ApiResponse.notFound(res, 'Purchase order not found');
-          return;
+          throw new ReceiptError('Purchase order not found', 404);
         }
 
         // Can't pay more than is owed on the PO (amountReceived - amountPaid).
         // Fail loudly rather than silently clamping — overpayment is a data error.
         const balanceDue = round2(po.amountReceived - po.amountPaid);
         if (balanceDue <= 0) {
-          ApiResponse.badRequest(res, 'Nothing is owed on this purchase order');
-          return;
+          throw new ReceiptError('Nothing is owed on this purchase order');
         }
         if (amount > balanceDue) {
-          ApiResponse.badRequest(
-            res,
-            `Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`
-          );
-          return;
+          throw new ReceiptError(`Payment of ${amount} exceeds the ${balanceDue} balance due on this purchase order`);
         }
 
         await tx.supplierLedger.create({
@@ -466,6 +484,7 @@ export class PurchaseOrderController {
             shopId,
             supplierId: po.supplierId,
             type: 'PAYMENT',
+            fundingSource, cashSessionId, submissionKey, paymentNote: note,
             amount,
             poId: po.id,
             userId,
@@ -496,6 +515,14 @@ export class PurchaseOrderController {
         'Payment recorded'
       );
     } catch (error: any) {
+      if (error instanceof PaymentRetryConflict) {
+        ApiResponse.conflict(res, error.message);
+        return;
+      }
+      if (error instanceof ReceiptError) {
+        ApiResponse.error(res, error.message, error.status, undefined, { code: 'SUPPLIER_PAYMENT_NOT_RECORDED' });
+        return;
+      }
       ApiResponse.serverError(res, error.message, error);
     }
   }

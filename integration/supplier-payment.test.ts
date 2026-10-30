@@ -80,7 +80,7 @@ async function request(
         role: "OWNER",
       },
       params: { id: poId },
-      body,
+      body: method === 'recordPayment' ? { fundingSource: 'OUTSIDE_TILL', submissionKey: randomUUID(), ...body } : body,
     } as any,
     res,
   );

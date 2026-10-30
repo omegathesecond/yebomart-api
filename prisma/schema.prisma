@@ -318,6 +318,8 @@ model CashSession {
   cashCollectionsCount Int?
   expensePayoutsTotal Float? // Saved at close; null for historical sessions
   expensePayoutsCount Int?
+  supplierPayoutsTotal Float? // Saved at close; historical values remain unknown
+  supplierPayoutsCount Int?
   variance     Float? // countedCash - expectedCash (negative = short)
 
   status CashSessionStatus @default(OPEN)
@@ -330,6 +332,7 @@ model CashSession {
   cashRefunds Return[]
   collections CustomerCredit[]
   expensePayouts Expense[]
+  supplierPayouts SupplierLedger[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -835,6 +838,12 @@ model SupplierLedger {
   // Always the positive magnitude of the transaction. Its effect on the
   // balance is determined by `type` (BILL/+ , PAYMENT/- , ADJUSTMENT/signed).
   amount Float
+  fundingSource SupplierPaymentFundingSource?
+  cashSessionId String?
+  submissionKey String?
+  // Original caller note, distinct from the generated ledger description.
+  paymentNote String?
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
   poId   String? // Set when the entry came from receiving a purchase order
   note   String?
 
@@ -850,6 +859,13 @@ model SupplierLedger {
   @@index([supplierId, createdAt])
   @@index([shopId, createdAt])
   @@index([poId])
+  @@unique([shopId, submissionKey])
+  @@index([shopId, cashSessionId])
+}
+
+enum SupplierPaymentFundingSource {
+  OUTSIDE_TILL
+  TILL_CASH
 }
 
 enum SupplierLedgerType {

@@ -83,12 +83,27 @@ export class CashSessionService {
     return { total: round2(result._sum.amount ?? 0), count: result._count };
   }
 
-  private static async expensePayouts(shopId: string, sessionId: string, db: Prisma.TransactionClient = prisma) {
-    const payouts = await db.expense.aggregate({
-      where: { shopId, cashSessionId: sessionId, fundingSource: 'TILL_CASH' },
-      _sum: { amount: true }, _count: true,
-    });
-    return { total: round2(payouts._sum.amount ?? 0), count: payouts._count };
+  private static async cashPayouts(shopId: string, sessionId: string, db: Prisma.TransactionClient = prisma) {
+    const where = { shopId, cashSessionId: sessionId, fundingSource: 'TILL_CASH' as const };
+    const expense = await db.expense.aggregate({ where, _sum: { amount: true }, _count: true });
+    const supplier = await db.supplierLedger.aggregate({ where: { ...where, type: 'PAYMENT' }, _sum: { amount: true }, _count: true });
+    return {
+      expense: { total: round2(expense._sum.amount ?? 0), count: expense._count },
+      supplier: { total: round2(supplier._sum.amount ?? 0), count: supplier._count },
+    };
+  }
+
+  /** Shared by expense and supplier payouts: key -> exact till -> business rows.
+   * Close only locks the till; it never acquires a submission or business lock.
+   * Receipts acquire PO -> products -> supplier, never a till after a PO.
+   */
+  static async lockPayoutSubmission(tx: Prisma.TransactionClient, shopId: string, key: string) {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${shopId + ':' + key}, 0))::text`;
+  }
+
+  static async lockPayoutTill(tx: Prisma.TransactionClient, shopId: string, sessionId: string, error: Error) {
+    // Exact-session guarded update checks ownership and OPEN after waiting for close.
+    await this.lockOpenSessionId(tx, shopId, sessionId, error);
   }
 
   /**
@@ -152,12 +167,14 @@ export class CashSessionService {
     const cashSales = await this.cashSalesTotal(shopId, session.id);
 
     const collections = await this.cashCollections(shopId, session.id);
-    const payouts = await this.expensePayouts(shopId, session.id);
+    const { expense: payouts, supplier: supplierPayouts } = await this.cashPayouts(shopId, session.id);
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
       ...session,
       cashCollectionsTotal: collections.total,
       cashCollectionsCount: collections.count,
+      supplierPayoutsTotal: supplierPayouts.total,
+      supplierPayoutsCount: supplierPayouts.count,
       expensePayoutsTotal: payouts.total,
       expensePayoutsCount: payouts.count,
       cashRefundsTotal: refunds.total,
@@ -165,7 +182,7 @@ export class CashSessionService {
       cashSalesTotal: cashSales.total,
       cashSalesCount: cashSales.count,
       // Live drawer = float + cash sales + debt collections - confirmed cash payouts.
-      expectedCash: round2(session.openingFloat + cashSales.total + collections.total - refunds.total - payouts.total),
+      expectedCash: round2(session.openingFloat + cashSales.total + collections.total - refunds.total - payouts.total - supplierPayouts.total),
     };
   }
 
@@ -227,15 +244,17 @@ export class CashSessionService {
         tx,
       );
       const collections = await this.cashCollections(input.shopId, session.id, tx);
-      const payouts = await this.expensePayouts(input.shopId, session.id, tx);
+      const { expense: payouts, supplier: supplierPayouts } = await this.cashPayouts(input.shopId, session.id, tx);
       const refunds = await this.cashRefundsTotal(input.shopId, session.id, tx);
-      const expectedCash = round2(session.openingFloat + cashSales.total + collections.total - refunds.total - payouts.total);
+      const expectedCash = round2(session.openingFloat + cashSales.total + collections.total - refunds.total - payouts.total - supplierPayouts.total);
       return tx.cashSession.update({
         where: { id: session.id },
         data: {
           closedAt: now,
           countedCash: input.countedCash,
           expectedCash,
+          supplierPayoutsTotal: supplierPayouts.total,
+          supplierPayoutsCount: supplierPayouts.count,
           expensePayoutsTotal: payouts.total,
           expensePayoutsCount: payouts.count,
           cashCollectionsTotal: collections.total,
@@ -306,13 +325,15 @@ export class CashSessionService {
     });
 
     const collections = await this.cashCollections(shopId, session.id);
-    const payouts = session.status === 'CLOSED'
-      ? { total: session.expensePayoutsTotal, count: session.expensePayoutsCount }
-      : await this.expensePayouts(shopId, session.id);
+    const livePayouts = session.status === 'CLOSED' ? null : await this.cashPayouts(shopId, session.id);
+    const payouts = livePayouts?.expense ?? { total: session.expensePayoutsTotal, count: session.expensePayoutsCount };
+    const supplierPayouts = livePayouts?.supplier ?? { total: session.supplierPayoutsTotal, count: session.supplierPayoutsCount };
     const refunds = await this.cashRefundsTotal(shopId, session.id);
     return {
       cashCollectionsTotal: session.status === 'CLOSED' ? session.cashCollectionsTotal : collections.total,
       cashCollectionsCount: session.status === 'CLOSED' ? session.cashCollectionsCount : collections.count,
+      supplierPayoutsTotal: supplierPayouts.total,
+      supplierPayoutsCount: supplierPayouts.count,
       expensePayoutsTotal: payouts.total,
       expensePayoutsCount: payouts.count,
       cashRefundsTotal: refunds.total,
@@ -324,7 +345,7 @@ export class CashSessionService {
         openedAt: session.openedAt,
         closedAt: session.closedAt,
         countedCash: session.countedCash,
-        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) + collections.total - refunds.total - (payouts.total ?? 0)),
+        expectedCash: session.status === 'CLOSED' ? session.expectedCash : round2(session.openingFloat + (byPaymentMethod.find(m => m.method === 'CASH')?.total ?? 0) + collections.total - refunds.total - (payouts.total ?? 0) - (supplierPayouts.total ?? 0)),
         variance: session.variance,
         notes: session.notes,
         cashier: session.user,

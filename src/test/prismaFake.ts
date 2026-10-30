@@ -63,7 +63,7 @@ const UNIQUE_KEYS: Record<ModelName, string[][]> = {
   supplier: [['shopId', 'phone']],
   purchaseOrder: [],
   pOItem: [],
-  supplierLedger: [],
+  supplierLedger: [['shopId', 'submissionKey']],
   return: [],
   returnItem: [],
   returnExchangeItem: [],
