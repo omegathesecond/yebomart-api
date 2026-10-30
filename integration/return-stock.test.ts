@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { afterAll, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, expect, it } from 'vitest';
 import { prisma } from '../src/config/prisma';
 import { ReturnController } from '../src/controllers/return.controller';
 import { SaleService } from '../src/services/sale.service';
@@ -8,9 +8,6 @@ import { StockService } from '../src/services/stock.service';
 import { race } from './lockedRace';
 import { expectStockHistory } from './stockHistory';
 
-vi.mock('../src/services/shop.service', () => ({
-  ShopService: { incrementUsage: vi.fn().mockResolvedValue(undefined) },
-}));
 let shopId: string, productId: string, userId: string;
 const shops: string[] = [];
 beforeEach(async () => {
