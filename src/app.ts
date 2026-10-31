@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import routes from '@routes/index';
 import { errorHandler, notFoundHandler } from '@middleware/error.middleware';
 import { standardLimiter } from '@middleware/rateLimit.middleware';
+import { ApiResponse } from '@utils/ApiResponse';
 import { getHealthReport, getReadinessStatus, getLivenessStatus } from '@services/health.service';
 
 const app: Application = express();
@@ -36,21 +37,24 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || [
 app.use(helmet());
 app.use(compression());
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, Postman, etc.)
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    exposedHeaders: ['X-Total-Count'],
-  })
-);
+const corsMiddleware = cors({
+  // The gate below validates the origin before reflecting it.
+  origin: true,
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['X-Total-Count'],
+});
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+    // An untrusted caller is a policy rejection, not a server failure. Keep
+    // the rejection visible without logging caller-controlled header content.
+    console.warn('CORS origin rejected');
+    ApiResponse.forbidden(res, 'Not allowed by CORS');
+    return;
+  }
+  corsMiddleware(req, res, next);
+});
 
 // Logging
 if (process.env.NODE_ENV !== 'production') {
