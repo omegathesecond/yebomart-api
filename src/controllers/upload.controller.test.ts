@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-const R2_KEYS = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'] as const;
+const R2_KEYS = ['PUBLIC_PHOTO_BUCKET'] as const;
 const savedEnv: Record<string, string | undefined> = {};
 for (const k of R2_KEYS) savedEnv[k] = process.env[k];
 
@@ -61,7 +61,7 @@ describe('uploadImage — fails loud when R2 is unconfigured', () => {
 
     expect(res.statusCode).toBe(500);
     expect(res.body.success).toBe(false);
-    expect(res.body.message).toMatch(/R2.*not configured/i);
+    expect(res.body.message).toMatch(/photo storage.*not configured/i);
     // The old silent fallback returned { success: true, data: { url: 'data:...base64,...' } }.
     // None of that may be present.
     expect(res.body.data).toBeUndefined();
