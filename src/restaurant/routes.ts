@@ -69,7 +69,7 @@ function read(schema: Joi.Schema, data: unknown): any {
 }
 const text = (max: number) => Joi.string().trim().max(max);
 const phone = Joi.string().pattern(/^\+[1-9]\d{6,14}$/);
-const identifier = Joi.string().max(100).required();
+const identifier = Joi.string().max(100);
 const token = (req: Request) => {
   const t = req.header("X-Order-Token");
   assert(
@@ -237,7 +237,7 @@ const profileSchema = Joi.object({
   leadMinutes: Joi.number().integer().min(0).max(1440).required(),
   slotMinutes: Joi.number().valid(5, 10, 15, 20, 30, 60).required(),
   slotCapacity: Joi.number().integer().min(1).max(500).required(),
-  tables: Joi.array().items(text(40).required()).unique().max(100).required(),
+  tables: Joi.array().items(text(40)).unique().max(100).required(),
   menuProductIds: Joi.array().items(identifier).unique().max(100).required(),
   unavailableProductIds: Joi.array()
     .items(identifier)
@@ -666,7 +666,7 @@ const orderSchema = Joi.object({
   items: Joi.array()
     .items(
       Joi.object({
-        productId: identifier,
+        productId: identifier.required(),
         quantity: Joi.number().integer().min(1).max(20).required(),
         notes: text(300).allow(""),
       }),

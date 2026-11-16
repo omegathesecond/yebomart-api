@@ -9,6 +9,7 @@ import { YeboPayClient } from "../src/services/yebopay.client";
 vi.mock("../src/services/shop.service", () => ({
   ShopService: { incrementUsage: vi.fn() },
 }));
+vi.mock('@yebo/mcp-server',()=>({JwksValidator:class {async verify(){throw new Error('Not a YeboID test token');}},extractBearerToken:(header?:string)=>header?.startsWith('Bearer ')?header.slice(7):null}));
 let shopId: string, productId: string, slug: string, at: string;
 const shops: string[] = [];
 beforeEach(async () => {
@@ -287,4 +288,100 @@ it("enforces current kitchen duty and disabled modules on direct API requests", 
   await expect(
     enforceWorkspace(req("/api/stock"), { ...user, role: "MANAGER" }),
   ).rejects.toThrow("not enabled");
+});
+
+it("serves the actual setup and public order HTTP contracts, including a first menu with no products", async () => {
+  const express = (await import("express")).default;
+  const { restaurantRoutes, publicRestaurantRoutes } = await import(
+    "../src/restaurant/routes"
+  );
+  const { JWTUtil } = await import("../src/utils/jwt");
+  const app = express();
+  app.use(express.json());
+  app.use("/api/restaurant", restaurantRoutes);
+  app.use("/api/restaurants", publicRestaurantRoutes);
+  const manager = await prisma.user.create({
+    data: { shopId, name: "Manager", phone: randomUUID(), role: "MANAGER" },
+  });
+  const token = JWTUtil.generateAccessToken({
+    id: manager.id,
+    shopId,
+    role: "MANAGER",
+    type: "user",
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((done) => server.once("listening", done));
+  const base = "http://127.0.0.1:" + (server.address() as any).port;
+  try {
+    await prisma.restaurantProfile.delete({ where: { shopId } });
+    const initial = await fetch(base + "/api/restaurant", {
+      headers: { Authorization: "Bearer " + token },
+    });
+    expect(await initial.json()).toMatchObject({ success: true, data: null });
+    const config = {
+      slug,
+      description: "HTTP test only",
+      publicPhone: "+26878422613",
+      published: false,
+      acceptingOrders: false,
+      hours: [0, 1, 2, 3, 4, 5, 6].map((day) => ({
+        day,
+        open: "00:00",
+        close: "23:59",
+      })),
+      leadMinutes: 0,
+      slotMinutes: 15,
+      slotCapacity: 20,
+      tables: [],
+      menuProductIds: [],
+      unavailableProductIds: [],
+      allowCash: true,
+      allowOnline: false,
+      allowAssistant: false,
+    };
+    const put = (body: any) =>
+      fetch(base + "/api/restaurant", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+    const setup = await put(config);
+    const setupBody=await setup.json();expect(setup.status,JSON.stringify(setupBody)).toBe(200);
+    expect(setupBody).toMatchObject({
+      success: true,
+      data: { slug, menuProductIds: [] },
+    });
+    expect(setup.status).toBe(200);
+    expect((await put({ ...config, published: true })).status).toBe(400);
+    expect(
+      (
+        await put({
+          ...config,
+          published: true,
+          acceptingOrders: true,
+          menuProductIds: [productId],
+        })
+      ).status,
+    ).toBe(200);
+    const menu = await fetch(base + "/api/restaurants/" + slug);
+    expect(await menu.json()).toMatchObject({
+      success: true,
+      data: { items: [{ id: productId, price: 40 }] },
+    });
+    const order = await fetch(base + "/api/restaurants/" + slug + "/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input()),
+    });
+    expect(order.status).toBe(201);
+    expect(await order.json()).toMatchObject({
+      success: true,
+      data: { totalMinor: 4600, status: "NEW", paymentStatus: "UNPAID" },
+    });
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+  }
 });
