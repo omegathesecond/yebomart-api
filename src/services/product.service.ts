@@ -1,6 +1,6 @@
-import { prisma } from '@config/prisma';
-import { Prisma } from '@prisma/client';
-import { paginate, paginationMeta } from '@utils/pagination';
+import { prisma } from "@config/prisma";
+import { Prisma } from "@prisma/client";
+import { paginate, paginationMeta } from "@utils/pagination";
 
 interface OptionalProductFields {
   attributes?: Record<string, string | number> | null;
@@ -11,6 +11,7 @@ interface OptionalProductFields {
 }
 
 interface CreateProductInput extends OptionalProductFields {
+  trackStock?: boolean;
   shopId: string;
   barcode?: string;
   sku?: string;
@@ -51,16 +52,20 @@ interface ListProductsParams {
   isActive?: boolean;
 }
 
-const stockEditError = 'Use Stock Adjustments to change existing stock; product edits and imports cannot set quantity';
+const stockEditError =
+  "Use Stock Adjustments to change existing stock; product edits and imports cannot set quantity";
 function rejectStockEdit(data: object) {
-  if ('quantity' in data) throw new Error(stockEditError);
+  if ("quantity" in data) throw new Error(stockEditError);
 }
 
 export class ProductService {
   /**
    * Create a new product
    */
-  static async create(input: CreateProductInput) {
+  static async create(
+    input: CreateProductInput,
+    transaction?: Prisma.TransactionClient,
+  ) {
     // Check for duplicate barcode
     if (input.barcode) {
       const existing = await prisma.product.findFirst({
@@ -71,11 +76,11 @@ export class ProductService {
       });
 
       if (existing) {
-        throw new Error('A product with this barcode already exists');
+        throw new Error("A product with this barcode already exists");
       }
     }
 
-    return prisma.$transaction(async (tx) => {
+    const write = async (tx: Prisma.TransactionClient) => {
       const product = await tx.product.create({
         data: {
           shopId: input.shopId,
@@ -86,12 +91,14 @@ export class ProductService {
           category: input.category,
           costPrice: input.costPrice,
           sellPrice: input.sellPrice,
+          trackStock: input.trackStock ?? true,
           quantity: input.quantity || 0,
           reorderAt: input.reorderAt || 10,
-          unit: input.unit || 'each',
+          unit: input.unit || "each",
           imageUrl: input.imageUrl,
           localId: input.localId,
-          attributes: input.attributes === null ? Prisma.DbNull : input.attributes,
+          attributes:
+            input.attributes === null ? Prisma.DbNull : input.attributes,
           wholesalePrice: input.wholesalePrice,
           wholesaleMinQty: input.wholesaleMinQty,
           packPrice: input.packPrice,
@@ -106,17 +113,18 @@ export class ProductService {
           data: {
             shopId: input.shopId,
             productId: product.id,
-            type: 'INITIAL',
+            type: "INITIAL",
             quantity: input.quantity,
             previousQty: 0,
             newQty: input.quantity,
-            note: 'Initial stock',
+            note: "Initial stock",
           },
         });
       }
 
       return product;
-    });
+    };
+    return transaction ? write(transaction) : prisma.$transaction(write);
   }
 
   /**
@@ -131,9 +139,9 @@ export class ProductService {
 
     if (params.search) {
       where.OR = [
-        { name: { contains: params.search, mode: 'insensitive' } },
-        { barcode: { contains: params.search, mode: 'insensitive' } },
-        { sku: { contains: params.search, mode: 'insensitive' } },
+        { name: { contains: params.search, mode: "insensitive" } },
+        { barcode: { contains: params.search, mode: "insensitive" } },
+        { sku: { contains: params.search, mode: "insensitive" } },
       ];
     }
 
@@ -158,14 +166,14 @@ export class ProductService {
         where,
         skip,
         take,
-        orderBy: { name: 'asc' },
+        orderBy: { name: "asc" },
       }),
       prisma.product.count({ where }),
     ]);
 
     // Filter for actual low stock if needed
     const filteredProducts = params.lowStock
-      ? products.filter(p => p.quantity <= p.reorderAt)
+      ? products.filter((p) => p.quantity <= p.reorderAt)
       : products;
 
     return {
@@ -186,7 +194,7 @@ export class ProductService {
     });
 
     if (!product) {
-      throw new Error('Product not found');
+      throw new Error("Product not found");
     }
 
     return product;
@@ -205,7 +213,7 @@ export class ProductService {
     });
 
     if (!product) {
-      throw new Error('Product not found');
+      throw new Error("Product not found");
     }
 
     return product;
@@ -214,7 +222,11 @@ export class ProductService {
   /**
    * Update product
    */
-  static async update(productId: string, shopId: string, data: UpdateProductInput) {
+  static async update(
+    productId: string,
+    shopId: string,
+    data: UpdateProductInput,
+  ) {
     rejectStockEdit(data);
     // Verify product belongs to shop
     const existing = await prisma.product.findFirst({
@@ -222,7 +234,7 @@ export class ProductService {
     });
 
     if (!existing) {
-      throw new Error('Product not found');
+      throw new Error("Product not found");
     }
 
     // Check for duplicate barcode
@@ -236,7 +248,7 @@ export class ProductService {
       });
 
       if (duplicate) {
-        throw new Error('A product with this barcode already exists');
+        throw new Error("A product with this barcode already exists");
       }
     }
 
@@ -261,7 +273,7 @@ export class ProductService {
     });
 
     if (!existing) {
-      throw new Error('Product not found');
+      throw new Error("Product not found");
     }
 
     await prisma.product.update({
@@ -269,7 +281,7 @@ export class ProductService {
       data: { isActive: false },
     });
 
-    return { message: 'Product deleted' };
+    return { message: "Product deleted" };
   }
 
   /**
@@ -283,11 +295,11 @@ export class ProductService {
         category: { not: null },
       },
       select: { category: true },
-      distinct: ['category'],
+      distinct: ["category"],
     });
 
     return categories
-      .map(c => c.category)
+      .map((c) => c.category)
       .filter((c): c is string => c !== null)
       .sort();
   }
@@ -307,7 +319,7 @@ export class ProductService {
       reorderAt?: number;
       unit?: string;
     }>,
-    updateExisting = false
+    updateExisting = false,
   ) {
     let created = 0;
     let updated = 0;
@@ -368,7 +380,7 @@ export class ProductService {
       costPrice?: number;
       sellPrice?: number;
       isActive?: boolean;
-    }>
+    }>,
   ) {
     let updated = 0;
     let failed = 0;
@@ -391,17 +403,20 @@ export class ProductService {
 
         if (!product) {
           errors.push({
-            identifier: update.id || update.barcode || 'unknown',
-            error: 'Product not found',
+            identifier: update.id || update.barcode || "unknown",
+            error: "Product not found",
           });
           failed++;
           continue;
         }
 
         const updateData: Prisma.ProductUpdateInput = { syncedAt: new Date() };
-        if (update.costPrice !== undefined) updateData.costPrice = update.costPrice;
-        if (update.sellPrice !== undefined) updateData.sellPrice = update.sellPrice;
-        if (update.isActive !== undefined) updateData.isActive = update.isActive;
+        if (update.costPrice !== undefined)
+          updateData.costPrice = update.costPrice;
+        if (update.sellPrice !== undefined)
+          updateData.sellPrice = update.sellPrice;
+        if (update.isActive !== undefined)
+          updateData.isActive = update.isActive;
 
         await prisma.product.update({
           where: { id: product.id },
@@ -410,7 +425,7 @@ export class ProductService {
         updated++;
       } catch (error: any) {
         errors.push({
-          identifier: update.id || update.barcode || 'unknown',
+          identifier: update.id || update.barcode || "unknown",
           error: error.message,
         });
         failed++;
@@ -426,24 +441,24 @@ export class ProductService {
   static async exportCSV(shopId: string) {
     const products = await prisma.product.findMany({
       where: { shopId, isActive: true },
-      orderBy: { name: 'asc' },
+      orderBy: { name: "asc" },
     });
 
     const headers = [
-      'barcode',
-      'name',
-      'category',
-      'costPrice',
-      'sellPrice',
-      'quantity',
-      'reorderAt',
-      'unit',
+      "barcode",
+      "name",
+      "category",
+      "costPrice",
+      "sellPrice",
+      "quantity",
+      "reorderAt",
+      "unit",
     ];
 
-    const rows = products.map(p => [
-      p.barcode || '',
+    const rows = products.map((p) => [
+      p.barcode || "",
       `"${p.name.replace(/"/g, '""')}"`,
-      p.category || '',
+      p.category || "",
       p.costPrice.toString(),
       p.sellPrice.toString(),
       p.quantity.toString(),
@@ -451,6 +466,6 @@ export class ProductService {
       p.unit,
     ]);
 
-    return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    return [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
   }
 }

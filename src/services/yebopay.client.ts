@@ -144,15 +144,16 @@ interface ApiEnvelope<T> {
 }
 
 export class YeboPayClient {
-  static async createCheckout(input: CreateCheckoutInput): Promise<YeboPayCheckoutDto> {
+  static async createCheckout(input: CreateCheckoutInput, merchantKey?: string): Promise<YeboPayCheckoutDto> {
     const headers: Record<string, string> = {
-      'X-API-Key': getApiKey(),
+      'X-API-Key': merchantKey ?? getApiKey(),
       'Content-Type': 'application/json',
     };
     if (input.idempotencyKey) headers['Idempotency-Key'] = input.idempotencyKey;
 
     const res = await fetch(`${BASE_URL}/v1/checkouts`, {
       method: 'POST',
+      signal: AbortSignal.timeout(15000),
       headers,
       body: JSON.stringify({
         amount: input.amount,
@@ -175,9 +176,10 @@ export class YeboPayClient {
     return body.data;
   }
 
-  static async getCheckout(id: string): Promise<YeboPayCheckoutDto> {
+  static async getCheckout(id: string, merchantKey?: string): Promise<YeboPayCheckoutDto> {
     const res = await fetch(`${BASE_URL}/v1/checkouts/${encodeURIComponent(id)}`, {
-      headers: { 'X-API-Key': getApiKey() },
+      headers: { 'X-API-Key': merchantKey ?? getApiKey() },
+      signal: AbortSignal.timeout(15000),
     });
     const body = (await res.json().catch(() => ({}))) as ApiEnvelope<YeboPayCheckoutDto>;
     if (!res.ok || !body.success || !body.data) {

@@ -132,7 +132,7 @@ describe('ShopController.getNotificationSettings', () => {
 
 describe('notification/tax PATCH routes are owner-only (ownerAuth gate in shop.routes.ts)', () => {
   function bearerReq(token: string): any {
-    return { headers: { authorization: `Bearer ${token}` } };
+    return {originalUrl:'/api/test',method:'GET', headers: { authorization: `Bearer ${token}` } };
   }
 
   function signStaff(role: 'OWNER' | 'MANAGER' | 'CASHIER') {

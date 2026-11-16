@@ -38,6 +38,14 @@ function internalSecretAuth(req: Request, res: Response, next: NextFunction): vo
 }
 
 router.use(internalSecretAuth);
+router.post('/restaurant/run', async (_req, res) => {
+ try {
+  const {queueReports,runDeliveries}=await import('../restaurant/reports');
+  const {reconcileRestaurantPayments}=await import('../restaurant/worker');
+  const payments=await reconcileRestaurantPayments();await queueReports();
+  return ApiResponse.success(res,{payments,messages:await runDeliveries()});
+ } catch {return ApiResponse.serverError(res,'Restaurant processing failed. Check worker logs.');}
+});
 
 /**
  * POST /api/internal/billing/run — one subscription renewal pass.

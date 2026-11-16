@@ -44,12 +44,14 @@ type ModelName =
   | 'returnItem'
   | 'returnExchangeItem'
   | 'cashSession'
-  | 'shopSubscription';
+  | 'shopSubscription'
+  | 'businessWorkspace';
 
 // Composite/unique keys, mirroring the Prisma schema. Enforced only when every
 // part is non-null (Postgres treats NULLs as distinct, so multiple null localIds
 // are allowed — same as prod).
 const UNIQUE_KEYS: Record<ModelName, string[][]> = {
+  businessWorkspace:[['shopId']],
   shop: [['ownerYeboidSub'], ['ownerPhone']],
   product: [['shopId', 'barcode']],
   sale: [['shopId', 'localId'], ['shopId', 'receiptNumber']],
@@ -178,6 +180,7 @@ class FakeDb {
     returnExchangeItem: [],
     cashSession: [],
     shopSubscription: [],
+    businessWorkspace: [],
   };
   private idCounter = 0;
   // Promise chain that serializes interactive $transaction callbacks (see
@@ -524,6 +527,7 @@ export const prismaFake: any = {
   returnExchangeItem: model('returnExchangeItem'),
   cashSession: model('cashSession'),
   shopSubscription: model('shopSubscription'),
+  businessWorkspace: model('businessWorkspace'),
   $transaction: (arg: any) => db.transaction(arg),
   // health.service pings the database with `SELECT 1`. The fake has no SQL
   // engine, but an in-memory store is by definition reachable, so answering

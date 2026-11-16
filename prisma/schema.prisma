@@ -14,6 +14,8 @@ datasource db {
 
 model Shop {
   id             String            @id @default(cuid())
+  workspace      BusinessWorkspace?
+  restaurant     RestaurantProfile?
   subscription   ShopSubscription?
   name           String
   // Owner identity = YeboID. Required. Populated at signup from the validated
@@ -116,6 +118,7 @@ model User {
   canVoid        Boolean @default(false)
   canViewReports Boolean @default(false)
   canManageStock Boolean @default(false)
+  restaurantDuty String @default("COUNTER")
 
   // Session — last PIN login (analytics only).
   lastLoginAt DateTime?
@@ -280,6 +283,7 @@ model SaleItem {
   quantity    Int
   unitPrice   Float
   costPrice   Float // For profit calculation
+  costKnown   Boolean @default(true)
   discount    Float  @default(0)
   totalPrice  Float
 
@@ -1005,4 +1009,120 @@ model UsageCounter {
 
   @@unique([shopId, periodStart, action])
   @@index([shopId, periodStart])
+}
+
+
+model BusinessWorkspace {
+  shopId String @id
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  modules String[]
+  updatedAt DateTime @updatedAt
+}
+
+model RestaurantProfile {
+  shopId String @id
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  slug String @unique
+  description String
+  publicPhone String
+  published Boolean @default(false)
+  acceptingOrders Boolean @default(false)
+  hours Json
+  leadMinutes Int @default(20)
+  slotMinutes Int @default(15)
+  slotCapacity Int @default(10)
+  tables String[]
+  menuProductIds String[]
+  unavailableProductIds String[]
+  allowAssistant Boolean @default(false)
+  allowCash Boolean @default(true)
+  allowOnline Boolean @default(false)
+  paymentCredential String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tickets RestaurantTicket[]
+  imports RestaurantImport[]
+  reports RestaurantReportSubscription[]
+}
+
+model RestaurantImport {
+  id String @id @default(uuid())
+  shopId String
+  restaurant RestaurantProfile @relation(fields: [shopId], references: [shopId], onDelete: Cascade)
+  draft Json
+  confirmationHash String?
+  confirmedAt DateTime?
+  productIds String[]
+  createdAt DateTime @default(now())
+  @@index([shopId, createdAt])
+}
+
+model RestaurantTicket {
+  id String @id @default(uuid())
+  shopId String
+  restaurant RestaurantProfile @relation(fields: [shopId], references: [shopId], onDelete: Cascade)
+  requestKey String
+  requestHash String
+  accessHash String
+  customerName String
+  customerPhone String
+  notifyWhatsApp Boolean @default(false)
+  mode String
+  tableName String?
+  requestedFor DateTime
+  status String @default("NEW")
+  items Json
+  totalMinor Int
+  taxRate Float
+  taxInclusive Boolean
+  currency String
+  paymentMethod String
+  paymentStatus String @default("UNPAID")
+  checkoutState String @default("NONE")
+  checkoutId String? @unique
+  checkoutUrl String?
+  chargeId String? @unique
+  saleId String? @unique
+  failure String?
+  acceptedAt DateTime?
+  readyAt DateTime?
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deliveries RestaurantDelivery[]
+  @@unique([shopId, requestKey])
+  @@index([shopId, requestedFor, status])
+}
+
+model RestaurantReportSubscription {
+  id String @id @default(uuid())
+  shopId String
+  restaurant RestaurantProfile @relation(fields: [shopId], references: [shopId], onDelete: Cascade)
+  kind String
+  channel String
+  recipient String
+  localHour Int
+  enabled Boolean @default(true)
+  consentAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([shopId, kind, channel])
+}
+
+model RestaurantDelivery {
+  id String @id @default(uuid())
+  shopId String
+  ticketId String?
+  ticket RestaurantTicket? @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  key String @unique
+  channel String
+  recipient String
+  content String
+  meteredAction String @default("WHATSAPP")
+  status String @default("PENDING")
+  messageId String?
+  error String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([shopId, status])
 }

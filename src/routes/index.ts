@@ -20,7 +20,12 @@ import billingRoutes from '@routes/billing.routes';
 import internalRoutes from '@routes/internal.routes';
 import webhookRoutes from '@routes/webhooks.routes';
 
+import {workspaceRoutes,restaurantRoutes,publicRestaurantRoutes,publicOrderRoutes} from '../restaurant/routes';
 const router = Router();
+router.use('/workspace',workspaceRoutes);
+router.use('/restaurant',restaurantRoutes);
+router.use('/restaurants',publicRestaurantRoutes);
+router.use('/restaurant-orders',publicOrderRoutes);
 
 // Auth routes
 router.use('/auth', authRoutes);

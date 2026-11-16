@@ -479,7 +479,7 @@ describe('StockController.receive', () => {
 
 describe('stock write routes — managerAuth gates CASHIER off /stock/adjust and /stock/receive', () => {
   function bearerReq(token: string): any {
-    return { headers: { authorization: `Bearer ${token}` } };
+    return {originalUrl:'/api/test',method:'GET', headers: { authorization: `Bearer ${token}` } };
   }
 
   function signStaff(role: 'OWNER' | 'MANAGER' | 'CASHIER') {

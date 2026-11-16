@@ -15,7 +15,7 @@ function issue(overrides: Partial<ITokenPayload> = {}) {
   return JWTUtil.generateAccessToken({ id: 'staff', shopId: 'shop', role: 'MANAGER', type: 'user', ...overrides });
 }
 async function request(middleware: any, token?: string) {
-  const req: any = { headers: token ? { authorization: `Bearer ${token}` } : {} };
+  const req: any = { originalUrl:'/api/workspace',method:'GET', headers: token ? { authorization: `Bearer ${token}` } : {} };
   const res: any = { statusCode: 200, status(code: number) { this.statusCode = code; return this; },
     json(body: any) { this.body = body; return this; } };
   const next = vi.fn();
