@@ -22,7 +22,7 @@ beforeEach(() => {
 
 describe('AuthService.loginUser — PIN is hashed, never compared as plaintext', () => {
   it('signs in a staff member whose stored PIN is a bcrypt hash', async () => {
-    seedShop({ id: 'shop_1', name: 'Corner Shop' });
+    seedShop({ id: 'shop_1', name: 'Corner Shop', currency: 'SZL', timezone: 'Africa/Mbabane' });
     seedUser({
       id: 'u1',
       shopId: 'shop_1',
@@ -36,6 +36,8 @@ describe('AuthService.loginUser — PIN is hashed, never compared as plaintext',
 
     expect(result.user?.id).toBe('u1');
     expect(result.shop.id).toBe('shop_1');
+    expect(result.shop.currency).toBe('SZL');
+    expect(result.shop.timezone).toBe('Africa/Mbabane');
     expect(result.accessToken).toBeTruthy();
   });
 

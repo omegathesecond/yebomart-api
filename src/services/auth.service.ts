@@ -56,6 +56,8 @@ interface LoginResult {
     ownerName: string;
     businessType: string;
     assistantName: string;
+    currency: string;
+    timezone: string;
   };
   user?: {
     id: string;
@@ -64,6 +66,12 @@ interface LoginResult {
   };
   accessToken: string;
   refreshToken?: string;
+}
+
+function signInShop(shop: LoginResult['shop']): LoginResult['shop'] {
+  return { id: shop.id, name: shop.name, ownerName: shop.ownerName,
+    businessType: shop.businessType, assistantName: shop.assistantName,
+    currency: shop.currency, timezone: shop.timezone };
 }
 
 interface YeboIDSignInResult {
@@ -95,13 +103,7 @@ export class AuthService {
 
     if (existing) {
       return {
-        shop: {
-          id: existing.id,
-          name: existing.name,
-          ownerName: existing.ownerName,
-          businessType: existing.businessType,
-          assistantName: existing.assistantName,
-        },
+        shop: signInShop(existing),
         isNewShop: false,
       };
     }
@@ -145,13 +147,7 @@ export class AuthService {
     });
 
     return {
-      shop: {
-        id: shop.id,
-        name: shop.name,
-        ownerName: shop.ownerName,
-        businessType: shop.businessType,
-        assistantName: shop.assistantName,
-      },
+      shop: signInShop(shop),
       isNewShop: true,
     };
   }
@@ -294,13 +290,7 @@ export class AuthService {
     };
 
     return {
-      shop: {
-        id: user.shop.id,
-        name: user.shop.name,
-        ownerName: user.shop.ownerName,
-        businessType: user.shop.businessType,
-        assistantName: user.shop.assistantName,
-      },
+      shop: signInShop(user.shop),
       user: { id: user.id, name: user.name, role: user.role },
       accessToken: JWTUtil.generateAccessToken(payload),
     };
