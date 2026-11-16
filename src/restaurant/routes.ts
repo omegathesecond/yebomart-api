@@ -308,7 +308,9 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 6 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) =>
-    cb(null, ["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)),
+    ["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)
+      ? cb(null, true)
+      : cb(new RestaurantError(400, "Choose a JPG, PNG or WebP photo.")),
 }).single("photo");
 const parsePhoto = (req: AuthRequest, res: Response, next: NextFunction) =>
   upload(req, res, (e) =>
