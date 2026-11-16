@@ -4,13 +4,17 @@ This release adds opt-in restaurant work to the existing YeboMart workspace. The
 
 ## Customer and staff journey
 
-Save restaurant hours and preparation capacity, photograph one menu section, review every extracted item and uncertain price, and confirm the import. Imports reuse ProductService inside a transaction. Dishes are made to order (`trackStock=false`); existing counted products retain their stock rules. Costs left blank are explicitly unknown, including on sale snapshots and profit reports.
+Save restaurant hours and preparation capacity, photograph a meal or a printed menu section, review the proposed names and descriptions, enter meal prices or check extracted menu prices, and confirm the import. Imports reuse ProductService inside a transaction. Dishes are made to order (`trackStock=false`); existing counted products retain their stock rules. Costs left blank are explicitly unknown, including on sale snapshots and profit reports.
 
 Publish the included website at `https://app.yebomart.com/r/<slug>`. Generate a general or table-specific QR code in setup. Guests choose available items, a server-validated preparation slot, their contact details and an optional WhatsApp consent. They review the total before placing an idempotent order. Kitchen acceptance, preparation, ready and handover are separate steps. Cash is recorded only after a counter colleague enters the amount received. SaleService remains the stock/accounting writer, with frozen order prices and tax.
 
 Online card checkout uses an encrypted, restaurant-owned YeboPay key; the YeboMart software-billing key never receives restaurant takings. The checkout must match amount, currency and charge reference before marking paid. Ambiguous checkout creation is held for reconciliation and never blindly retried. Paid/ambiguous orders cannot be cancelled by pretending a refund occurred; resolve refunds through YeboPay before any operational correction. Automatic in-app refund orchestration is outside this release.
 
 Reports show recorded payments, open/unpaid orders, completed dishes, preparation time and reconciliation actions. Owners/managers can opt in to daily, Monday weekly and daily insight reports through WhatsApp or email. WhatsApp draws existing plan allowances; emails use the existing EMAIL credit price. Failed/uncertain sends remain visible in message history. Accepted means provider acceptance, not delivered. There is no SMS fallback. Public menu answers use only the approved live menu and produce editable suggestions, never autonomous orders or allergy guarantees.
+
+Meal photos become public product assets only through the merchant upload/import flow. Phone photos are resized to 1600px and stripped of metadata in the browser. A shared validated image adapter writes to `yebomart-public-photos-prod-hiyebo` using Application Default Credentials; only `yebomart-runtime@hiyebo.iam.gserviceaccount.com` receives object creation access to this bucket. Set `PUBLIC_PHOTO_BUCKET` additively on the production service. Existing private R2 assets are unchanged. No account-wide Cloudflare credential is bound to Mart.
+
+Guests may upload a reference meal picture or select an approved dish photo, and continue a bounded conversation about taste, budget and available options. Reference pictures are sent inline to YeboAI and never written to the public photo bucket or stored in restaurant records. A picture cannot establish exact ingredients, allergens or nutritional values. Suggestions require an explicit basket action and the existing order review.
 
 ## Connections and deployment
 
