@@ -412,6 +412,17 @@ restaurantRoutes.patch(
       "Menu item not found.",
       404,
     );
+    if (data.available) {
+      const item = await prisma.product.findFirst({
+        where: { id: req.params.id, shopId: p.shopId, isActive: true },
+        select: { trackStock: true, quantity: true },
+      });
+      assert(
+        item && (!item.trackStock || item.quantity > 0),
+        "Receive stock for this item before making it available. Made-to-order dishes do not need a stock count.",
+        409,
+      );
+    }
     await ProductService.update(req.params.id, p.shopId, {
       sellPrice: data.price,
     });

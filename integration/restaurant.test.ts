@@ -9,7 +9,15 @@ import { YeboPayClient } from "../src/services/yebopay.client";
 vi.mock("../src/services/shop.service", () => ({
   ShopService: { incrementUsage: vi.fn() },
 }));
-vi.mock('@yebo/mcp-server',()=>({JwksValidator:class {async verify(){throw new Error('Not a YeboID test token');}},extractBearerToken:(header?:string)=>header?.startsWith('Bearer ')?header.slice(7):null}));
+vi.mock("@yebo/mcp-server", () => ({
+  JwksValidator: class {
+    async verify() {
+      throw new Error("Not a YeboID test token");
+    }
+  },
+  extractBearerToken: (header?: string) =>
+    header?.startsWith("Bearer ") ? header.slice(7) : null,
+}));
 let shopId: string, productId: string, slug: string, at: string;
 const shops: string[] = [];
 beforeEach(async () => {
@@ -349,7 +357,8 @@ it("serves the actual setup and public order HTTP contracts, including a first m
         body: JSON.stringify(body),
       });
     const setup = await put(config);
-    const setupBody=await setup.json();expect(setup.status,JSON.stringify(setupBody)).toBe(200);
+    const setupBody = await setup.json();
+    expect(setup.status, JSON.stringify(setupBody)).toBe(200);
     expect(setupBody).toMatchObject({
       success: true,
       data: { slug, menuProductIds: [] },
@@ -377,6 +386,27 @@ it("serves the actual setup and public order HTTP contracts, including a first m
       body: JSON.stringify(input()),
     });
     expect(order.status).toBe(201);
+    await prisma.product.update({
+      where: { id: productId },
+      data: { trackStock: true, quantity: 0 },
+    });
+    const availability = await fetch(
+      base + "/api/restaurant/menu/" + productId,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ available: true, price: 40 }),
+      },
+    );
+    expect(availability.status).toBe(409);
+    expect(await availability.json()).toMatchObject({
+      success: false,
+      message: expect.stringContaining("Receive stock"),
+    });
+
     expect(await order.json()).toMatchObject({
       success: true,
       data: { totalMinor: 4600, status: "NEW", paymentStatus: "UNPAID" },
