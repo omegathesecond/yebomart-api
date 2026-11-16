@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { uploadImage } from '../controllers/upload.controller';
-import { authMiddleware as authenticateToken } from '../middleware/auth.middleware';
+import { managerAuth as authenticateToken } from '../middleware/auth.middleware';
 
 const router = Router();
 
@@ -13,7 +13,7 @@ const upload = multer({
   },
   fileFilter: (req, file, cb) => {
     // Accept images only
-    if (file.mimetype.startsWith('image/')) {
+    if (['image/jpeg','image/png','image/webp'].includes(file.mimetype)) {
       cb(null, true);
     } else {
       cb(new Error('Only image files are allowed'));

@@ -16,6 +16,10 @@ import {
 import { CREDIT_COSTS } from "@config/creditPacks";
 import { consumeAllowance } from "@services/entitlement.service";
 import { ReportService } from "@services/report.service";
+import {
+  photoStorageOrigin,
+  storeProductImage,
+} from "@services/image-storage.service";
 import { ProductService } from "@services/product.service";
 import { ApiResponse } from "@utils/ApiResponse";
 import * as service from "./service";
@@ -304,62 +308,97 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 6 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) =>
-    cb(null, ["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)),
+    ["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)
+      ? cb(null, true)
+      : cb(new RestaurantError(400, "Choose a JPG, PNG or WebP photo.")),
 }).single("photo");
-restaurantRoutes.post(
-  "/import",
-  managerAuth,
-  (req, res, next) =>
-    upload(req, res, (e) =>
-      e
-        ? handle(async () => {
-            throw e;
-          })(req, res, next)
-        : next(),
+const parsePhoto = (req: AuthRequest, res: Response, next: NextFunction) =>
+  upload(req, res, (e) =>
+    e
+      ? handle(async () => {
+          throw e;
+        })(req, res, next)
+      : next(),
+  );
+function registerPhotoImport(path: string, dish: boolean) {
+  restaurantRoutes.post(
+    path,
+    managerAuth,
+    parsePhoto,
+    requireEntitlement(
+      "AI_QUESTION",
+      CREDIT_COSTS.AI_QUESTION,
+      dish ? "Dish photo analysis" : "Menu photo import",
     ),
-  requireEntitlement(
-    "AI_QUESTION",
-    CREDIT_COSTS.AI_QUESTION,
-    "Menu photo import",
-  ),
+    handle(async (req, res) => {
+      const p = await service.profile(req.user!.shopId);
+      assert(
+        req.file,
+        "Choose one clear JPG, PNG or WebP menu photo, up to 6 MB.",
+      );
+      const result = await restaurantAI(dish ? "dish-photo" : "menu-photo", {
+        image: req.file.buffer.toString("base64"),
+        mime_type: req.file.mimetype,
+        currency: p.shop.currency,
+      });
+      const draft = read(
+        Joi.object({
+          items: Joi.array()
+            .items(
+              Joi.object({
+                name: text(120).required(),
+                price: Joi.number().min(0).max(1000000).allow(null).required(),
+                category: text(80).allow("").required(),
+                description: text(1000).allow("").required(),
+                source: text(1000).required(),
+                issues: Joi.array().items(text(500)).max(10).required(),
+              }),
+            )
+            .min(1)
+            .max(100)
+            .required(),
+          warnings: Joi.array().items(text(1000)).max(20).required(),
+          model: Joi.string(),
+          usage: Joi.any(),
+        }),
+        { ...result.draft, model: result.model, usage: result.usage },
+      );
+      if (dish) {
+        assert(
+          draft.items.length === 1 && draft.items[0].price === null,
+          "The dish photo needs a new review. No price may be inferred from a meal photo.",
+          502,
+        );
+        draft.photo = await storeProductImage(req.file, p.shopId);
+        draft.kind = "DISH";
+      }
+      const saved = await prisma.restaurantImport.create({
+        data: { shopId: p.shopId, draft, productIds: [] },
+      });
+      await settlePendingCharge(req);
+      ApiResponse.success(res, saved);
+    }),
+  );
+}
+registerPhotoImport("/import", false);
+registerPhotoImport("/import/dish", true);
+restaurantRoutes.put(
+  "/menu/:id/photo",
+  managerAuth,
+  parsePhoto,
   handle(async (req, res) => {
     const p = await service.profile(req.user!.shopId);
     assert(
-      req.file,
-      "Choose one clear JPG, PNG or WebP menu photo, up to 6 MB.",
+      p.menuProductIds.includes(req.params.id),
+      "Menu item not found.",
+      404,
     );
-    const result = await restaurantAI("menu-photo", {
-      image: req.file.buffer.toString("base64"),
-      mime_type: req.file.mimetype,
-      currency: p.shop.currency,
+    assert(req.file, "Choose a clear JPG, PNG or WebP photo of this dish.");
+    const stored = await storeProductImage(req.file, p.shopId);
+    await ProductService.update(req.params.id, p.shopId, {
+      imageUrl: stored.url,
     });
-    const draft = read(
-      Joi.object({
-        items: Joi.array()
-          .items(
-            Joi.object({
-              name: text(120).required(),
-              price: Joi.number().min(0).max(1000000).allow(null).required(),
-              category: text(80).allow("").required(),
-              description: text(1000).allow("").required(),
-              source: text(1000).required(),
-              issues: Joi.array().items(text(500)).max(10).required(),
-            }),
-          )
-          .min(1)
-          .max(100)
-          .required(),
-        warnings: Joi.array().items(text(1000)).max(20).required(),
-        model: Joi.string(),
-        usage: Joi.any(),
-      }),
-      { ...result.draft, model: result.model, usage: result.usage },
-    );
-    const saved = await prisma.restaurantImport.create({
-      data: { shopId: p.shopId, draft, productIds: [] },
-    });
-    await settlePendingCharge(req);
-    ApiResponse.success(res, saved);
+    ApiResponse.success(res, stored);
   }),
 );
 restaurantRoutes.post(
@@ -699,12 +738,36 @@ publicRestaurantRoutes.post(
 publicRestaurantRoutes.post(
   "/:slug/ask",
   aiLimiter,
+  parsePhoto,
   handle(async (req, res) => {
+    let history = req.body.history;
+    if (typeof history === "string") {
+      try {
+        history = JSON.parse(history);
+      } catch {
+        throw new RestaurantError(
+          400,
+          "The conversation could not be read. Start a fresh chat.",
+        );
+      }
+    }
     const data = read(
-        Joi.object({ question: text(1000).min(3).required() }),
-        req.body,
-      ),
-      pub = await service.publicMenu(req.params.slug);
+      Joi.object({
+        question: text(1000).min(3).required(),
+        history: Joi.array()
+          .items(
+            Joi.object({
+              role: Joi.string().valid("user", "assistant").required(),
+              content: text(2000).min(1).required(),
+            }),
+          )
+          .max(8)
+          .default([]),
+        productId: identifier,
+      }),
+      { ...req.body, history },
+    );
+    const pub = await service.publicMenu(req.params.slug);
     assert(
       pub.allowAssistant,
       "The restaurant has not enabled its menu assistant.",
@@ -713,6 +776,41 @@ publicRestaurantRoutes.post(
     const p = await prisma.restaurantProfile.findUniqueOrThrow({
       where: { slug: req.params.slug },
     });
+    let image = req.file
+      ? {
+          image: req.file.buffer.toString("base64"),
+          mime_type: req.file.mimetype,
+        }
+      : {};
+    if (data.productId && !req.file) {
+      const item = pub.items.find((i) => i.id === data.productId);
+      assert(item?.imageUrl, "Choose a dish with a photo.");
+      const origin = photoStorageOrigin();
+      assert(
+        origin &&
+          item.imageUrl.startsWith(origin + "/products/" + p.shopId + "/"),
+        "This photo cannot be analysed yet. You can still ask about the dish by name.",
+        409,
+      );
+      const response = await fetch(item.imageUrl, {
+        signal: AbortSignal.timeout(10000),
+        redirect: "error",
+      });
+      assert(response.ok, "The dish photo could not load. Try again.", 502);
+      const mime = response.headers.get("Content-Type")?.split(";")[0];
+      assert(
+        mime && ["image/jpeg", "image/png", "image/webp"].includes(mime),
+        "The dish photo is not in a supported format.",
+        502,
+      );
+      const buffer = Buffer.from(await response.arrayBuffer());
+      assert(
+        buffer.length <= 6 * 1024 * 1024,
+        "The dish photo is too large to analyse.",
+        413,
+      );
+      image = { image: buffer.toString("base64"), mime_type: mime };
+    }
     assert(
       await consumeAllowance(p.shopId, "AI_QUESTION"),
       "The menu assistant has reached its allowance. Please contact the restaurant.",
@@ -720,9 +818,11 @@ publicRestaurantRoutes.post(
     );
     const result = await restaurantAI("menu-answer", {
       question: data.question,
+      history: data.history,
       restaurant: pub.name,
       currency: pub.currency,
       menu: pub.items,
+      ...image,
     });
     ApiResponse.success(res, result);
   }),

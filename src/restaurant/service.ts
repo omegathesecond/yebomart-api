@@ -575,6 +575,10 @@ export async function confirmImport(
             trackStock: false,
             category: item.category,
             description: item.description,
+            imageUrl:
+              (draft.draft as any)?.kind === "DISH"
+                ? (draft.draft as any).photo?.url
+                : undefined,
             attributes: {
               costStatus: item.cost === null ? "unknown" : "entered",
             },
