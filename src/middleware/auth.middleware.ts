@@ -17,6 +17,8 @@ import { ApiResponse } from '@utils/ApiResponse';
 import { UserRole, AdminRole } from '@prisma/client';
 import { JwksValidator, extractBearerToken } from '@yebo/mcp-server';
 import { prisma } from '@config/prisma';
+import { enforceWorkspace } from '../restaurant/access';
+import { RestaurantError } from '../restaurant/domain';
 
 export interface AuthRequest extends Request {
   user?: IDecodedToken;
@@ -98,6 +100,7 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
         role: 'OWNER' as UserRole,
         type: 'shop',
       };
+      await enforceWorkspace(req,req.user);
       next();
       return;
     }
@@ -113,8 +116,10 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       return;
     }
     req.user = staff;
+    await enforceWorkspace(req,staff);
     next();
   } catch (error) {
+    if(error instanceof RestaurantError){ApiResponse.error(res,error.message,error.status);return;}
     ApiResponse.serverError(res, 'Authentication check failed');
   }
 };

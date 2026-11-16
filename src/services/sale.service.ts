@@ -1,11 +1,15 @@
-import { lockSale } from './return-entitlement';
-import { prisma } from '@config/prisma';
-import { Prisma, PaymentMethod, SaleStatus } from '@prisma/client';
-import { paginate, paginationMeta } from '@utils/pagination';
-import { computeTax } from '@utils/tax';
-import { ShopService } from './shop.service';
-import { CashSessionService } from './cashSession.service';
-import { applyCustomerCredit, lockCustomerCredit, creditBalanceChange } from './customerCredit.service';
+import { lockSale } from "./return-entitlement";
+import { prisma } from "@config/prisma";
+import { Prisma, PaymentMethod, SaleStatus } from "@prisma/client";
+import { paginate, paginationMeta } from "@utils/pagination";
+import { computeTax } from "@utils/tax";
+import { ShopService } from "./shop.service";
+import { CashSessionService } from "./cashSession.service";
+import {
+  applyCustomerCredit,
+  lockCustomerCredit,
+  creditBalanceChange,
+} from "./customerCredit.service";
 
 /**
  * Is `err` a Prisma unique-constraint violation (P2002) on a constraint that
@@ -17,21 +21,31 @@ import { applyCustomerCredit, lockCustomerCredit, creditBalanceChange } from './
  * both of which contain the field name, so a substring check is robust to either.
  */
 function isUniqueViolationOn(err: unknown, field: string): boolean {
-  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+  if (
+    !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+    err.code !== "P2002"
+  ) {
     return false;
   }
   const target = (err.meta as { target?: unknown } | undefined)?.target;
-  if (Array.isArray(target)) return target.some((t) => String(t).includes(field));
-  return String(target ?? '').includes(field);
+  if (Array.isArray(target))
+    return target.some((t) => String(t).includes(field));
+  return String(target ?? "").includes(field);
 }
 
 export class SaleDiscountError extends Error {}
 export class SaleDiscountPermissionError extends Error {}
 
 /** Validate against authoritative values without rounding away an excess. */
-function validateDiscount(discount: number, maximum: Prisma.Decimal, label: string): void {
+function validateDiscount(
+  discount: number,
+  maximum: Prisma.Decimal,
+  label: string,
+): void {
   if (!Number.isFinite(discount) || discount < 0) {
-    throw new SaleDiscountError(`${label} must be a finite, non-negative amount`);
+    throw new SaleDiscountError(
+      `${label} must be a finite, non-negative amount`,
+    );
   }
   if (maximum.lessThan(discount)) {
     throw new SaleDiscountError(`${label} cannot exceed ${maximum.toString()}`);
@@ -45,6 +59,11 @@ interface SaleItemInput {
 }
 
 interface CreateSaleInput {
+  quote?: {
+    prices: Record<string, number>;
+    taxRate: number;
+    taxInclusive: boolean;
+  };
   shopId: string;
   userId?: string;
   customerId?: string | null;
@@ -89,20 +108,32 @@ export class SaleService {
     // A missing userId denotes the authenticated shop owner (the controller
     // derives it from auth, never from the request body). Staff permissions and
     // roles must be current: a login token can outlive a permission change.
-    if ((input.discount ?? 0) !== 0 || input.items.some(item => (item.discount ?? 0) !== 0)) {
+    if (
+      (input.discount ?? 0) !== 0 ||
+      input.items.some((item) => (item.discount ?? 0) !== 0)
+    ) {
       if (input.userId) {
         const staff = await prisma.user.findFirst({
           where: { id: input.userId, shopId: input.shopId, isActive: true },
           select: { role: true, canDiscount: true },
         });
-        if (!staff || !(staff.role === 'OWNER' || staff.role === 'MANAGER' || staff.canDiscount)) {
-          throw new SaleDiscountPermissionError('You do not have permission to apply discounts');
+        if (
+          !staff ||
+          !(
+            staff.role === "OWNER" ||
+            staff.role === "MANAGER" ||
+            staff.canDiscount
+          )
+        ) {
+          throw new SaleDiscountPermissionError(
+            "You do not have permission to apply discounts",
+          );
         }
       }
     }
 
     // Get all products
-    const productIds = input.items.map(item => item.productId);
+    const productIds = input.items.map((item) => item.productId);
     const products = await prisma.product.findMany({
       where: {
         id: { in: productIds },
@@ -112,11 +143,24 @@ export class SaleService {
     });
 
     if (products.length !== productIds.length) {
-      throw new Error('One or more products not found');
+      throw new Error("One or more products not found");
     }
 
-    const productMap = new Map(products.map(p => [p.id, p]));
+    const productMap = new Map(products.map((p) => [p.id, p]));
 
+    if (input.quote) {
+      if (
+        !Number.isFinite(input.quote.taxRate) ||
+        input.quote.taxRate < 0 ||
+        input.quote.taxRate > 100 ||
+        productIds.some(
+          (id) =>
+            !Number.isFinite(input.quote!.prices[id]) ||
+            input.quote!.prices[id] < 0,
+        )
+      )
+        throw new Error("Invalid stored restaurant quote");
+    }
     // Calculate totals
     let subtotalValue = new Prisma.Decimal(0);
     const saleItems: Prisma.SaleItemCreateWithoutSaleInput[] = [];
@@ -131,8 +175,14 @@ export class SaleService {
       // inside the $transaction below.
 
       const itemDiscount = item.discount ?? 0;
-      const extendedPrice = new Prisma.Decimal(product.sellPrice).times(item.quantity);
-      validateDiscount(itemDiscount, extendedPrice, `Line discount for ${product.name}`);
+      const extendedPrice = new Prisma.Decimal(
+        input.quote ? input.quote.prices[product.id] : product.sellPrice,
+      ).times(item.quantity);
+      validateDiscount(
+        itemDiscount,
+        extendedPrice,
+        `Line discount for ${product.name}`,
+      );
       const itemTotal = extendedPrice.minus(itemDiscount);
 
       subtotalValue = subtotalValue.plus(itemTotal);
@@ -141,15 +191,20 @@ export class SaleService {
         product: { connect: { id: item.productId } },
         productName: product.name,
         quantity: item.quantity,
-        unitPrice: product.sellPrice,
+        unitPrice: input.quote
+          ? input.quote.prices[product.id]
+          : product.sellPrice,
         costPrice: product.costPrice,
+        costKnown:
+          (product.attributes as Record<string, unknown> | null)?.costStatus !==
+          "unknown",
         discount: itemDiscount,
         totalPrice: itemTotal.toNumber(),
       });
     }
 
     const discount = input.discount ?? 0;
-    validateDiscount(discount, subtotalValue, 'Cart discount');
+    validateDiscount(discount, subtotalValue, "Cart discount");
     const subtotal = subtotalValue.toNumber();
 
     // VAT. The shop's tax config is authoritative — the client computes the
@@ -163,31 +218,33 @@ export class SaleService {
       select: { taxRate: true, taxInclusive: true, currencySymbol: true },
     });
     if (!shop) {
-      throw new Error('Shop not found');
+      throw new Error("Shop not found");
     }
     const { tax, total: totalAmount } = computeTax(subtotal, discount, {
-      taxRate: shop.taxRate,
-      taxInclusive: shop.taxInclusive,
+      taxRate: input.quote?.taxRate ?? shop.taxRate,
+      taxInclusive: input.quote?.taxInclusive ?? shop.taxInclusive,
     });
     // CREDIT ("on the book" / pay-later) sales: nothing is tendered now, so the
     // amountPaid >= total guard is intentionally skipped and amountPaid/change
     // are forced to 0 regardless of what the client sent. The full total is
     // instead added to the customer's running balance via a CustomerCredit
     // PURCHASE entry written inside the transaction below.
-    const isCredit = input.paymentMethod === 'CREDIT';
+    const isCredit = input.paymentMethod === "CREDIT";
 
     // A pay-later sale has to land on someone's book. Reject up front (the Joi
     // schema also enforces this) rather than silently posting an unattributable
     // credit sale.
     if (isCredit && !input.customerId) {
-      throw new Error('A customer is required for credit (pay-later) sales');
+      throw new Error("A customer is required for credit (pay-later) sales");
     }
 
     const amountPaid = isCredit ? 0 : input.amountPaid;
     const change = isCredit ? 0 : amountPaid - totalAmount;
 
     if (change < 0) {
-      throw new Error(`Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`);
+      throw new Error(
+        `Insufficient payment. Required: ${totalAmount}, Received: ${input.amountPaid}`,
+      );
     }
 
     // Create sale and decrement stock in a transaction.
@@ -208,19 +265,21 @@ export class SaleService {
           // Take the till lock before product writes, matching cash refunds.
           // No open till (including a close that won the lock) means an
           // explicitly unassigned sale; opening a till is not mandatory.
-          const cashSessionId = input.paymentMethod === 'CASH'
-            ? await CashSessionService.lockOpenSessionId(tx, input.shopId)
-            : null;
+          const cashSessionId =
+            input.paymentMethod === "CASH"
+              ? await CashSessionService.lockOpenSessionId(tx, input.shopId)
+              : null;
           // Lock before stock/sale writes: customer foreign-key KEY SHARE locks
           // must not be upgraded concurrently to FOR UPDATE later in the sale.
           if (isCredit) {
             await lockCustomerCredit(tx, {
-              customerId: input.customerId!, shopId: input.shopId,
+              customerId: input.customerId!,
+              shopId: input.shopId,
             });
           }
           // Generate receipt number (e.g., RCP-240212-0001)
           const today = new Date();
-          const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
+          const dateStr = today.toISOString().slice(2, 10).replace(/-/g, ""); // YYMMDD
 
           // Get count of sales today for this shop
           const startOfDay = new Date(today);
@@ -238,7 +297,9 @@ export class SaleService {
             },
           });
 
-          const receiptNumber = `RCP-${dateStr}-${String(todaySalesCount + 1).padStart(4, '0')}`;
+          const receiptNumber = `RCP-${dateStr}-${String(
+            todaySalesCount + 1,
+          ).padStart(4, "0")}`;
 
           // Validate customer ownership for every payment method before any write.
           if (input.customerId != null) {
@@ -246,7 +307,7 @@ export class SaleService {
               where: { id: input.customerId, shopId: input.shopId },
               select: { id: true },
             });
-            if (!customer) throw new Error('Customer not found');
+            if (!customer) throw new Error("Customer not found");
           }
 
           // Decrement stock FIRST with an atomic, guarded write so an oversell
@@ -281,7 +342,9 @@ export class SaleService {
                 select: { quantity: true },
               });
               throw new Error(
-                `Insufficient stock for ${product.name}. Available: ${live?.quantity ?? 0}`
+                `Insufficient stock for ${product.name}. Available: ${
+                  live?.quantity ?? 0
+                }`,
               );
             }
 
@@ -296,12 +359,12 @@ export class SaleService {
               shopId: input.shopId,
               productId: item.productId,
               userId: input.userId,
-              type: 'SALE',
+              type: "SALE",
               quantity: -item.quantity,
               previousQty: newQty + item.quantity,
               newQty,
               // reference (sale.id) is filled in after the sale is created.
-              reference: '',
+              reference: "",
             });
           }
 
@@ -320,7 +383,7 @@ export class SaleService {
               paymentMethod: input.paymentMethod,
               amountPaid,
               change,
-              status: 'COMPLETED',
+              status: "COMPLETED",
               localId: input.localId,
               offlineAt: input.offlineAt,
               syncedAt: new Date(),
@@ -345,11 +408,19 @@ export class SaleService {
           // down inventory exactly like a paid one.
           let customerBalance: number | undefined;
           if (isCredit) {
-            const credit = await applyCustomerCredit(tx, {
-              shopId: input.shopId, customerId: input.customerId!, type: 'PURCHASE',
-              amount: totalAmount, saleId: sale.id, userId: input.userId,
-              note: `Credit sale ${sale.receiptNumber}`,
-            }, { currencySymbol: shop.currencySymbol });
+            const credit = await applyCustomerCredit(
+              tx,
+              {
+                shopId: input.shopId,
+                customerId: input.customerId!,
+                type: "PURCHASE",
+                amount: totalAmount,
+                saleId: sale.id,
+                userId: input.userId,
+                note: `Credit sale ${sale.receiptNumber}`,
+              },
+              { currencySymbol: shop.currencySymbol },
+            );
             customerBalance = credit.newBalance;
           }
 
@@ -362,7 +433,7 @@ export class SaleService {
         // Race-proof idempotency backstop: two in-flight replays of the same
         // localId — the loser hits the @@unique([shopId, localId]) constraint.
         // Return the winner's committed sale instead of surfacing a 500.
-        if (input.localId && isUniqueViolationOn(err, 'localId')) {
+        if (input.localId && isUniqueViolationOn(err, "localId")) {
           const existing = await prisma.sale.findFirst({
             where: { shopId: input.shopId, localId: input.localId },
             include: { items: true },
@@ -374,7 +445,10 @@ export class SaleService {
         // receiptNumber]) constraint fired. Retry the whole transaction — the
         // recomputed count now includes the winner, so we advance to the next
         // number. Bounded so a genuine, persistent fault can't spin forever.
-        if (isUniqueViolationOn(err, 'receiptNumber') && attempt < MAX_RECEIPT_RETRIES) {
+        if (
+          isUniqueViolationOn(err, "receiptNumber") &&
+          attempt < MAX_RECEIPT_RETRIES
+        ) {
           continue;
         }
 
@@ -383,7 +457,7 @@ export class SaleService {
     }
 
     // Increment usage counter
-    await ShopService.incrementUsage(input.shopId, 'transaction');
+    await ShopService.incrementUsage(input.shopId, "transaction");
 
     return sale;
   }
@@ -425,7 +499,7 @@ export class SaleService {
         where,
         skip,
         take,
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         include: {
           items: {
             select: {
@@ -474,7 +548,7 @@ export class SaleService {
     });
 
     if (!sale) {
-      throw new Error('Sale not found');
+      throw new Error("Sale not found");
     }
 
     return sale;
@@ -490,7 +564,7 @@ export class SaleService {
         shopId,
         receiptNumber: {
           contains: receiptNumber.toUpperCase(),
-          mode: 'insensitive',
+          mode: "insensitive",
         },
       },
       include: {
@@ -508,7 +582,7 @@ export class SaleService {
     });
 
     if (!sale) {
-      throw new Error('Sale not found with receipt number: ' + receiptNumber);
+      throw new Error("Sale not found with receipt number: " + receiptNumber);
     }
 
     return sale;
@@ -517,7 +591,12 @@ export class SaleService {
   /**
    * Void a sale
    */
-  static async voidSale(saleId: string, shopId: string, userId: string | undefined, reason: string) {
+  static async voidSale(
+    saleId: string,
+    shopId: string,
+    userId: string | undefined,
+    reason: string,
+  ) {
     const updatedSale = await prisma.$transaction(async (tx) => {
       // Drawer membership/payment method are immutable. Read them before taking
       // locks so all cash writers follow till -> sale -> product ordering.
@@ -525,24 +604,29 @@ export class SaleService {
         where: { id: saleId, shopId },
         select: { paymentMethod: true, cashSessionId: true },
       });
-      if (!membership) throw new Error('Sale not found');
-      if (membership.paymentMethod === 'CASH' && membership.cashSessionId) {
-        await CashSessionService.lockOpenSessionId(tx, shopId, membership.cashSessionId);
+      if (!membership) throw new Error("Sale not found");
+      if (membership.paymentMethod === "CASH" && membership.cashSessionId) {
+        await CashSessionService.lockOpenSessionId(
+          tx,
+          shopId,
+          membership.cashSessionId,
+        );
       }
       await lockSale(tx, saleId);
       // Compare-and-set takes the sale row lock before any financial/stock writes.
       // A concurrent void waits, then fails this predicate after the winner commits.
       const claimed = await tx.sale.updateMany({
-        where: { id: saleId, shopId, status: 'COMPLETED' },
-        data: { status: 'VOIDED', voidReason: reason },
+        where: { id: saleId, shopId, status: "COMPLETED" },
+        data: { status: "VOIDED", voidReason: reason },
       });
-      if (claimed.count !== 1) throw new Error('Sale not found or already voided');
+      if (claimed.count !== 1)
+        throw new Error("Sale not found or already voided");
 
       const sale = await tx.sale.findFirst({
         where: { id: saleId, shopId },
         include: { items: true },
       });
-      if (!sale) throw new Error('Sale not found');
+      if (!sale) throw new Error("Sale not found");
 
       const returns = await tx.return.findMany({
         where: { saleId, shopId },
@@ -550,40 +634,70 @@ export class SaleService {
       });
       // Status alone is insufficient: a completed return can later be rejected.
       // Retain the processing/restocking evidence when deciding eligibility.
-      if (returns.some((entry) => entry.status !== 'REJECTED' ||
-        entry.processedAt != null || entry.items.some((item) => item.restocked))) {
-        throw new Error('Cannot void a sale with an active or previously processed return');
+      if (
+        returns.some(
+          (entry) =>
+            entry.status !== "REJECTED" ||
+            entry.processedAt != null ||
+            entry.items.some((item) => item.restocked),
+        )
+      ) {
+        throw new Error(
+          "Cannot void a sale with an active or previously processed return",
+        );
       }
 
-      if (sale.paymentMethod === 'CREDIT') {
-        const entries = await tx.customerCredit.findMany({ where: { saleId, shopId } });
-        const purchases = entries.filter((entry) => entry.type === 'PURCHASE');
+      if (sale.paymentMethod === "CREDIT") {
+        const entries = await tx.customerCredit.findMany({
+          where: { saleId, shopId },
+        });
+        const purchases = entries.filter((entry) => entry.type === "PURCHASE");
         // Never guess debt from the sale total or erase repayments. Reverse only
         // the actual booked purchase, and reject ambiguous/corrected history.
-        if (purchases.length !== 1 || entries.some((entry) =>
-          entry.type === 'REFUND' || entry.type === 'ADJUSTMENT')) {
-          throw new Error('Cannot void credit sale with missing or incompatible credit history');
+        if (
+          purchases.length !== 1 ||
+          entries.some(
+            (entry) => entry.type === "REFUND" || entry.type === "ADJUSTMENT",
+          )
+        ) {
+          throw new Error(
+            "Cannot void credit sale with missing or incompatible credit history",
+          );
         }
         const purchase = purchases[0];
-        if (purchase.customerId !== sale.customerId || !Number.isFinite(purchase.amount) || purchase.amount <= 0) {
-          throw new Error('Cannot void credit sale with invalid booked debt');
+        if (
+          purchase.customerId !== sale.customerId ||
+          !Number.isFinite(purchase.amount) ||
+          purchase.amount <= 0
+        ) {
+          throw new Error("Cannot void credit sale with invalid booked debt");
         }
-        const amount = -creditBalanceChange('PURCHASE', purchase.amount);
+        const amount = -creditBalanceChange("PURCHASE", purchase.amount);
         await tx.customerCredit.create({
           data: {
-            shopId, customerId: purchase.customerId, saleId, userId,
-            type: 'ADJUSTMENT', amount,
-            note: `Void credit sale ${sale.receiptNumber || saleId}; reversal of ${purchase.id}: ${reason}`,
+            shopId,
+            customerId: purchase.customerId,
+            saleId,
+            userId,
+            type: "ADJUSTMENT",
+            amount,
+            note: `Void credit sale ${
+              sale.receiptNumber || saleId
+            }; reversal of ${purchase.id}: ${reason}`,
           },
         });
         await tx.customer.update({
           where: { id: purchase.customerId },
-          data: { balance: { increment: creditBalanceChange('ADJUSTMENT', amount) } },
+          data: {
+            balance: { increment: creditBalanceChange("ADJUSTMENT", amount) },
+          },
         });
       }
 
       for (const item of sale.items) {
-        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        const product = await tx.product.findUnique({
+          where: { id: item.productId },
+        });
         if (product?.trackStock) {
           const restored = await tx.product.update({
             where: { id: item.productId },
@@ -591,11 +705,15 @@ export class SaleService {
           });
           await tx.stockLog.create({
             data: {
-              shopId, productId: item.productId, userId, type: 'RETURN',
+              shopId,
+              productId: item.productId,
+              userId,
+              type: "RETURN",
               quantity: item.quantity,
               previousQty: restored.quantity - item.quantity,
               newQty: restored.quantity,
-              reference: saleId, note: `Voided: ${reason}`,
+              reference: saleId,
+              note: `Voided: ${reason}`,
             },
           });
         }
@@ -611,7 +729,11 @@ export class SaleService {
    */
   static async getDailySummary(shopId: string, date?: Date) {
     const targetDate = date || new Date();
-    const startOfDay = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+    const startOfDay = new Date(
+      targetDate.getFullYear(),
+      targetDate.getMonth(),
+      targetDate.getDate(),
+    );
     const endOfDay = new Date(startOfDay);
     endOfDay.setDate(endOfDay.getDate() + 1);
 
@@ -620,7 +742,7 @@ export class SaleService {
       prisma.sale.aggregate({
         where: {
           shopId,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           createdAt: { gte: startOfDay, lt: endOfDay },
         },
         _sum: { totalAmount: true, discount: true },
@@ -630,10 +752,10 @@ export class SaleService {
 
       // Sales by payment method
       prisma.sale.groupBy({
-        by: ['paymentMethod'],
+        by: ["paymentMethod"],
         where: {
           shopId,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           createdAt: { gte: startOfDay, lt: endOfDay },
         },
         _sum: { totalAmount: true },
@@ -642,16 +764,16 @@ export class SaleService {
 
       // Top products
       prisma.saleItem.groupBy({
-        by: ['productId', 'productName'],
+        by: ["productId", "productName"],
         where: {
           sale: {
             shopId,
-            status: 'COMPLETED',
+            status: "COMPLETED",
             createdAt: { gte: startOfDay, lt: endOfDay },
           },
         },
         _sum: { quantity: true, totalPrice: true },
-        orderBy: { _sum: { quantity: 'desc' } },
+        orderBy: { _sum: { quantity: "desc" } },
         take: 10,
       }),
     ]);
@@ -661,7 +783,7 @@ export class SaleService {
       where: {
         sale: {
           shopId,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           createdAt: { gte: startOfDay, lt: endOfDay },
         },
       },
@@ -683,12 +805,12 @@ export class SaleService {
       totalDiscount: sales._sum.discount || 0,
       totalCost,
       grossProfit: totalRevenue - totalCost,
-      byPaymentMethod: salesByMethod.map(m => ({
+      byPaymentMethod: salesByMethod.map((m) => ({
         method: m.paymentMethod,
         total: m._sum.totalAmount || 0,
         count: m._count,
       })),
-      topProducts: topProducts.map(p => ({
+      topProducts: topProducts.map((p) => ({
         id: p.productId,
         name: p.productName,
         quantity: p._sum.quantity || 0,

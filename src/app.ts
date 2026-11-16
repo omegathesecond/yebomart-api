@@ -47,7 +47,7 @@ app.use(
       }
     },
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Order-Token'],
     exposedHeaders: ['X-Total-Count'],
   })
 );

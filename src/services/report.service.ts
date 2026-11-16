@@ -1,6 +1,6 @@
-import { prisma } from '@config/prisma';
-import { account, totals, Movement } from './report-accounting';
-import { round2 } from '@utils/tax';
+import { prisma } from "@config/prisma";
+import { account, totals, Movement } from "./report-accounting";
+import { round2 } from "@utils/tax";
 
 interface DateRange {
   startDate: Date;
@@ -9,8 +9,16 @@ interface DateRange {
 
 export class ReportService {
   private static bounds(range: DateRange) {
-    const start = new Date(range.startDate.getFullYear(), range.startDate.getMonth(), range.startDate.getDate());
-    const end = new Date(range.endDate.getFullYear(), range.endDate.getMonth(), range.endDate.getDate() + 1);
+    const start = new Date(
+      range.startDate.getFullYear(),
+      range.startDate.getMonth(),
+      range.startDate.getDate(),
+    );
+    const end = new Date(
+      range.endDate.getFullYear(),
+      range.endDate.getMonth(),
+      range.endDate.getDate() + 1,
+    );
     return { start, end };
   }
 
@@ -20,7 +28,7 @@ export class ReportService {
       prisma.sale.findMany({
         where: {
           shopId,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           createdAt: { gte: start, lt: end },
         },
         include: { items: true },
@@ -29,13 +37,15 @@ export class ReportService {
       prisma.return.findMany({
         where: {
           shopId,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           processedAt: { gte: start, lt: end },
         },
         include: { items: true, exchangeItems: true },
       }),
     ]);
-    const ids = [...new Set(returns.flatMap((r) => (r.saleId ? [r.saleId] : [])))];
+    const ids = [
+      ...new Set(returns.flatMap((r) => (r.saleId ? [r.saleId] : []))),
+    ];
     const [originals, earlierReturns] = ids.length
       ? await Promise.all([
           prisma.sale.findMany({
@@ -48,15 +58,32 @@ export class ReportService {
             where: {
               shopId,
               saleId: { in: ids },
-              status: 'COMPLETED',
+              status: "COMPLETED",
               processedAt: { lt: start, not: null },
             },
             include: { items: true, exchangeItems: true },
           }),
         ])
       : [[], []];
-    const journal = account(sales, [...earlierReturns, ...returns], originals, start);
-    return { ...journal, sales, start, end };
+    const journal = account(
+      sales,
+      [...earlierReturns, ...returns],
+      originals,
+      start,
+    );
+    return {
+      ...journal,
+      evidence: {
+        ...journal.evidence,
+        unknownCostCount: [...sales, ...originals].reduce(
+          (n, s) => n + s.items.filter((i) => i.costKnown === false).length,
+          0,
+        ),
+      },
+      sales,
+      start,
+      end,
+    };
   }
 
   private static products(rows: Movement[]) {
@@ -70,7 +97,9 @@ export class ReportService {
     return [...groups.values()]
       .map((items) => {
         const s = totals(items);
-        const sales = items.filter((i) => i.quantity > 0 && i.exchangeSales === 0);
+        const sales = items.filter(
+          (i) => i.quantity > 0 && i.exchangeSales === 0,
+        );
         return {
           id: items[0].productId,
           name: items[0].name,
@@ -80,7 +109,9 @@ export class ReportService {
           cost: s.totalCost,
           profit: s.grossProfit,
           margin: s.netRevenue > 0 ? (s.grossProfit / s.netRevenue) * 100 : 0,
-          averagePrice: sales.length ? sales.reduce((n, i) => n + i.unitPrice, 0) / sales.length : 0,
+          averagePrice: sales.length
+            ? sales.reduce((n, i) => n + i.unitPrice, 0) / sales.length
+            : 0,
         };
       })
       .sort((a, b) => b.revenue - a.revenue);
@@ -109,7 +140,8 @@ export class ReportService {
     const totalExpenses = expenses._sum.amount || 0;
     const paymentBreakdown = { cash: 0, momo: 0, emali: 0, card: 0 };
     for (const sale of journal.sales) {
-      const key = sale.paymentMethod.toLowerCase() as keyof typeof paymentBreakdown;
+      const key =
+        sale.paymentMethod.toLowerCase() as keyof typeof paymentBreakdown;
       if (key in paymentBreakdown) paymentBreakdown[key] += sale.totalAmount;
     }
     // These are original sale tenders, not net cash flows. Refund settlements
@@ -117,9 +149,14 @@ export class ReportService {
     const summary = {
       ...s,
       ...journal.evidence,
-      profitComplete: journal.evidence.receiptlessCount === 0 && journal.evidence.unvaluedExchangeCount === 0,
+      profitComplete:
+        journal.evidence.receiptlessCount === 0 &&
+        journal.evidence.unvaluedExchangeCount === 0 &&
+        journal.evidence.unknownCostCount === 0,
       totalTransactions: journal.sales.length,
-      averageBasket: journal.sales.length ? s.grossSales / journal.sales.length : 0,
+      averageBasket: journal.sales.length
+        ? s.grossSales / journal.sales.length
+        : 0,
       totalExpenses,
       netProfit: round2(s.grossProfit - totalExpenses),
     };
@@ -132,10 +169,17 @@ export class ReportService {
         .map((p) => ({ ...p, quantity: p.quantitySold })),
       stock: {
         totalProducts: stockProducts.length,
-        stockValue: stockProducts.reduce((n, p) => n + p.costPrice * p.quantity, 0),
-        lowStockCount: stockProducts.filter((p) => p.trackStock && p.quantity <= p.reorderAt).length,
+        stockValue: stockProducts.reduce(
+          (n, p) => n + p.costPrice * p.quantity,
+          0,
+        ),
+        lowStockCount: stockProducts.filter(
+          (p) => p.trackStock && p.quantity <= p.reorderAt,
+        ).length,
       },
-      lowStock: stockProducts.filter((p) => p.trackStock && p.quantity <= p.reorderAt),
+      lowStock: stockProducts.filter(
+        (p) => p.trackStock && p.quantity <= p.reorderAt,
+      ),
     };
   }
 
@@ -161,7 +205,9 @@ export class ReportService {
 
   static async getWeeklyReport(shopId: string, weekStart?: Date) {
     const now = new Date();
-    const start = weekStart || new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+    const start =
+      weekStart ||
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
     const last = new Date(start);
     last.setDate(last.getDate() + 6);
     const report = await this.getSalesReport(shopId, {
@@ -206,7 +252,8 @@ export class ReportService {
     const categoriesById = new Map(products.map((p) => [p.id, p.category]));
     const performance = rows.map((p) => ({
       ...p,
-      category: categoriesById.get(p.id) || 'Uncategorized',
+      profitComplete: journal.evidence.unknownCostCount === 0,
+      category: categoriesById.get(p.id) || "Uncategorized",
     }));
     const categories = new Map<string, { revenue: number; quantity: number }>();
     for (const p of performance) {
@@ -219,7 +266,9 @@ export class ReportService {
       range,
       products: performance,
       adjustments: journal.evidence,
-      categories: [...categories.entries()].map(([name, c]) => ({ name, ...c })).sort((a, b) => b.revenue - a.revenue),
+      categories: [...categories.entries()]
+        .map(([name, c]) => ({ name, ...c }))
+        .sort((a, b) => b.revenue - a.revenue),
     };
   }
 
@@ -230,10 +279,14 @@ export class ReportService {
       select: { id: true, name: true, role: true },
     });
     // Keep unattributed owner/deleted-staff activity visible so rows reconcile.
-    const ids = new Set([...journal.movements.map((r) => r.staffId), ...journal.sales.map((s) => s.userId)]);
+    const ids = new Set([
+      ...journal.movements.map((r) => r.staffId),
+      ...journal.sales.map((s) => s.userId),
+    ]);
     const staffUsers = [...users];
     for (const id of ids)
-      if (!users.some((u) => u.id === id)) staffUsers.push({ id: id || '', name: 'Unattributed', role: 'OWNER' });
+      if (!users.some((u) => u.id === id))
+        staffUsers.push({ id: id || "", name: "Unattributed", role: "OWNER" });
     const staff = await Promise.all(
       staffUsers.map(async (user) => {
         const id = user.id || null;
@@ -243,7 +296,7 @@ export class ReportService {
           where: {
             shopId,
             userId: id,
-            status: 'VOIDED',
+            status: "VOIDED",
             createdAt: { gte: journal.start, lt: journal.end },
           },
         });
@@ -251,7 +304,9 @@ export class ReportService {
           ...user,
           ...s,
           transactionCount: transactions.length,
-          averageTransaction: transactions.length ? s.grossSales / transactions.length : 0,
+          averageTransaction: transactions.length
+            ? s.grossSales / transactions.length
+            : 0,
           voidCount,
         };
       }),
@@ -268,7 +323,11 @@ export class ReportService {
    */
   static async generateDailyReport(shopId: string, date: Date) {
     const report = await this.getDailyReport(shopId, date);
-    const dateOnly = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const dateOnly = new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+    );
 
     // Upsert the daily report
     const dailyReport = await prisma.dailyReport.upsert({

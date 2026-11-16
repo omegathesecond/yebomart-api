@@ -19,8 +19,8 @@ export default defineConfig({
     include: ["integration/**/*.test.ts"],
     testTimeout: 15000,
     env: {
-      JWT_SECRET: "integration-only",
-      JWT_REFRESH_SECRET: "integration-only",
+      JWT_SECRET: "integration-only-restaurant-test-secret",
+      JWT_REFRESH_SECRET: "integration-only-restaurant-test-secret",
     },
   },
 });
